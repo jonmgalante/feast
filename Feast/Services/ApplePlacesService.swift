@@ -40,77 +40,73 @@ struct ApplePlaceSectionPathSuggestion: Hashable {
 }
 
 struct ApplePlacesService {
-    private let searchHandler: @Sendable (String) async throws -> [ApplePlaceMatch]
-    private let resolveHandler: @Sendable (String) async throws -> ApplePlaceMatch?
-    private let openInMapsHandler: @Sendable (String) async throws -> Bool
-
-    init(
-        searchHandler: @escaping @Sendable (String) async throws -> [ApplePlaceMatch],
-        resolveHandler: @escaping @Sendable (String) async throws -> ApplePlaceMatch?,
-        openInMapsHandler: @escaping @Sendable (String) async throws -> Bool
-    ) {
-        self.searchHandler = searchHandler
-        self.resolveHandler = resolveHandler
-        self.openInMapsHandler = openInMapsHandler
+    private enum Mode {
+        case live
+        case preview
     }
 
-    func searchPlaces(matching query: String) async throws -> [ApplePlaceMatch] {
-        try await searchHandler(query)
+    private let mode: Mode
+
+    init() {
+        self.mode = .live
     }
 
-    func resolvePlace(applePlaceID: String) async throws -> ApplePlaceMatch? {
-        try await resolveHandler(applePlaceID)
+    private init(mode: Mode) {
+        self.mode = mode
     }
 
-    func openInMaps(applePlaceID: String) async throws -> Bool {
-        try await openInMapsHandler(applePlaceID)
-    }
-}
-
-extension ApplePlacesService {
-    static let live = ApplePlacesService(
-        searchHandler: { query in
-            let request = MKLocalSearch.Request()
-            request.naturalLanguageQuery = query
+    @MainActor
+    func search(query: String) async throws -> [ApplePlaceMatch] {
+        switch mode {
+        case .live:
+            let request = MKLocalSearch.Request(naturalLanguageQuery: query)
             request.resultTypes = .pointOfInterest
 
-            let response = try await startSearch(request: request)
-            return response.mapItems.compactMap(makeMatch(from:))
-        },
-        resolveHandler: { applePlaceID in
-            guard let mapItem = try await resolvedMapItem(for: applePlaceID) else {
-                return nil
-            }
-            return makeMatch(from: mapItem)
-        },
-        openInMapsHandler: { applePlaceID in
-            guard let mapItem = try await resolvedMapItem(for: applePlaceID) else {
-                return false
-            }
-
-            return mapItem.openInMaps(launchOptions: nil)
-        }
-    )
-
-    static let preview = ApplePlacesService(
-        searchHandler: { query in
+            let response = try await Self.startSearch(request: request)
+            return response.mapItems.compactMap(Self.makeMatch(from:))
+        case .preview:
             let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else {
                 return []
             }
 
-            return previewMatches.filter { match in
+            return Self.previewMatches.filter { match in
                 match.displayName.localizedCaseInsensitiveContains(trimmed)
                     || match.secondaryText.localizedCaseInsensitiveContains(trimmed)
             }
-        },
-        resolveHandler: { applePlaceID in
-            previewMatches.first { $0.applePlaceID == applePlaceID }
-        },
-        openInMapsHandler: { _ in
-            false
         }
-    )
+    }
+
+    @MainActor
+    func resolve(placeID: String) async throws -> ApplePlaceMatch? {
+        switch mode {
+        case .live:
+            guard let mapItem = try await Self.resolvedMapItem(for: placeID) else {
+                return nil
+            }
+            return Self.makeMatch(from: mapItem)
+        case .preview:
+            return Self.previewMatches.first { $0.applePlaceID == placeID }
+        }
+    }
+
+    @MainActor
+    func openInMaps(placeID: String) async throws -> Bool {
+        switch mode {
+        case .live:
+            guard let mapItem = try await Self.resolvedMapItem(for: placeID) else {
+                return false
+            }
+
+            return mapItem.openInMaps(launchOptions: nil)
+        case .preview:
+            return false
+        }
+    }
+}
+
+extension ApplePlacesService {
+    static let preview = ApplePlacesService(mode: .preview)
 
     private static let previewMatches: [ApplePlaceMatch] = [
         ApplePlaceMatch(
@@ -165,7 +161,8 @@ extension ApplePlacesService {
         )
     ]
 
-    nonisolated private static func startSearch(request: MKLocalSearch.Request) async throws -> MKLocalSearch.Response {
+    @MainActor
+    private static func startSearch(request: MKLocalSearch.Request) async throws -> MKLocalSearch.Response {
         try await withCheckedThrowingContinuation { continuation in
             let search = MKLocalSearch(request: request)
             search.start { response, error in
@@ -178,7 +175,8 @@ extension ApplePlacesService {
         }
     }
 
-    nonisolated private static func mapItem(for request: MKMapItemRequest) async throws -> MKMapItem {
+    @MainActor
+    private static func mapItem(for request: MKMapItemRequest) async throws -> MKMapItem {
         try await withCheckedThrowingContinuation { continuation in
             request.getMapItem { mapItem, error in
                 if let mapItem {
@@ -190,7 +188,8 @@ extension ApplePlacesService {
         }
     }
 
-    nonisolated private static func resolvedMapItem(for applePlaceID: String) async throws -> MKMapItem? {
+    @MainActor
+    private static func resolvedMapItem(for applePlaceID: String) async throws -> MKMapItem? {
         guard let identifier = MKMapItem.Identifier(rawValue: applePlaceID) else {
             return nil
         }

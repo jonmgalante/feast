@@ -13,7 +13,7 @@ struct AppServices {
         return AppServices(
             persistenceController: persistenceController,
             repository: repository,
-            applePlacesService: .live
+            applePlacesService: ApplePlacesService()
         )
     }()
 

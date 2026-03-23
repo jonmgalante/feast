@@ -6,22 +6,10 @@ struct MapRootView: View {
     @Environment(\.managedObjectContext) private var viewContext
     @Environment(\.applePlacesService) private var applePlacesService
 
-    @FetchRequest(
-        sortDescriptors: [
-            NSSortDescriptor(key: "createdAt", ascending: true),
-            NSSortDescriptor(key: "name", ascending: true)
-        ],
-        animation: .default
-    )
+    @FetchRequest(fetchRequest: Self.feastListsFetchRequest, animation: .default)
     private var feastLists: FetchedResults<FeastList>
 
-    @FetchRequest(
-        sortDescriptors: [
-            NSSortDescriptor(key: "updatedAt", ascending: false),
-            NSSortDescriptor(key: "displayNameSnapshot", ascending: true)
-        ],
-        animation: .default
-    )
+    @FetchRequest(fetchRequest: Self.savedPlacesFetchRequest, animation: .default)
     private var savedPlaces: FetchedResults<SavedPlace>
 
     @SceneStorage("map.selectedFeastListURI") private var selectedFeastListURI = ""
@@ -31,6 +19,24 @@ struct MapRootView: View {
     @State private var isResolvingMarkers = false
     @State private var unresolvedPlaceCount = 0
     @State private var showingExploreSearch = false
+
+    private static let feastListsFetchRequest: NSFetchRequest<FeastList> = {
+        let request = FeastList.fetchRequest()
+        request.sortDescriptors = [
+            NSSortDescriptor(key: "createdAt", ascending: true),
+            NSSortDescriptor(key: "name", ascending: true)
+        ]
+        return request
+    }()
+
+    private static let savedPlacesFetchRequest: NSFetchRequest<SavedPlace> = {
+        let request = SavedPlace.fetchRequest()
+        request.sortDescriptors = [
+            NSSortDescriptor(key: "updatedAt", ascending: false),
+            NSSortDescriptor(key: "displayNameSnapshot", ascending: true)
+        ]
+        return request
+    }()
 
     var body: some View {
         content
@@ -244,7 +250,7 @@ struct MapRootView: View {
             }
 
             do {
-                if let resolvedPlace = try await applePlacesService.resolvePlace(applePlaceID: applePlaceID),
+                if let resolvedPlace = try await applePlacesService.resolve(placeID: applePlaceID),
                    let coordinate = resolvedPlace.coordinate {
                     resolvedMarkers.append(
                         SavedPlaceMapMarker(

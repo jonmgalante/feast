@@ -531,11 +531,11 @@ final class PersistenceController {
 }
 
 private struct PersistenceControllerKey: EnvironmentKey {
-    static let defaultValue = PersistenceController.preview
+    static let defaultValue: PersistenceController? = nil
 }
 
 extension EnvironmentValues {
-    var persistenceController: PersistenceController {
+    var persistenceController: PersistenceController? {
         get { self[PersistenceControllerKey.self] }
         set { self[PersistenceControllerKey.self] = newValue }
     }

@@ -232,7 +232,7 @@ struct SavedPlaceDetailView: View {
         }
 
         do {
-            resolvedPlace = try await applePlacesService.resolvePlace(applePlaceID: applePlaceID)
+            resolvedPlace = try await applePlacesService.resolve(placeID: applePlaceID)
         } catch {
             resolvedPlace = nil
         }
@@ -251,7 +251,7 @@ struct SavedPlaceDetailView: View {
         }
 
         do {
-            let didOpen = try await applePlacesService.openInMaps(applePlaceID: applePlaceID)
+            let didOpen = try await applePlacesService.openInMaps(placeID: applePlaceID)
             if !didOpen {
                 detailAlert = DetailAlertState(
                     title: "Apple Maps Unavailable",

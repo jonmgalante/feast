@@ -6,19 +6,10 @@ struct ListsRootView: View {
     @Environment(\.persistenceController) private var persistenceController
     @Environment(\.scenePhase) private var scenePhase
 
-    @FetchRequest(
-        sortDescriptors: [
-            NSSortDescriptor(key: "createdAt", ascending: true),
-            NSSortDescriptor(key: "name", ascending: true)
-        ],
-        animation: .default
-    )
+    @FetchRequest(fetchRequest: Self.feastListsFetchRequest, animation: .default)
     private var feastLists: FetchedResults<FeastList>
 
-    @FetchRequest(
-        sortDescriptors: [],
-        animation: .default
-    )
+    @FetchRequest(fetchRequest: Self.savedPlacesFetchRequest, animation: .default)
     private var savedPlaces: FetchedResults<SavedPlace>
 
     @State private var showingImportPlaceholder = false
@@ -31,6 +22,21 @@ struct ListsRootView: View {
     @State private var listSharingStates: [NSManagedObjectID: FeastListSharingState] = [:]
     @State private var listPreparingShareObjectID: NSManagedObjectID?
     @State private var alertState: ListsAlertState?
+
+    private static let feastListsFetchRequest: NSFetchRequest<FeastList> = {
+        let request = FeastList.fetchRequest()
+        request.sortDescriptors = [
+            NSSortDescriptor(key: "createdAt", ascending: true),
+            NSSortDescriptor(key: "name", ascending: true)
+        ]
+        return request
+    }()
+
+    private static let savedPlacesFetchRequest: NSFetchRequest<SavedPlace> = {
+        let request = SavedPlace.fetchRequest()
+        request.sortDescriptors = []
+        return request
+    }()
 
     var body: some View {
         content
@@ -66,7 +72,7 @@ struct ListsRootView: View {
             .sheet(item: $listSharingPresentation, onDismiss: refreshSharingStates) { preparedShare in
                 FeastListSharingSheet(
                     preparedShare: preparedShare,
-                    persistenceController: persistenceController,
+                    persistenceController: activePersistenceController,
                     onDidSaveShare: refreshSharingStates,
                     onDidStopSharing: refreshSharingStates,
                     onError: { error in
@@ -236,6 +242,14 @@ struct ListsRootView: View {
             context: viewContext,
             persistenceController: persistenceController
         )
+    }
+
+    private var activePersistenceController: PersistenceController {
+        guard let persistenceController else {
+            preconditionFailure("Missing persistence controller in ListsRootView.")
+        }
+
+        return persistenceController
     }
 
     private var feastListRefreshKey: String {
@@ -419,13 +433,13 @@ struct ListsRootView: View {
     }
 
     private func listSharingState(for feastList: FeastList) -> FeastListSharingState {
-        listSharingStates[feastList.objectID] ?? persistenceController.sharingState(for: feastList)
+        listSharingStates[feastList.objectID] ?? activePersistenceController.sharingState(for: feastList)
     }
 
     private func refreshSharingStates() {
         listSharingStates = Dictionary(
             uniqueKeysWithValues: feastLists.map { feastList in
-                (feastList.objectID, persistenceController.sharingState(for: feastList))
+                (feastList.objectID, activePersistenceController.sharingState(for: feastList))
             }
         )
     }
@@ -443,7 +457,7 @@ struct ListsRootView: View {
             }
 
             do {
-                let preparedShare = try await persistenceController.prepareShare(for: feastList)
+                let preparedShare = try await activePersistenceController.prepareShare(for: feastList)
                 listSharingStates[feastList.objectID] = .shared(role: .owner)
                 listSharingPresentation = preparedShare
             } catch {

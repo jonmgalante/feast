@@ -121,7 +121,7 @@ struct AddPlaceView: View {
 
         do {
             try await Task.sleep(nanoseconds: 300_000_000)
-            let matches = try await applePlacesService.searchPlaces(matching: trimmedQuery)
+            let matches = try await applePlacesService.search(query: trimmedQuery)
 
             if Task.isCancelled {
                 return
