@@ -42,16 +42,6 @@ struct MapRootView: View {
         content
             .navigationTitle("Map")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        showingExploreSearch = true
-                    } label: {
-                        Label("Search Apple Maps", systemImage: "magnifyingglass")
-                    }
-                    .disabled(selectedFeastList == nil)
-                }
-            }
             .task(id: markerResolutionKey) {
                 await resolveMarkers()
             }
@@ -92,12 +82,22 @@ struct MapRootView: View {
                     description: Text("Create a Feast list to start mapping saved places.")
                 )
             } else {
-                VStack(spacing: 0) {
-                    listSelectorHeader
-                    mapContent
-                }
+                mapScreen
                 .background(FeastTheme.Colors.appBackground)
             }
+        }
+    }
+
+    private var mapScreen: some View {
+        ZStack(alignment: .top) {
+            mapContent
+
+            VStack(spacing: 0) {
+                mapHeaderOverlay
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, FeastTheme.Spacing.large)
+            .padding(.top, FeastTheme.Spacing.small)
         }
     }
 
@@ -128,40 +128,61 @@ struct MapRootView: View {
         return ([listKey] + placeKeys).joined(separator: "|")
     }
 
-    private var listSelectorHeader: some View {
-        VStack(alignment: .leading, spacing: FeastTheme.Spacing.small) {
-            Text("Viewing")
-                .font(FeastTheme.Typography.caption.weight(.semibold))
-                .foregroundStyle(FeastTheme.Colors.secondaryNeutral)
+    private var mapHeaderOverlay: some View {
+        HStack(alignment: .top, spacing: FeastTheme.Spacing.medium) {
+            VStack(alignment: .leading, spacing: FeastTheme.Spacing.small) {
+                Text("Viewing")
+                    .font(FeastTheme.Typography.sectionLabel)
+                    .tracking(0.8)
+                    .foregroundStyle(FeastTheme.Colors.secondaryText)
 
-            Menu {
-                ForEach(feastLists) { feastList in
-                    Button(feastList.displayName) {
-                        selectedFeastListURI = uriString(for: feastList)
+                Menu {
+                    ForEach(feastLists) { feastList in
+                        Button(feastList.displayName) {
+                            selectedFeastListURI = uriString(for: feastList)
+                        }
                     }
-                }
-            } label: {
-                HStack(spacing: FeastTheme.Spacing.small) {
-                    Text(selectedFeastList?.displayName ?? "Select List")
-                        .font(FeastTheme.Typography.body.weight(.semibold))
-                        .foregroundStyle(FeastTheme.Colors.primaryText)
+                } label: {
+                    HStack(spacing: FeastTheme.Spacing.small) {
+                        Image(systemName: "mappin.circle.fill")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(FeastTheme.Colors.accentSelection)
 
-                    Spacer()
+                        Text(selectedFeastList?.displayName ?? "Select List")
+                            .font(FeastTheme.Typography.listTitle)
+                            .foregroundStyle(FeastTheme.Colors.primaryText)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.82)
 
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(FeastTheme.Typography.caption.weight(.semibold))
-                        .foregroundStyle(FeastTheme.Colors.secondaryNeutral)
+                        Image(systemName: "chevron.down")
+                            .font(FeastTheme.Typography.caption.weight(.semibold))
+                            .foregroundStyle(FeastTheme.Colors.secondaryText)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.vertical, FeastTheme.Spacing.xSmall)
+                .buttonStyle(.plain)
+
+                Text(listSummaryText)
+                    .font(FeastTheme.Typography.rowMetadata)
+                    .foregroundStyle(listSummaryColor)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
             }
 
-            Text(listSummaryText)
-                .font(FeastTheme.Typography.supporting)
-                .foregroundStyle(FeastTheme.Colors.secondaryNeutral)
+            Spacer(minLength: 0)
+
+            Button {
+                showingExploreSearch = true
+            } label: {
+                Label("Search", systemImage: "magnifyingglass")
+            }
+            .buttonStyle(FeastQuietChipButtonStyle())
+            .disabled(selectedFeastList == nil)
+            .accessibilityLabel("Search Apple Maps")
         }
-        .padding(FeastTheme.Spacing.large)
-        .background(FeastTheme.Colors.groupedSurface)
+        .padding(.horizontal, FeastTheme.Spacing.large)
+        .padding(.vertical, FeastTheme.Spacing.medium)
+        .feastMapOverlayCard(cornerRadius: FeastTheme.CornerRadius.medium)
     }
 
     private var mapContent: some View {
@@ -169,11 +190,38 @@ struct MapRootView: View {
             Map(position: $cameraPosition, selection: $selectedMarker) {
                 ForEach(markerItems) { marker in
                     Marker(marker.markerLabel, coordinate: marker.coordinate.clLocationCoordinate2D)
-                        .tint(FeastTheme.Colors.primaryAccent)
+                        .tint(FeastTheme.Colors.mapPinTint)
                         .tag(marker)
                 }
             }
             .mapStyle(.standard(elevation: .flat))
+            .ignoresSafeArea(edges: .bottom)
+            .overlay {
+                VStack(spacing: 0) {
+                    LinearGradient(
+                        colors: [
+                            FeastTheme.Colors.groupedBackground.opacity(0.26),
+                            .clear
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                    .frame(height: 120)
+
+                    Spacer(minLength: 0)
+
+                    LinearGradient(
+                        colors: [
+                            .clear,
+                            FeastTheme.Colors.appBackground.opacity(0.2)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                    .frame(height: 140)
+                }
+                .allowsHitTesting(false)
+            }
 
             if markerItems.isEmpty && !isResolvingMarkers {
                 ContentUnavailableView {
@@ -185,19 +233,30 @@ struct MapRootView: View {
                         Button("Search Apple Maps") {
                             showingExploreSearch = true
                         }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(FeastProminentButtonStyle())
                     }
                 }
                 .padding(FeastTheme.Spacing.large)
+                .feastMapOverlayCard(cornerRadius: FeastTheme.CornerRadius.medium)
+                .padding(.horizontal, FeastTheme.Spacing.large)
             }
 
             if isResolvingMarkers {
-                ProgressView()
-                    .padding(FeastTheme.Spacing.large)
-                    .background(.ultraThinMaterial)
-                    .clipShape(RoundedRectangle(cornerRadius: FeastTheme.CornerRadius.medium, style: .continuous))
+                HStack(spacing: FeastTheme.Spacing.small) {
+                    ProgressView()
+                    Text("Loading saved places")
+                        .font(FeastTheme.Typography.rowMetadata)
+                        .foregroundStyle(FeastTheme.Colors.primaryText)
+                }
+                .padding(.horizontal, FeastTheme.Spacing.large)
+                .padding(.vertical, FeastTheme.Spacing.medium)
+                .feastMapOverlayCard(cornerRadius: FeastTheme.CornerRadius.medium)
             }
         }
+    }
+
+    private var listSummaryColor: Color {
+        selectedListSavedPlaces.isEmpty ? FeastTheme.Colors.secondaryText : FeastTheme.Colors.tertiaryText
     }
 
     private var listSummaryText: String {

@@ -11,12 +11,14 @@ struct AddPlaceView: View {
     @State private var searchResults: [ApplePlaceMatch] = []
     @State private var selectedPlace: ApplePlaceMatch?
     @State private var searchState: SearchState = .idle
+    @FocusState private var isSearchFieldFocused: Bool
 
     var body: some View {
         List {
-            searchIntroSection
+            searchSection
             searchResultsSection
         }
+        .feastScrollableChrome()
         .listStyle(.insetGrouped)
         .navigationTitle("Add Place")
         .navigationBarTitleDisplayMode(.inline)
@@ -27,11 +29,19 @@ struct AddPlaceView: View {
                 }
             }
         }
-        .searchable(text: $searchQuery, prompt: "Search Apple Maps")
-        .textInputAutocapitalization(.words)
-        .autocorrectionDisabled()
+        .scrollDismissesKeyboard(.interactively)
         .task(id: searchQuery) {
             await search(for: searchQuery)
+        }
+        .task {
+            guard searchQuery.isEmpty else {
+                return
+            }
+
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            if !Task.isCancelled {
+                isSearchFieldFocused = true
+            }
         }
         .navigationDestination(item: $selectedPlace) { place in
             AddPlaceSaveView(
@@ -42,18 +52,46 @@ struct AddPlaceView: View {
         }
     }
 
-    private var searchIntroSection: some View {
+    private var searchSection: some View {
         Section {
-            VStack(alignment: .leading, spacing: FeastTheme.Spacing.small) {
-                Text("Search Apple Maps to add a place to \(feastList.displayName).")
-                    .font(FeastTheme.Typography.body.weight(.semibold))
-                    .foregroundStyle(FeastTheme.Colors.primaryText)
+            FeastFormGroup {
+                VStack(alignment: .leading, spacing: FeastTheme.Spacing.medium) {
+                    Text("Search Apple Maps")
+                        .font(FeastTheme.Typography.formTitle)
+                        .foregroundStyle(FeastTheme.Colors.primaryText)
 
-                Text("Only Apple Maps matches can be saved in Feast v1.")
-                    .font(FeastTheme.Typography.supporting)
-                    .foregroundStyle(FeastTheme.Colors.secondaryNeutral)
+                    Text("Add a place to \(feastList.displayName) by finding the exact Apple Maps match first.")
+                        .font(FeastTheme.Typography.rowMetadata)
+                        .foregroundStyle(FeastTheme.Colors.secondaryText)
+
+                    HStack(spacing: FeastTheme.Spacing.small) {
+                        Image(systemName: "magnifyingglass")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(FeastTheme.Colors.tertiaryText)
+
+                        TextField("Restaurant, cafe, bar, neighborhood", text: $searchQuery)
+                            .focused($isSearchFieldFocused)
+                            .textInputAutocapitalization(.words)
+                            .autocorrectionDisabled()
+                            .submitLabel(.search)
+
+                        if !searchQuery.isEmpty {
+                            Button {
+                                searchQuery = ""
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(FeastTheme.Colors.secondaryAction)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .feastFieldSurface(minHeight: 52)
+
+                    Text("Only Apple Maps matches can be saved in Feast v1.")
+                        .font(FeastTheme.Typography.formHelper)
+                        .foregroundStyle(FeastTheme.Colors.tertiaryText)
+                }
             }
-            .padding(.vertical, FeastTheme.Spacing.xSmall)
         }
     }
 
@@ -62,30 +100,51 @@ struct AddPlaceView: View {
         switch searchState {
         case .idle:
             Section {
-                Text("Start typing a place name to search Apple Maps.")
-                    .font(FeastTheme.Typography.supporting)
-                    .foregroundStyle(FeastTheme.Colors.secondaryNeutral)
+                FeastFormGroup {
+                    Label("Results appear here as you type a place name, address, or neighborhood.", systemImage: "magnifyingglass.circle")
+                        .font(FeastTheme.Typography.supporting)
+                        .foregroundStyle(FeastTheme.Colors.secondaryText)
+                }
+            } header: {
+                FeastFormSectionHeader(
+                    title: "Matches",
+                    subtitle: "Search is ready as soon as you start typing"
+                )
             }
         case .loading:
             Section {
-                HStack {
-                    Spacer()
-                    ProgressView()
-                    Spacer()
+                FeastFormGroup {
+                    HStack(spacing: FeastTheme.Spacing.medium) {
+                        ProgressView()
+                        Text("Searching Apple Maps...")
+                            .font(FeastTheme.Typography.supporting)
+                            .foregroundStyle(FeastTheme.Colors.secondaryText)
+                    }
                 }
-                .padding(.vertical, FeastTheme.Spacing.medium)
+            } header: {
+                FeastFormSectionHeader(
+                    title: "Matches",
+                    subtitle: "Looking for the closest Apple Maps results"
+                )
             }
         case .loaded:
             if searchResults.isEmpty {
                 Section {
-                    ContentUnavailableView(
-                        "No Matches",
-                        systemImage: "mappin.slash",
-                        description: Text("Try a more specific place name.")
+                    FeastFormGroup {
+                        ContentUnavailableView(
+                            "No Matches",
+                            systemImage: "mappin.slash",
+                            description: Text("Try a more specific place name.")
+                        )
+                    }
+                } header: {
+                    FeastFormSectionHeader(
+                        title: "Matches",
+                        subtitle: "Apple Maps didn’t return any places yet"
                     )
                 }
             } else {
-                Section("Apple Maps Matches") {
+                Section {
                     ForEach(searchResults) { place in
                         Button {
                             selectedPlace = place
@@ -94,14 +153,27 @@ struct AddPlaceView: View {
                         }
                         .buttonStyle(.plain)
                     }
+                } header: {
+                    FeastFormSectionHeader(
+                        title: "Apple Maps Matches",
+                        subtitle: "\(searchResults.count) \(searchResults.count == 1 ? "result" : "results")"
+                    )
                 }
+                .feastSectionSurface()
             }
         case let .failed(message):
             Section {
-                ContentUnavailableView(
-                    "Search Unavailable",
-                    systemImage: "exclamationmark.triangle",
-                    description: Text(message)
+                FeastFormGroup {
+                    ContentUnavailableView(
+                        "Search Unavailable",
+                        systemImage: "exclamationmark.triangle",
+                        description: Text(message)
+                    )
+                }
+            } header: {
+                FeastFormSectionHeader(
+                    title: "Matches",
+                    subtitle: "Apple Maps search couldn’t be completed"
                 )
             }
         }
@@ -172,19 +244,25 @@ private struct AddPlaceSaveView: View {
     }
 
     var body: some View {
-        Form {
+        List {
             matchSection
             metadataSection
             categoriesSection
             notesSection
             sectionAssignmentSection
         }
+        .feastScrollableChrome()
+        .listStyle(.insetGrouped)
+        .scrollDismissesKeyboard(.interactively)
         .navigationTitle("Save Place")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
-                Button("Save") {
+                Button {
                     savePlace()
+                } label: {
+                    Text("Save")
+                        .fontWeight(.semibold)
                 }
             }
         }
@@ -223,82 +301,178 @@ private struct AddPlaceSaveView: View {
     }
 
     private var matchSection: some View {
-        Section("Apple Maps Match") {
-            VStack(alignment: .leading, spacing: FeastTheme.Spacing.xSmall) {
-                Text(place.displayName)
-                    .font(FeastTheme.Typography.body.weight(.semibold))
-                    .foregroundStyle(FeastTheme.Colors.primaryText)
+        Section {
+            FeastFormGroup {
+                HStack(alignment: .top, spacing: FeastTheme.Spacing.medium) {
+                    Image(systemName: "mappin.and.ellipse")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(FeastTheme.Colors.primaryActionLabel)
+                        .frame(width: 40, height: 40)
+                        .background(
+                            RoundedRectangle(
+                                cornerRadius: FeastTheme.CornerRadius.small,
+                                style: .continuous
+                            )
+                            .fill(FeastTheme.Colors.accentSelection.opacity(0.22))
+                        )
 
-                if !place.secondaryText.isEmpty {
-                    Text(place.secondaryText)
-                        .font(FeastTheme.Typography.supporting)
-                        .foregroundStyle(FeastTheme.Colors.secondaryNeutral)
-                }
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(feastList.displayName.uppercased())
+                            .font(FeastTheme.Typography.sectionLabel)
+                            .tracking(0.8)
+                            .foregroundStyle(FeastTheme.Colors.secondaryText)
+                            .fixedSize(horizontal: false, vertical: true)
 
-                if let sectionSuggestionMessage {
-                    Text(sectionSuggestionMessage)
-                        .font(FeastTheme.Typography.caption)
-                        .foregroundStyle(FeastTheme.Colors.secondaryAccent)
+                        Text(place.displayName)
+                            .font(FeastTheme.Typography.formTitle)
+                            .foregroundStyle(FeastTheme.Colors.primaryText)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        if !place.secondaryText.isEmpty {
+                            Text(place.secondaryText)
+                                .font(FeastTheme.Typography.supporting)
+                                .foregroundStyle(FeastTheme.Colors.secondaryText)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
                 }
             }
-            .padding(.vertical, FeastTheme.Spacing.xSmall)
+        } header: {
+            FeastFormSectionHeader(
+                title: "Apple Maps Match",
+                subtitle: "This is the exact place Feast will save"
+            )
         }
     }
 
     private var metadataSection: some View {
-        Section("Metadata") {
-            Picker("Status", selection: $status) {
-                ForEach(PlaceStatus.allCases) { status in
-                    Text(status.rawValue).tag(status)
+        Section {
+            FeastFormGroup {
+                FeastFormField(
+                    title: "Status",
+                    helper: "Choose how the place should read in your list."
+                ) {
+                    Picker("Status", selection: $status) {
+                        ForEach(PlaceStatus.allCases) { status in
+                            Text(status.rawValue).tag(status)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .tint(FeastTheme.Colors.primaryText)
                 }
-            }
 
-            Picker("Place Type", selection: $placeType) {
-                ForEach(PlaceType.allCases) { placeType in
-                    Text(placeType.rawValue).tag(placeType)
+                FeastFormDivider()
+
+                FeastFormField(
+                    title: "Place Type",
+                    helper: "This helps Feast describe the place consistently."
+                ) {
+                    Picker("Place Type", selection: $placeType) {
+                        ForEach(PlaceType.allCases) { placeType in
+                            Text(placeType.rawValue).tag(placeType)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .tint(FeastTheme.Colors.primaryText)
                 }
             }
+        } header: {
+            FeastFormSectionHeader(
+                title: "Metadata",
+                subtitle: "The quick descriptors used across Feast"
+            )
         }
     }
 
     private var categoriesSection: some View {
-        Section("Cuisines And Tags") {
-            TextField("Cuisines", text: $cuisinesText)
-                .textInputAutocapitalization(.words)
+        Section {
+            FeastFormGroup {
+                FeastFormField(title: "Cuisines") {
+                    TextField("Italian, sushi, bakery", text: $cuisinesText)
+                        .textInputAutocapitalization(.words)
+                        .feastFieldSurface()
+                }
 
-            TextField("Tags", text: $tagsText)
-                .textInputAutocapitalization(.words)
+                FeastFormDivider()
 
-            Text("Use commas for multiple values.")
-                .font(FeastTheme.Typography.caption)
-                .foregroundStyle(FeastTheme.Colors.secondaryNeutral)
+                FeastFormField(title: "Tags") {
+                    TextField("Date night, walk-in, worth a detour", text: $tagsText)
+                        .textInputAutocapitalization(.words)
+                        .feastFieldSurface()
+                }
+            }
+        } header: {
+            FeastFormSectionHeader(
+                title: "Cuisines And Tags",
+                subtitle: "Use commas to separate multiple values"
+            )
         }
     }
 
     private var notesSection: some View {
-        Section("Notes") {
-            TextField("Note", text: $note, axis: .vertical)
-                .lineLimit(3...6)
+        Section {
+            FeastFormGroup {
+                FeastFormField(title: "Note", helper: "Why it’s worth saving.") {
+                    TextField("What stood out?", text: $note, axis: .vertical)
+                        .lineLimit(3...6)
+                        .feastFieldSurface(minHeight: 92)
+                }
 
-            TextField("Skip Note", text: $skipNote, axis: .vertical)
-                .lineLimit(2...4)
+                FeastFormDivider()
 
-            TextField("Instagram URL", text: $instagramURL)
-                .keyboardType(.URL)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
+                FeastFormField(title: "Skip Note", helper: "Why you might pass on it next time.") {
+                    TextField("What gave you pause?", text: $skipNote, axis: .vertical)
+                        .lineLimit(2...4)
+                        .feastFieldSurface(minHeight: 76)
+                }
+
+                FeastFormDivider()
+
+                FeastFormField(title: "Instagram URL") {
+                    TextField("https://instagram.com/...", text: $instagramURL)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .feastFieldSurface()
+                }
+            }
+        } header: {
+            FeastFormSectionHeader(
+                title: "Notes",
+                subtitle: "Keep the save useful and easy to revisit later"
+            )
         }
     }
 
     private var sectionAssignmentSection: some View {
-        Section("Section Assignment") {
-            Picker("Section", selection: $selectedSectionObjectID) {
-                Text("Unsorted").tag(nil as NSManagedObjectID?)
+        Section {
+            FeastFormGroup {
+                FeastFormField(
+                    title: "Section",
+                    helper: sectionSuggestionMessage ?? "Choose Unsorted if you want to organize this place later.",
+                    helperColor: sectionSuggestionMessage == nil
+                        ? FeastTheme.Colors.secondaryText
+                        : FeastTheme.Colors.tertiaryText
+                ) {
+                    Picker("Section", selection: $selectedSectionObjectID) {
+                        Text("Unsorted").tag(nil as NSManagedObjectID?)
 
-                ForEach(allSections) { section in
-                    Text(section.pathDisplay).tag(section.objectID as NSManagedObjectID?)
+                        ForEach(allSections) { section in
+                            Text(section.pathDisplay).tag(section.objectID as NSManagedObjectID?)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .tint(FeastTheme.Colors.primaryText)
                 }
             }
+        } header: {
+            FeastFormSectionHeader(
+                title: "Section Assignment",
+                subtitle: "Place it where it belongs in \(feastList.displayName)"
+            )
         }
     }
 
@@ -380,24 +554,38 @@ private struct SearchResultRow: View {
     let place: ApplePlaceMatch
 
     var body: some View {
-        VStack(alignment: .leading, spacing: FeastTheme.Spacing.xSmall) {
-            Text(place.displayName)
-                .font(FeastTheme.Typography.body.weight(.semibold))
-                .foregroundStyle(FeastTheme.Colors.primaryText)
+        HStack(alignment: .top, spacing: FeastTheme.Spacing.small) {
+            Image(systemName: "mappin.circle.fill")
+                .font(.system(size: 16))
+                .foregroundStyle(FeastTheme.Colors.accentSelection)
+                .padding(.top, 2)
 
-            if !place.secondaryText.isEmpty {
-                Text(place.secondaryText)
-                    .font(FeastTheme.Typography.supporting)
-                    .foregroundStyle(FeastTheme.Colors.secondaryNeutral)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(place.displayName)
+                    .font(FeastTheme.Typography.rowTitle)
+                    .foregroundStyle(FeastTheme.Colors.primaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if !place.secondaryText.isEmpty {
+                    Text(place.secondaryText)
+                        .font(FeastTheme.Typography.rowMetadata)
+                        .foregroundStyle(FeastTheme.Colors.secondaryText)
+                }
+
+                if let suggestedPath = place.suggestedSectionPath.displayText {
+                    Text("Suggested section: \(suggestedPath)")
+                        .font(FeastTheme.Typography.rowUtility)
+                        .foregroundStyle(FeastTheme.Colors.tertiaryText)
+                }
             }
 
-            if let suggestedPath = place.suggestedSectionPath.displayText {
-                Text("Suggested section: \(suggestedPath)")
-                    .font(FeastTheme.Typography.caption)
-                    .foregroundStyle(FeastTheme.Colors.secondaryAccent)
-            }
+            Spacer(minLength: 0)
+
+            Image(systemName: "chevron.right")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(FeastTheme.Colors.secondaryText)
         }
-        .padding(.vertical, FeastTheme.Spacing.xSmall)
+        .padding(.vertical, FeastTheme.Spacing.small)
     }
 }
 

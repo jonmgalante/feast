@@ -62,6 +62,7 @@ struct FeastApp: App {
     init() {
         let services = AppServices.live
         self.services = services
+        FeastTheme.applyAppearance()
         FeastAppDelegate.persistenceController = services.persistenceController
     }
 

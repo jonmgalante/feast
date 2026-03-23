@@ -37,12 +37,12 @@ struct FeaturePlaceholderScreen<Content: View>: View {
                     .font(.system(size: 18, weight: .semibold))
                     .foregroundStyle(FeastTheme.Colors.primaryText)
                     .frame(width: 44, height: 44)
-                    .background(FeastTheme.Colors.primaryAccent.opacity(0.18))
+                    .background(FeastTheme.Colors.accentSelection.opacity(0.18))
                     .clipShape(RoundedRectangle(cornerRadius: FeastTheme.CornerRadius.medium, style: .continuous))
 
                 Text("Feast v1 shell")
                     .font(FeastTheme.Typography.eyebrow)
-                    .foregroundStyle(FeastTheme.Colors.secondaryAccent)
+                    .foregroundStyle(FeastTheme.Colors.tertiaryText)
             }
 
             Text(title)
@@ -51,15 +51,10 @@ struct FeaturePlaceholderScreen<Content: View>: View {
 
             Text(subtitle)
                 .font(FeastTheme.Typography.body)
-                .foregroundStyle(FeastTheme.Colors.secondaryNeutral)
+                .foregroundStyle(FeastTheme.Colors.secondaryText)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(FeastTheme.Spacing.large)
-        .background(FeastTheme.Colors.groupedSurface)
-        .overlay {
-            RoundedRectangle(cornerRadius: FeastTheme.CornerRadius.large, style: .continuous)
-                .stroke(FeastTheme.Colors.divider, lineWidth: 1)
-        }
-        .clipShape(RoundedRectangle(cornerRadius: FeastTheme.CornerRadius.large, style: .continuous))
+        .feastCardSurface()
     }
 }

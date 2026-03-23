@@ -13,6 +13,7 @@ struct FeastListDetailView: View {
 
     var body: some View {
         content
+            .feastScrollableChrome()
             .toolbar { toolbarContent }
             .listStyle(.insetGrouped)
             .navigationTitle(feastList.displayName)
@@ -123,32 +124,23 @@ struct FeastListDetailView: View {
     }
 
     private var addPlaceCallToAction: some View {
-        VStack(spacing: 0) {
-            Divider()
-                .overlay(FeastTheme.Colors.divider)
-
-            Button {
-                showingAddPlaceSheet = true
-            } label: {
-                Label("Add Place", systemImage: "plus")
-                    .font(FeastTheme.Typography.body.weight(.semibold))
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(FeastTheme.Colors.primaryAccent)
-            .padding(.horizontal, FeastTheme.Spacing.large)
-            .padding(.top, FeastTheme.Spacing.medium)
-            .padding(.bottom, FeastTheme.Spacing.large)
+        Button {
+            showingAddPlaceSheet = true
+        } label: {
+            Label("Add Place", systemImage: "plus")
+                .font(FeastTheme.Typography.rowTitle)
+                .frame(maxWidth: .infinity)
         }
-        .background(FeastTheme.Colors.appBackground)
+        .buttonStyle(FeastProminentButtonStyle())
+        .feastBottomBarChrome()
     }
 
     private var searchResultsSection: some View {
         Section("Places") {
             if let searchSummaryText {
                 Text(searchSummaryText)
-                    .font(FeastTheme.Typography.supporting)
-                    .foregroundStyle(FeastTheme.Colors.secondaryNeutral)
+                    .font(FeastTheme.Typography.rowUtility)
+                    .foregroundStyle(FeastTheme.Colors.tertiaryText)
             }
 
             if filteredSavedPlaces.isEmpty {
@@ -163,6 +155,7 @@ struct FeastListDetailView: View {
                 }
             }
         }
+        .feastSectionSurface()
     }
 
     private var emptyStateSection: some View {
@@ -174,26 +167,35 @@ struct FeastListDetailView: View {
 
                 Text("Create sections for geographic groupings like city and neighborhood, then add places from Apple Maps.")
                     .font(FeastTheme.Typography.supporting)
-                    .foregroundStyle(FeastTheme.Colors.secondaryNeutral)
+                    .foregroundStyle(FeastTheme.Colors.secondaryText)
 
                 Button("Create Section") {
                     presentNewTopLevelSectionEditor()
                 }
-                .buttonStyle(.bordered)
-                .tint(FeastTheme.Colors.secondaryAccent)
+                .buttonStyle(FeastInlineActionButtonStyle())
             }
             .padding(.vertical, FeastTheme.Spacing.xSmall)
         }
+        .feastSectionSurface()
     }
 
     @ViewBuilder
     private var unsortedSection: some View {
         if !feastList.unsortedSavedPlaces.isEmpty {
-            Section("Unsorted") {
+            Section {
                 ForEach(feastList.unsortedSavedPlaces) { place in
                     SavedPlaceListRow(place: place)
                 }
+            } header: {
+                SectionHeaderView(
+                    title: "Unsorted",
+                    kind: .unsorted,
+                    subtitle: "Places without a section"
+                ) {
+                    EmptyView()
+                }
             }
+            .feastSectionSurface()
         }
     }
 
@@ -203,7 +205,7 @@ struct FeastListDetailView: View {
         } header: {
             SectionHeaderView(
                 title: section.displayName,
-                isNested: false
+                kind: .topLevel
             ) {
                 Menu {
                     Button("Add Subsection") {
@@ -223,11 +225,12 @@ struct FeastListDetailView: View {
                         sectionPendingDeletion = section
                     }
                 } label: {
-                    Image(systemName: "ellipsis.circle")
-                        .foregroundStyle(FeastTheme.Colors.secondaryNeutral)
+                    Image(systemName: "ellipsis")
+                        .feastUtilitySymbol()
                 }
             }
         }
+        .feastSectionSurface()
     }
 
     @ViewBuilder
@@ -264,7 +267,10 @@ struct FeastListDetailView: View {
             Button {
                 showingSearchFilters = true
             } label: {
-                Image(systemName: searchFilters.hasActiveFilters ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
+                FeastToolbarSymbol(
+                    systemName: "line.3.horizontal.decrease",
+                    isEmphasized: searchFilters.hasActiveFilters
+                )
             }
 
             Menu {
@@ -282,7 +288,7 @@ struct FeastListDetailView: View {
                     }
                 }
             } label: {
-                Image(systemName: "folder.badge.plus")
+                FeastToolbarSymbol(systemName: "folder.badge.plus")
             }
         }
     }
@@ -376,37 +382,93 @@ private struct SectionEditorState: Identifiable {
     let section: ListSection?
 }
 
+private enum SectionHeaderKind: Equatable {
+    case topLevel
+    case nested
+    case unsorted
+
+    var labelText: String {
+        switch self {
+        case .topLevel:
+            return "Section"
+        case .nested:
+            return "Subsection"
+        case .unsorted:
+            return "Unsorted"
+        }
+    }
+
+    var labelColor: Color {
+        switch self {
+        case .topLevel, .nested:
+            return FeastTheme.Colors.secondaryText
+        case .unsorted:
+            return FeastTheme.Colors.tertiaryText
+        }
+    }
+
+    var titleFont: Font {
+        switch self {
+        case .topLevel, .unsorted:
+            return FeastTheme.Typography.sectionTitle
+        case .nested:
+            return FeastTheme.Typography.sectionHeader
+        }
+    }
+}
+
 private struct SectionHeaderView<TrailingContent: View>: View {
     let title: String
-    let isNested: Bool
+    let kind: SectionHeaderKind
+    let subtitle: String?
     let trailingContent: TrailingContent
 
     init(
         title: String,
-        isNested: Bool,
+        kind: SectionHeaderKind,
+        subtitle: String? = nil,
         @ViewBuilder trailingContent: () -> TrailingContent
     ) {
         self.title = title
-        self.isNested = isNested
+        self.kind = kind
+        self.subtitle = subtitle
         self.trailingContent = trailingContent()
     }
 
     var body: some View {
-        HStack(spacing: FeastTheme.Spacing.small) {
-            if isNested {
-                Image(systemName: "arrow.turn.down.right")
-                    .font(FeastTheme.Typography.caption.weight(.semibold))
-                    .foregroundStyle(FeastTheme.Colors.secondaryNeutral)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: FeastTheme.Spacing.small) {
+                Text(kind.labelText.uppercased())
+                    .font(FeastTheme.Typography.sectionLabel)
+                    .tracking(0.8)
+                    .foregroundStyle(kind.labelColor)
+
+                Spacer()
+
+                trailingContent
             }
 
-            Text(title)
-                .font(isNested ? FeastTheme.Typography.supporting.weight(.semibold) : FeastTheme.Typography.eyebrow)
-                .foregroundStyle(FeastTheme.Colors.primaryText)
+            HStack(spacing: FeastTheme.Spacing.small) {
+                if kind == .nested {
+                    Image(systemName: "arrow.turn.down.right")
+                        .font(FeastTheme.Typography.caption.weight(.semibold))
+                        .foregroundStyle(FeastTheme.Colors.secondaryText)
+                }
 
-            Spacer()
+                Text(title)
+                    .font(kind.titleFont)
+                    .foregroundStyle(FeastTheme.Colors.primaryText)
+            }
 
-            trailingContent
+            if let subtitle {
+                Text(subtitle)
+                    .font(FeastTheme.Typography.rowUtility)
+                    .foregroundStyle(FeastTheme.Colors.secondaryText)
+                    .lineLimit(2)
+            }
         }
+        .padding(.top, kind == .topLevel ? FeastTheme.Spacing.small : 2)
+        .padding(.bottom, kind == .topLevel ? FeastTheme.Spacing.xSmall : 2)
         .textCase(nil)
     }
 }
@@ -416,8 +478,8 @@ private struct EmptySectionRow: View {
 
     var body: some View {
         Text("No saved places in this section yet.")
-            .font(FeastTheme.Typography.supporting)
-            .foregroundStyle(FeastTheme.Colors.secondaryNeutral)
+            .font(FeastTheme.Typography.rowMetadata)
+            .foregroundStyle(FeastTheme.Colors.secondaryText)
             .padding(.vertical, FeastTheme.Spacing.xSmall)
             .padding(.leading, isNested ? FeastTheme.Spacing.xLarge : 0)
     }
@@ -431,7 +493,7 @@ private struct ChildSectionBlock: View {
     var body: some View {
         SectionHeaderView(
             title: section.displayName,
-            isNested: true
+            kind: .nested
         ) {
             Menu {
                 Button("Rename Section") {
@@ -442,8 +504,8 @@ private struct ChildSectionBlock: View {
                     onDelete()
                 }
             } label: {
-                Image(systemName: "ellipsis.circle")
-                    .foregroundStyle(FeastTheme.Colors.secondaryNeutral)
+                Image(systemName: "ellipsis")
+                    .feastUtilitySymbol()
             }
         }
         .padding(.vertical, FeastTheme.Spacing.xSmall)
@@ -472,11 +534,29 @@ private struct SectionNameEditorSheet: View {
     }
 
     var body: some View {
-        Form {
-            TextField("Section name", text: $name)
-                .textInputAutocapitalization(.words)
-                .autocorrectionDisabled()
+        List {
+            Section {
+                FeastFormGroup {
+                    FeastFormField(
+                        title: "Section Name",
+                        helper: "Use clear geographic names like city, region, or neighborhood."
+                    ) {
+                        TextField("Section name", text: $name)
+                            .textInputAutocapitalization(.words)
+                            .autocorrectionDisabled()
+                            .feastFieldSurface(minHeight: 52)
+                    }
+                }
+            } header: {
+                FeastFormSectionHeader(
+                    title: "Name",
+                    subtitle: "Sections organize places inside a list"
+                )
+            }
         }
+        .feastScrollableChrome()
+        .listStyle(.insetGrouped)
+        .scrollDismissesKeyboard(.interactively)
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -487,9 +567,12 @@ private struct SectionNameEditorSheet: View {
             }
 
             ToolbarItem(placement: .confirmationAction) {
-                Button("Save") {
+                Button {
                     onSave(name)
                     dismiss()
+                } label: {
+                    Text("Save")
+                        .fontWeight(.semibold)
                 }
             }
         }

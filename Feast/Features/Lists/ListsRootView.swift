@@ -40,6 +40,7 @@ struct ListsRootView: View {
 
     var body: some View {
         content
+            .feastScrollableChrome()
             .toolbar { toolbarContent }
             .listStyle(.insetGrouped)
             .navigationTitle("Lists")
@@ -158,16 +159,16 @@ struct ListsRootView: View {
 
                     Text("Your default lists are ready. Import from Notes when you want to bring in your first saved places.")
                         .font(FeastTheme.Typography.supporting)
-                        .foregroundStyle(FeastTheme.Colors.secondaryNeutral)
+                        .foregroundStyle(FeastTheme.Colors.secondaryText)
 
                     Button("Import from Notes") {
                         showingImportPlaceholder = true
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(FeastTheme.Colors.primaryAccent)
+                    .buttonStyle(FeastProminentButtonStyle())
                 }
                 .padding(.vertical, FeastTheme.Spacing.xSmall)
             }
+            .feastSectionSurface()
         }
     }
 
@@ -177,8 +178,8 @@ struct ListsRootView: View {
             Section("Places") {
                 if let searchSummaryText {
                     Text(searchSummaryText)
-                        .font(FeastTheme.Typography.supporting)
-                        .foregroundStyle(FeastTheme.Colors.secondaryNeutral)
+                        .font(FeastTheme.Typography.rowUtility)
+                        .foregroundStyle(FeastTheme.Colors.tertiaryText)
                 }
 
                 if filteredSavedPlaces.isEmpty {
@@ -193,6 +194,7 @@ struct ListsRootView: View {
                     }
                 }
             }
+            .feastSectionSurface()
         }
     }
 
@@ -210,6 +212,7 @@ struct ListsRootView: View {
                 }
             }
         }
+        .feastSectionSurface()
     }
 
     @ToolbarContentBuilder
@@ -218,13 +221,16 @@ struct ListsRootView: View {
             Button {
                 showingSearchFilters = true
             } label: {
-                Image(systemName: searchFilters.hasActiveFilters ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
+                FeastToolbarSymbol(
+                    systemName: "line.3.horizontal.decrease",
+                    isEmphasized: searchFilters.hasActiveFilters
+                )
             }
 
             Button {
                 listEditor = ListEditorState(title: "New List", initialName: "", feastList: nil)
             } label: {
-                Image(systemName: "plus")
+                FeastToolbarSymbol(systemName: "plus")
             }
 
             Menu {
@@ -232,7 +238,7 @@ struct ListsRootView: View {
                     showingImportPlaceholder = true
                 }
             } label: {
-                Image(systemName: "ellipsis.circle")
+                FeastToolbarSymbol(systemName: "ellipsis")
             }
         }
     }
@@ -302,19 +308,31 @@ struct ListsRootView: View {
         let sharingState = listSharingState(for: feastList)
 
         return HStack(alignment: .top, spacing: FeastTheme.Spacing.small) {
-            VStack(alignment: .leading, spacing: FeastTheme.Spacing.xSmall) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(feastList.displayName)
-                    .font(FeastTheme.Typography.body.weight(.semibold))
+                    .font(FeastTheme.Typography.listTitle)
                     .foregroundStyle(FeastTheme.Colors.primaryText)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.82)
 
-                Text("\(feastList.savedPlaceCount) saved • \(feastList.sectionSummary)")
-                    .font(FeastTheme.Typography.supporting)
-                    .foregroundStyle(FeastTheme.Colors.secondaryNeutral)
+                Text(listPrimaryMetadata(for: feastList))
+                    .font(FeastTheme.Typography.rowMetadata)
+                    .foregroundStyle(FeastTheme.Colors.secondaryText)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.88)
+
+                if let listSecondaryMetadata = listSecondaryMetadata(for: feastList) {
+                    Text(listSecondaryMetadata)
+                        .font(FeastTheme.Typography.rowUtility)
+                        .foregroundStyle(FeastTheme.Colors.tertiaryText)
+                        .lineLimit(2)
+                }
 
                 if let roleBadgeText = sharingState.roleBadgeText {
                     Text(roleBadgeText)
-                        .font(FeastTheme.Typography.caption)
-                        .foregroundStyle(FeastTheme.Colors.secondaryAccent)
+                        .font(FeastTheme.Typography.rowUtility)
+                        .foregroundStyle(FeastTheme.Colors.tertiaryText)
+                        .lineLimit(2)
                 }
             }
 
@@ -326,11 +344,11 @@ struct ListsRootView: View {
                     .padding(.top, 2)
             } else if sharingState.isShared {
                 Image(systemName: "person.2.fill")
-                    .foregroundStyle(FeastTheme.Colors.secondaryAccent)
+                    .foregroundStyle(FeastTheme.Colors.tertiaryText)
                     .padding(.top, 2)
             }
         }
-        .padding(.vertical, FeastTheme.Spacing.xSmall)
+        .padding(.vertical, 6)
     }
 
     private func listLink(for feastList: FeastList) -> some View {
@@ -373,7 +391,7 @@ struct ListsRootView: View {
                 Button(sharingState.shareActionTitle) {
                     beginSharing(for: feastList)
                 }
-                .tint(FeastTheme.Colors.primaryAccent)
+                .tint(FeastTheme.Colors.secondaryAction)
             }
         }
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
@@ -390,7 +408,7 @@ struct ListsRootView: View {
                     feastList: feastList
                 )
             }
-            .tint(FeastTheme.Colors.secondaryAccent)
+            .tint(FeastTheme.Colors.secondaryAction)
         }
     }
 
@@ -468,6 +486,32 @@ struct ListsRootView: View {
             }
         }
     }
+
+    private func listPrimaryMetadata(for feastList: FeastList) -> String {
+        let savedPlacesLabel = "\(feastList.savedPlaceCount) saved"
+        let topLevelSectionCount = feastList.topLevelSections.count
+
+        guard topLevelSectionCount > 0 else {
+            return savedPlacesLabel
+        }
+
+        let sectionLabel = topLevelSectionCount == 1 ? "1 section" : "\(topLevelSectionCount) sections"
+        return "\(savedPlacesLabel) • \(sectionLabel)"
+    }
+
+    private func listSecondaryMetadata(for feastList: FeastList) -> String? {
+        let topLevelSectionNames = feastList.topLevelSections.map(\.displayName)
+
+        guard !topLevelSectionNames.isEmpty else {
+            return "Ready for city and neighborhood sections"
+        }
+
+        let visibleNames = Array(topLevelSectionNames.prefix(2))
+        let remainingCount = topLevelSectionNames.count - visibleNames.count
+        let remainingSuffix = remainingCount > 0 ? " +\(remainingCount)" : ""
+
+        return visibleNames.joined(separator: " • ") + remainingSuffix
+    }
 }
 
 private struct ListEditorState: Identifiable {
@@ -497,11 +541,29 @@ private struct ListNameEditorSheet: View {
     }
 
     var body: some View {
-        Form {
-            TextField("List name", text: $name)
-                .textInputAutocapitalization(.words)
-                .autocorrectionDisabled()
+        List {
+            Section {
+                FeastFormGroup {
+                    FeastFormField(
+                        title: "List Name",
+                        helper: "Keep list names broad and scannable, like NYC, USA, or a future trip."
+                    ) {
+                        TextField("List name", text: $name)
+                            .textInputAutocapitalization(.words)
+                            .autocorrectionDisabled()
+                            .feastFieldSurface(minHeight: 52)
+                    }
+                }
+            } header: {
+                FeastFormSectionHeader(
+                    title: "Name",
+                    subtitle: "Lists are the top-level buckets in Feast"
+                )
+            }
         }
+        .feastScrollableChrome()
+        .listStyle(.insetGrouped)
+        .scrollDismissesKeyboard(.interactively)
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -512,9 +574,12 @@ private struct ListNameEditorSheet: View {
             }
 
             ToolbarItem(placement: .confirmationAction) {
-                Button("Save") {
+                Button {
                     onSave(name)
                     dismiss()
+                } label: {
+                    Text("Save")
+                        .fontWeight(.semibold)
                 }
             }
         }

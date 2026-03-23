@@ -12,18 +12,19 @@ struct FeastRootView: View {
                 NavigationStack {
                     ListsRootView()
                 }
+                .tint(FeastTheme.Colors.secondaryAction)
                 .tabItem {
-                    Label("Lists", systemImage: "text.badge.plus")
+                    Label("Lists", systemImage: "list.bullet.rectangle")
                 }
 
                 NavigationStack {
                     MapRootView()
                 }
+                .tint(FeastTheme.Colors.secondaryAction)
                 .tabItem {
                     Label("Map", systemImage: "map")
                 }
             }
-            .tint(FeastTheme.Colors.primaryAccent)
         }
         .environment(\.managedObjectContext, services.persistenceController.viewContext)
         .environment(\.persistenceController, services.persistenceController)

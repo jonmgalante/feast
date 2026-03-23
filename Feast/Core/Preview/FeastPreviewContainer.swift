@@ -10,6 +10,7 @@ struct FeastPreviewContainer<Content: View>: View {
     ) {
         self.services = services
         self.content = content()
+        FeastTheme.applyAppearance()
     }
 
     var body: some View {
@@ -17,7 +18,7 @@ struct FeastPreviewContainer<Content: View>: View {
             .environment(\.managedObjectContext, services.persistenceController.viewContext)
             .environment(\.persistenceController, services.persistenceController)
             .environment(\.applePlacesService, services.applePlacesService)
-            .tint(FeastTheme.Colors.primaryAccent)
+            .tint(FeastTheme.Colors.secondaryAction)
             .background(FeastTheme.Colors.appBackground)
     }
 }

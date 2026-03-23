@@ -176,60 +176,14 @@ struct SavedPlaceFilterSheet: View {
     let fixedFeastList: FeastList?
 
     var body: some View {
-        Form {
-            if let fixedFeastList {
-                Section("Scope") {
-                    LabeledContent("List", value: fixedFeastList.displayName)
-                }
-            } else {
-                Section("List") {
-                    Picker("List", selection: $filters.selectedListURIString) {
-                        Text("All Lists").tag(nil as String?)
-
-                        ForEach(availableLists) { feastList in
-                            Text(feastList.displayName)
-                                .tag(feastList.objectURIString as String?)
-                        }
-                    }
-                }
-            }
-
-            Section("Status") {
-                Picker("Status", selection: $filters.selectedStatus) {
-                    Text("Any Status").tag(nil as PlaceStatus?)
-
-                    ForEach(PlaceStatus.allCases) { status in
-                        Text(status.rawValue).tag(status as PlaceStatus?)
-                    }
-                }
-            }
-
-            Section("Place Type") {
-                Picker("Place Type", selection: $filters.selectedPlaceType) {
-                    Text("Any Type").tag(nil as PlaceType?)
-
-                    ForEach(PlaceType.allCases) { placeType in
-                        Text(placeType.rawValue).tag(placeType as PlaceType?)
-                    }
-                }
-            }
-
-            Section("Cuisine") {
-                if availableCuisines.isEmpty {
-                    Text("Saved places with cuisine metadata will appear here.")
-                        .font(FeastTheme.Typography.supporting)
-                        .foregroundStyle(FeastTheme.Colors.secondaryNeutral)
-                } else {
-                    Picker("Cuisine", selection: $filters.selectedCuisine) {
-                        Text("Any Cuisine").tag(nil as String?)
-
-                        ForEach(availableCuisines, id: \.self) { cuisine in
-                            Text(cuisine).tag(cuisine as String?)
-                        }
-                    }
-                }
-            }
+        List {
+            scopeSection
+            statusSection
+            placeTypeSection
+            cuisineSection
         }
+        .feastScrollableChrome()
+        .listStyle(.insetGrouped)
         .navigationTitle("Filters")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -241,10 +195,156 @@ struct SavedPlaceFilterSheet: View {
             }
 
             ToolbarItem(placement: .confirmationAction) {
-                Button("Done") {
+                Button {
                     dismiss()
+                } label: {
+                    Text("Done")
+                        .fontWeight(.semibold)
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private var scopeSection: some View {
+        if let fixedFeastList {
+            Section {
+                FeastFormGroup {
+                    FeastFormField(
+                        title: "List",
+                        helper: "Search is already scoped to this Feast list."
+                    ) {
+                        Text(fixedFeastList.displayName)
+                            .font(FeastTheme.Typography.supporting.weight(.semibold))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .feastFieldSurface(minHeight: 52)
+                    }
+                }
+            } header: {
+                FeastFormSectionHeader(
+                    title: "Scope",
+                    subtitle: "These filters only affect the current list"
+                )
+            }
+        } else {
+            Section {
+                FeastFormGroup {
+                    FeastFormField(
+                        title: "List",
+                        helper: "Choose which Feast list to search."
+                    ) {
+                        Picker("List", selection: $filters.selectedListURIString) {
+                            Text("All Lists").tag(nil as String?)
+
+                            ForEach(availableLists) { feastList in
+                                Text(feastList.displayName)
+                                    .tag(feastList.objectURIString as String?)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .tint(FeastTheme.Colors.primaryText)
+                    }
+                }
+            } header: {
+                FeastFormSectionHeader(
+                    title: "Scope",
+                    subtitle: "Choose which saved places should be included"
+                )
+            }
+        }
+    }
+
+    private var statusSection: some View {
+        Section {
+            FeastFormGroup {
+                FeastFormField(
+                    title: "Status",
+                    helper: "Filter by your saved-place status."
+                ) {
+                    Picker("Status", selection: $filters.selectedStatus) {
+                        Text("Any Status").tag(nil as PlaceStatus?)
+
+                        ForEach(PlaceStatus.allCases) { status in
+                            Text(status.rawValue).tag(status as PlaceStatus?)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .tint(FeastTheme.Colors.primaryText)
+                }
+            }
+        } header: {
+            FeastFormSectionHeader(
+                title: "Status",
+                subtitle: "Narrow results by how you track the place"
+            )
+        }
+    }
+
+    private var placeTypeSection: some View {
+        Section {
+            FeastFormGroup {
+                FeastFormField(
+                    title: "Place Type",
+                    helper: "Filter by the kind of place."
+                ) {
+                    Picker("Place Type", selection: $filters.selectedPlaceType) {
+                        Text("Any Type").tag(nil as PlaceType?)
+
+                        ForEach(PlaceType.allCases) { placeType in
+                            Text(placeType.rawValue).tag(placeType as PlaceType?)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .tint(FeastTheme.Colors.primaryText)
+                }
+            }
+        } header: {
+            FeastFormSectionHeader(
+                title: "Place Type",
+                subtitle: "Keep results focused on the kind of stop you need"
+            )
+        }
+    }
+
+    private var cuisineSection: some View {
+        Section {
+            FeastFormGroup {
+                if availableCuisines.isEmpty {
+                    FeastFormField(
+                        title: "Cuisine",
+                        helper: "Saved places with cuisine metadata will appear here."
+                    ) {
+                        Text("No cuisines available yet")
+                            .font(FeastTheme.Typography.supporting.weight(.semibold))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .feastFieldSurface(minHeight: 52)
+                    }
+                } else {
+                    FeastFormField(
+                        title: "Cuisine",
+                        helper: "Use cuisine metadata to narrow the results."
+                    ) {
+                        Picker("Cuisine", selection: $filters.selectedCuisine) {
+                            Text("Any Cuisine").tag(nil as String?)
+
+                            ForEach(availableCuisines, id: \.self) { cuisine in
+                                Text(cuisine).tag(cuisine as String?)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .tint(FeastTheme.Colors.primaryText)
+                    }
+                }
+            }
+        } header: {
+            FeastFormSectionHeader(
+                title: "Cuisine",
+                subtitle: "Filter by cuisine tags when available"
+            )
         }
     }
 }

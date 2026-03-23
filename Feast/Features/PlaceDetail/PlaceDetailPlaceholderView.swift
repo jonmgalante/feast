@@ -37,7 +37,7 @@ struct SavedPlaceDetailView: View {
     }
 
     var body: some View {
-        Form {
+        List {
             headerSection
             metadataSection
             categoriesSection
@@ -45,12 +45,18 @@ struct SavedPlaceDetailView: View {
             sectionAssignmentSection
             actionsSection
         }
+        .feastScrollableChrome()
+        .listStyle(.insetGrouped)
+        .scrollDismissesKeyboard(.interactively)
         .navigationTitle("Place")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
-                Button("Save") {
+                Button {
                     saveChanges()
+                } label: {
+                    Text("Save")
+                        .fontWeight(.semibold)
                 }
             }
         }
@@ -94,7 +100,16 @@ struct SavedPlaceDetailView: View {
             return resolvedPlace.secondaryText
         }
 
-        return savedPlace.displaySectionPath
+        return nil
+    }
+
+    private var sectionContextText: String {
+        let sectionName = selectedSection?.pathDisplay ?? "Unsorted"
+        return "\(savedPlace.displayListName) • \(sectionName)"
+    }
+
+    private var headerStatusSummary: String {
+        "\(status.rawValue) • \(placeType.rawValue)"
     }
 
     private var allSections: [ListSection] {
@@ -107,23 +122,35 @@ struct SavedPlaceDetailView: View {
 
     private var headerSection: some View {
         Section {
-            VStack(alignment: .leading, spacing: FeastTheme.Spacing.small) {
+            FeastFormGroup {
                 HStack(alignment: .top, spacing: FeastTheme.Spacing.medium) {
-                    VStack(alignment: .leading, spacing: FeastTheme.Spacing.xSmall) {
+                    VStack(alignment: .leading, spacing: FeastTheme.Spacing.small) {
+                        Text(sectionContextText.uppercased())
+                            .font(FeastTheme.Typography.sectionLabel)
+                            .tracking(0.8)
+                            .foregroundStyle(FeastTheme.Colors.secondaryText)
+                            .fixedSize(horizontal: false, vertical: true)
+
                         Text(headerTitle)
-                            .font(FeastTheme.Typography.sectionTitle)
+                            .font(FeastTheme.Typography.formTitle)
                             .foregroundStyle(FeastTheme.Colors.primaryText)
+                            .fixedSize(horizontal: false, vertical: true)
 
                         if let headerSubtitle {
                             Text(headerSubtitle)
                                 .font(FeastTheme.Typography.supporting)
-                                .foregroundStyle(FeastTheme.Colors.secondaryNeutral)
+                                .foregroundStyle(FeastTheme.Colors.secondaryText)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
+
+                        Text(headerStatusSummary)
+                            .font(FeastTheme.Typography.rowMetadata)
+                            .foregroundStyle(FeastTheme.Colors.secondaryText)
 
                         if resolvedPlace == nil {
                             Text("Using saved snapshot")
-                                .font(FeastTheme.Typography.caption)
-                                .foregroundStyle(FeastTheme.Colors.secondaryAccent)
+                                .font(FeastTheme.Typography.rowUtility)
+                                .foregroundStyle(FeastTheme.Colors.tertiaryText)
                         }
                     }
 
@@ -132,10 +159,13 @@ struct SavedPlaceDetailView: View {
                     if isResolvingPlace {
                         ProgressView()
                             .controlSize(.small)
+                            .padding(.top, 2)
                     }
                 }
 
                 if savedPlace.applePlaceIDValue != nil {
+                    FeastFormDivider()
+
                     Button {
                         Task {
                             await openInMaps()
@@ -146,75 +176,161 @@ struct SavedPlaceDetailView: View {
                             systemImage: "map"
                         )
                     }
+                    .buttonStyle(FeastInlineActionButtonStyle())
                     .disabled(isOpeningInMaps)
                 }
             }
-            .padding(.vertical, FeastTheme.Spacing.xSmall)
+        } header: {
+            FeastFormSectionHeader(
+                title: "Place Profile",
+                subtitle: "Apple Maps context and editable notes together"
+            )
         }
     }
 
     private var metadataSection: some View {
-        Section("Metadata") {
-            Picker("Status", selection: $status) {
-                ForEach(PlaceStatus.allCases) { status in
-                    Text(status.rawValue).tag(status)
+        Section {
+            FeastFormGroup {
+                FeastFormField(
+                    title: "Status",
+                    helper: "How this place should read in your list."
+                ) {
+                    Picker("Status", selection: $status) {
+                        ForEach(PlaceStatus.allCases) { status in
+                            Text(status.rawValue).tag(status)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .tint(FeastTheme.Colors.primaryText)
                 }
-            }
 
-            Picker("Place Type", selection: $placeType) {
-                ForEach(PlaceType.allCases) { placeType in
-                    Text(placeType.rawValue).tag(placeType)
+                FeastFormDivider()
+
+                FeastFormField(
+                    title: "Place Type",
+                    helper: "Keeps the place profile consistent across Feast."
+                ) {
+                    Picker("Place Type", selection: $placeType) {
+                        ForEach(PlaceType.allCases) { placeType in
+                            Text(placeType.rawValue).tag(placeType)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .tint(FeastTheme.Colors.primaryText)
                 }
             }
+        } header: {
+            FeastFormSectionHeader(
+                title: "Metadata",
+                subtitle: "Update the way the place is categorized"
+            )
         }
     }
 
     private var categoriesSection: some View {
-        Section("Cuisines And Tags") {
-            TextField("Cuisines", text: $cuisinesText)
-                .textInputAutocapitalization(.words)
+        Section {
+            FeastFormGroup {
+                FeastFormField(title: "Cuisines") {
+                    TextField("Italian, sushi, bakery", text: $cuisinesText)
+                        .textInputAutocapitalization(.words)
+                        .feastFieldSurface()
+                }
 
-            TextField("Tags", text: $tagsText)
-                .textInputAutocapitalization(.words)
+                FeastFormDivider()
 
-            Text("Use commas for multiple values.")
-                .font(FeastTheme.Typography.caption)
-                .foregroundStyle(FeastTheme.Colors.secondaryNeutral)
+                FeastFormField(title: "Tags") {
+                    TextField("Date night, lunch, worth a detour", text: $tagsText)
+                        .textInputAutocapitalization(.words)
+                        .feastFieldSurface()
+                }
+            }
+        } header: {
+            FeastFormSectionHeader(
+                title: "Cuisines And Tags",
+                subtitle: "Use commas to separate multiple values"
+            )
         }
     }
 
     private var notesSection: some View {
-        Section("Notes") {
-            TextField("Note", text: $note, axis: .vertical)
-                .lineLimit(3...6)
+        Section {
+            FeastFormGroup {
+                FeastFormField(title: "Note", helper: "What makes the place worth returning to?") {
+                    TextField("Why it matters", text: $note, axis: .vertical)
+                        .lineLimit(3...6)
+                        .feastFieldSurface(minHeight: 92)
+                }
 
-            TextField("Skip Note", text: $skipNote, axis: .vertical)
-                .lineLimit(2...4)
+                FeastFormDivider()
 
-            TextField("Instagram URL", text: $instagramURL)
-                .keyboardType(.URL)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
+                FeastFormField(title: "Skip Note", helper: "What would make you pass on it next time?") {
+                    TextField("Why you might skip it", text: $skipNote, axis: .vertical)
+                        .lineLimit(2...4)
+                        .feastFieldSurface(minHeight: 76)
+                }
+
+                FeastFormDivider()
+
+                FeastFormField(title: "Instagram URL") {
+                    TextField("https://instagram.com/...", text: $instagramURL)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .feastFieldSurface()
+                }
+            }
+        } header: {
+            FeastFormSectionHeader(
+                title: "Notes",
+                subtitle: "Keep the place profile useful and easy to scan"
+            )
         }
     }
 
     private var sectionAssignmentSection: some View {
-        Section("Section Assignment") {
-            Picker("Section", selection: $selectedSectionObjectID) {
-                Text("Unsorted").tag(nil as NSManagedObjectID?)
+        Section {
+            FeastFormGroup {
+                FeastFormField(
+                    title: "Section",
+                    helper: "Choose Unsorted if the place should stay on the list without a section for now."
+                ) {
+                    Picker("Section", selection: $selectedSectionObjectID) {
+                        Text("Unsorted").tag(nil as NSManagedObjectID?)
 
-                ForEach(allSections) { section in
-                    Text(section.pathDisplay).tag(section.objectID as NSManagedObjectID?)
+                        ForEach(allSections) { section in
+                            Text(section.pathDisplay).tag(section.objectID as NSManagedObjectID?)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .tint(FeastTheme.Colors.primaryText)
                 }
             }
+        } header: {
+            FeastFormSectionHeader(
+                title: "Section Assignment",
+                subtitle: "Move the place without changing its list"
+            )
         }
     }
 
     private var actionsSection: some View {
         Section {
-            Button("Delete Place", role: .destructive) {
-                showingDeleteConfirmation = true
+            FeastFormGroup {
+                Button(role: .destructive) {
+                    showingDeleteConfirmation = true
+                } label: {
+                    Text("Delete Place")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
+        } header: {
+            FeastFormSectionHeader(
+                title: "Actions",
+                subtitle: "Deleting removes the place from \(savedPlace.displayListName)"
+            )
         }
     }
 
