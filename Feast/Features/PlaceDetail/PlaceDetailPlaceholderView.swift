@@ -258,17 +258,21 @@ struct SavedPlaceDetailView: View {
         Section {
             FeastFormGroup {
                 FeastFormField(title: "Note", helper: "What makes the place worth returning to?") {
-                    TextField("Why it matters", text: $note, axis: .vertical)
-                        .lineLimit(3...6)
-                        .feastFieldSurface(minHeight: 92)
+                    FeastMultilineTextEditor(
+                        placeholder: "Why it matters",
+                        text: $note,
+                        minHeight: 92
+                    )
                 }
 
                 FeastFormDivider()
 
                 FeastFormField(title: "Skip Note", helper: "What would make you pass on it next time?") {
-                    TextField("Why you might skip it", text: $skipNote, axis: .vertical)
-                        .lineLimit(2...4)
-                        .feastFieldSurface(minHeight: 76)
+                    FeastMultilineTextEditor(
+                        placeholder: "Why you might skip it",
+                        text: $skipNote,
+                        minHeight: 76
+                    )
                 }
 
                 FeastFormDivider()
@@ -397,10 +401,11 @@ struct SavedPlaceDetailView: View {
                     listSection: selectedNeighborhood
                 )
             )
+            dismiss()
         } catch {
             detailAlert = DetailAlertState(
                 title: "Couldn't Save Changes",
-                message: error.localizedDescription
+                message: errorMessage(for: error)
             )
         }
     }
@@ -427,6 +432,15 @@ struct SavedPlaceDetailView: View {
     private func normalizedOptional(_ rawValue: String) -> String? {
         let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func errorMessage(for error: Error) -> String {
+        let message = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !message.isEmpty {
+            return message
+        }
+
+        return "Feast couldn't save this place. Your edits are still on screen."
     }
 }
 

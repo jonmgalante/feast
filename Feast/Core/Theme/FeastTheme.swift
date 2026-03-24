@@ -447,6 +447,46 @@ struct FeastFormField<Content: View>: View {
     }
 }
 
+struct FeastMultilineTextEditor: View {
+    let placeholder: String
+    @Binding var text: String
+    var minHeight: CGFloat
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            if text.isEmpty {
+                Text(placeholder)
+                    .font(FeastTheme.Typography.supporting)
+                    .foregroundStyle(FeastTheme.InputField.prompt)
+                    .padding(.top, 8)
+                    .padding(.leading, 5)
+                    .allowsHitTesting(false)
+            }
+
+            TextEditor(text: $text)
+                .font(FeastTheme.Typography.supporting)
+                .foregroundStyle(FeastTheme.InputField.text)
+                .tint(FeastTheme.InputField.selection)
+                .scrollContentBackground(.hidden)
+                .frame(
+                    minWidth: nil,
+                    idealWidth: nil,
+                    maxWidth: .infinity,
+                    minHeight: editorMinHeight,
+                    idealHeight: nil,
+                    maxHeight: nil,
+                    alignment: .topLeading
+                )
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .feastFieldSurface(minHeight: minHeight)
+    }
+
+    private var editorMinHeight: CGFloat {
+        max(minHeight - 20, 0)
+    }
+}
+
 struct FeastFormDivider: View {
     var body: some View {
         Rectangle()

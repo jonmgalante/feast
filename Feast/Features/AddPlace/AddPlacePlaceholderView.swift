@@ -415,17 +415,21 @@ private struct AddPlaceSaveView: View {
         Section {
             FeastFormGroup {
                 FeastFormField(title: "Note", helper: "Why it’s worth saving.") {
-                    TextField("What stood out?", text: $note, axis: .vertical)
-                        .lineLimit(3...6)
-                        .feastFieldSurface(minHeight: 92)
+                    FeastMultilineTextEditor(
+                        placeholder: "What stood out?",
+                        text: $note,
+                        minHeight: 92
+                    )
                 }
 
                 FeastFormDivider()
 
                 FeastFormField(title: "Skip Note", helper: "Why you might pass on it next time.") {
-                    TextField("What gave you pause?", text: $skipNote, axis: .vertical)
-                        .lineLimit(2...4)
-                        .feastFieldSurface(minHeight: 76)
+                    FeastMultilineTextEditor(
+                        placeholder: "What gave you pause?",
+                        text: $skipNote,
+                        minHeight: 76
+                    )
                 }
 
                 FeastFormDivider()
@@ -495,7 +499,7 @@ private struct AddPlaceSaveView: View {
             )
             onSaveComplete()
         } catch {
-            saveErrorMessage = error.localizedDescription
+            saveErrorMessage = errorMessage(for: error)
             showingSaveError = true
         }
     }
@@ -536,6 +540,15 @@ private struct AddPlaceSaveView: View {
     private static func matches(_ lhs: String, _ rhs: String) -> Bool {
         lhs.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
             == rhs.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+    }
+
+    private func errorMessage(for error: Error) -> String {
+        let message = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !message.isEmpty {
+            return message
+        }
+
+        return "Feast couldn't save this place. Your edits are still on screen."
     }
 }
 
