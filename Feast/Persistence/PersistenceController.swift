@@ -51,7 +51,7 @@ enum FeastListSharingState: Equatable {
     var shareActionTitle: String {
         switch self {
         case .localOnly:
-            return "Share List"
+            return "Share City"
         case .shared(role: .owner):
             return "Manage Sharing"
         case .shared(role: .editor):
@@ -113,9 +113,9 @@ final class PersistenceController {
             case .missingSharedPersistentStore:
                 return "Feast couldn't access the shared CloudKit store."
             case .missingPersistentStore:
-                return "Feast couldn't determine which persistent store this list belongs to."
+                return "Feast couldn't determine which persistent store this city belongs to."
             case .failedToPrepareShare:
-                return "Feast couldn't prepare sharing for this list."
+                return "Feast couldn't prepare sharing for this city."
             }
         }
     }

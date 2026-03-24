@@ -14,7 +14,7 @@ struct FeastRootView: View {
                 }
                 .tint(FeastTheme.Colors.secondaryAction)
                 .tabItem {
-                    Label("Lists", systemImage: "list.bullet.rectangle")
+                    Label("Cities", systemImage: "building.2")
                 }
 
                 NavigationStack {

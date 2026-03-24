@@ -1,3 +1,5 @@
+import Foundation
+
 struct AppServices {
     let persistenceController: PersistenceController
     let repository: FeastRepository
@@ -9,7 +11,12 @@ struct AppServices {
             context: persistenceController.viewContext,
             persistenceController: persistenceController
         )
-        try? repository.seedIfNeeded(mode: .defaultListsOnly)
+        do {
+            try repository.seedIfNeeded(mode: .defaultListsOnly)
+            try repository.migrateToCityNeighborhoodModelIfNeeded()
+        } catch {
+            assertionFailure("Failed to initialize Feast data: \(error.localizedDescription)")
+        }
         return AppServices(
             persistenceController: persistenceController,
             repository: repository,
@@ -23,7 +30,12 @@ struct AppServices {
             context: persistenceController.viewContext,
             persistenceController: persistenceController
         )
-        try? repository.seedIfNeeded(mode: .previewDemoContent)
+        do {
+            try repository.seedIfNeeded(mode: .previewDemoContent)
+            try repository.migrateToCityNeighborhoodModelIfNeeded()
+        } catch {
+            assertionFailure("Failed to initialize Feast preview data: \(error.localizedDescription)")
+        }
         return AppServices(
             persistenceController: persistenceController,
             repository: repository,

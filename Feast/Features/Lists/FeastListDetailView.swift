@@ -4,8 +4,8 @@ struct FeastListDetailView: View {
     @Environment(\.managedObjectContext) private var viewContext
     @Environment(\.persistenceController) private var persistenceController
     @ObservedObject var feastList: FeastList
-    @State private var sectionEditor: SectionEditorState?
-    @State private var sectionPendingDeletion: ListSection?
+    @State private var neighborhoodEditor: NeighborhoodEditorState?
+    @State private var neighborhoodPendingDeletion: ListSection?
     @State private var showingAddPlaceSheet = false
     @State private var searchText = ""
     @State private var searchFilters = SavedPlaceSearchFilters()
@@ -18,35 +18,35 @@ struct FeastListDetailView: View {
             .listStyle(.insetGrouped)
             .navigationTitle(feastList.displayName)
             .navigationBarTitleDisplayMode(.inline)
-            .searchable(text: $searchText, prompt: "Search in \(feastList.displayName)")
-            .sheet(item: $sectionEditor) { editor in
+            .searchable(text: $searchText, prompt: "Search places in \(feastList.displayName)")
+            .sheet(item: $neighborhoodEditor) { editor in
                 NavigationStack {
-                    SectionNameEditorSheet(
+                    NeighborhoodNameEditorSheet(
                         title: editor.title,
                         initialName: editor.initialName
                     ) { newName in
-                        if let section = editor.section {
-                            rename(section, to: newName)
+                        if let neighborhood = editor.neighborhood {
+                            renameNeighborhood(neighborhood, to: newName)
                         } else {
-                            createSection(named: newName, parent: editor.parentSection)
+                            createNeighborhood(named: newName)
                         }
                     }
                 }
             }
             .confirmationDialog(
-                "Delete this section?",
+                "Delete this neighborhood?",
                 isPresented: deleteDialogBinding,
                 titleVisibility: .visible,
-                presenting: sectionPendingDeletion
-            ) { section in
-                Button("Delete Section", role: .destructive) {
-                    delete(section)
+                presenting: neighborhoodPendingDeletion
+            ) { neighborhood in
+                Button("Delete Neighborhood", role: .destructive) {
+                    deleteNeighborhood(neighborhood)
                 }
                 Button("Cancel", role: .cancel) {
-                    sectionPendingDeletion = nil
+                    neighborhoodPendingDeletion = nil
                 }
-            } message: { section in
-                Text(deleteMessage(for: section))
+            } message: { neighborhood in
+                Text(deleteMessage(for: neighborhood))
             }
             .sheet(isPresented: $showingAddPlaceSheet) {
                 NavigationStack {
@@ -73,11 +73,11 @@ struct FeastListDetailView: View {
             if isShowingSearchResults {
                 searchResultsSection
             } else {
-                if feastList.sortedSavedPlaces.isEmpty && feastList.topLevelSections.isEmpty {
+                if feastList.sortedSavedPlaces.isEmpty && feastList.neighborhoodSections.isEmpty {
                     emptyStateSection
                 } else {
-                    ForEach(feastList.topLevelSections) { section in
-                        topLevelSection(section)
+                    ForEach(feastList.neighborhoodSections) { section in
+                        neighborhoodSection(section)
                     }
                     unsortedSection
                 }
@@ -114,10 +114,10 @@ struct FeastListDetailView: View {
 
     private var deleteDialogBinding: Binding<Bool> {
         Binding(
-            get: { sectionPendingDeletion != nil },
+            get: { neighborhoodPendingDeletion != nil },
             set: { isPresented in
                 if !isPresented {
-                    sectionPendingDeletion = nil
+                    neighborhoodPendingDeletion = nil
                 }
             }
         )
@@ -161,16 +161,16 @@ struct FeastListDetailView: View {
     private var emptyStateSection: some View {
         Section {
             VStack(alignment: .leading, spacing: FeastTheme.Spacing.medium) {
-                Text("This list is ready for sections and places.")
+                Text("This city is ready for neighborhoods.")
                     .font(FeastTheme.Typography.body.weight(.semibold))
                     .foregroundStyle(FeastTheme.Colors.primaryText)
 
-                Text("Create sections for geographic groupings like city and neighborhood, then add places from Apple Maps.")
+                Text("Add neighborhoods like Ridgewood or Lower East Side, then save places from Apple Maps.")
                     .font(FeastTheme.Typography.supporting)
                     .foregroundStyle(FeastTheme.Colors.secondaryText)
 
-                Button("Create Section") {
-                    presentNewTopLevelSectionEditor()
+                Button("Add Neighborhood") {
+                    presentAddNeighborhoodEditor()
                 }
                 .buttonStyle(FeastInlineActionButtonStyle())
             }
@@ -187,10 +187,10 @@ struct FeastListDetailView: View {
                     SavedPlaceListRow(place: place)
                 }
             } header: {
-                SectionHeaderView(
+                NeighborhoodHeaderView(
                     title: "Unsorted",
                     kind: .unsorted,
-                    subtitle: "Places without a section"
+                    subtitle: "Places without a neighborhood"
                 ) {
                     EmptyView()
                 }
@@ -199,30 +199,25 @@ struct FeastListDetailView: View {
         }
     }
 
-    private func topLevelSection(_ section: ListSection) -> some View {
+    private func neighborhoodSection(_ neighborhood: ListSection) -> some View {
         Section {
-            sectionContent(section, nested: false)
+            neighborhoodContent(neighborhood)
         } header: {
-            SectionHeaderView(
-                title: section.displayName,
-                kind: .topLevel
+            NeighborhoodHeaderView(
+                title: neighborhood.displayName,
+                kind: .neighborhood
             ) {
                 Menu {
-                    Button("Add Subsection") {
-                        presentNewChildSectionEditor(parent: section)
-                    }
-
-                    Button("Rename Section") {
-                        sectionEditor = SectionEditorState(
-                            title: "Rename Section",
-                            initialName: section.displayName,
-                            parentSection: section.parent,
-                            section: section
+                    Button("Rename Neighborhood") {
+                        neighborhoodEditor = NeighborhoodEditorState(
+                            title: "Rename Neighborhood",
+                            initialName: neighborhood.displayName,
+                            neighborhood: neighborhood
                         )
                     }
 
-                    Button("Delete Section", role: .destructive) {
-                        sectionPendingDeletion = section
+                    Button("Delete Neighborhood", role: .destructive) {
+                        neighborhoodPendingDeletion = neighborhood
                     }
                 } label: {
                     Image(systemName: "ellipsis")
@@ -234,29 +229,12 @@ struct FeastListDetailView: View {
     }
 
     @ViewBuilder
-    private func sectionContent(_ section: ListSection, nested: Bool) -> some View {
-        if section.sortedSavedPlaces.isEmpty && section.sortedChildren.isEmpty {
-            EmptySectionRow(isNested: nested)
+    private func neighborhoodContent(_ neighborhood: ListSection) -> some View {
+        if neighborhood.sortedSavedPlaces.isEmpty {
+            EmptyNeighborhoodRow()
         } else {
-            ForEach(section.sortedSavedPlaces) { place in
-                SavedPlaceListRow(place: place, isNested: nested)
-            }
-
-            ForEach(section.sortedChildren) { child in
-                ChildSectionBlock(
-                    section: child,
-                    onRename: {
-                        sectionEditor = SectionEditorState(
-                            title: "Rename Section",
-                            initialName: child.displayName,
-                            parentSection: child.parent,
-                            section: child
-                        )
-                    },
-                    onDelete: {
-                        sectionPendingDeletion = child
-                    }
-                )
+            ForEach(neighborhood.sortedSavedPlaces) { place in
+                SavedPlaceListRow(place: place)
             }
         }
     }
@@ -274,18 +252,8 @@ struct FeastListDetailView: View {
             }
 
             Menu {
-                Button("New Top-Level Section") {
-                    presentNewTopLevelSectionEditor()
-                }
-
-                if !feastList.topLevelSections.isEmpty {
-                    Menu("Add Subsection") {
-                        ForEach(feastList.topLevelSections) { section in
-                            Button(section.displayName) {
-                                presentNewChildSectionEditor(parent: section)
-                            }
-                        }
-                    }
+                Button("Add Neighborhood") {
+                    presentAddNeighborhoodEditor()
                 }
             } label: {
                 FeastToolbarSymbol(systemName: "folder.badge.plus")
@@ -320,79 +288,61 @@ struct FeastListDetailView: View {
         return components.joined(separator: " • ")
     }
 
-    private func presentNewTopLevelSectionEditor() {
-        sectionEditor = SectionEditorState(
-            title: "New Section",
+    private func presentAddNeighborhoodEditor() {
+        neighborhoodEditor = NeighborhoodEditorState(
+            title: "Add Neighborhood",
             initialName: "",
-            parentSection: nil,
-            section: nil
+            neighborhood: nil
         )
     }
 
-    private func presentNewChildSectionEditor(parent: ListSection) {
-        sectionEditor = SectionEditorState(
-            title: "New Subsection",
-            initialName: "",
-            parentSection: parent,
-            section: nil
-        )
-    }
-
-    private func createSection(named name: String, parent: ListSection?) {
+    private func createNeighborhood(named name: String) {
         do {
-            try repository.createListSection(named: name, in: feastList, parent: parent)
-            sectionEditor = nil
+            try repository.createListSection(named: name, in: feastList)
+            neighborhoodEditor = nil
         } catch {
-            assertionFailure("Failed to create section: \(error.localizedDescription)")
+            assertionFailure("Failed to create neighborhood: \(error.localizedDescription)")
         }
     }
 
-    private func rename(_ section: ListSection, to name: String) {
+    private func renameNeighborhood(_ neighborhood: ListSection, to name: String) {
         do {
-            try repository.rename(section, to: name)
-            sectionEditor = nil
+            try repository.rename(neighborhood, to: name)
+            neighborhoodEditor = nil
         } catch {
-            assertionFailure("Failed to rename section: \(error.localizedDescription)")
+            assertionFailure("Failed to rename neighborhood: \(error.localizedDescription)")
         }
     }
 
-    private func delete(_ section: ListSection) {
+    private func deleteNeighborhood(_ neighborhood: ListSection) {
         do {
-            try repository.delete(section)
-            sectionPendingDeletion = nil
+            try repository.delete(neighborhood)
+            neighborhoodPendingDeletion = nil
         } catch {
-            assertionFailure("Failed to delete section: \(error.localizedDescription)")
+            assertionFailure("Failed to delete neighborhood: \(error.localizedDescription)")
         }
     }
 
-    private func deleteMessage(for section: ListSection) -> String {
-        if section.sortedChildren.isEmpty {
-            return "Saved places in \(section.displayName) will stay in \(feastList.displayName) and move to Unsorted."
-        }
-
-        return "This removes \(section.displayName) and its subsections. Saved places will stay in \(feastList.displayName) and move to Unsorted."
+    private func deleteMessage(for neighborhood: ListSection) -> String {
+        "Places in \(neighborhood.displayName) will stay in \(feastList.displayName) and move to Unsorted."
     }
 }
 
-private struct SectionEditorState: Identifiable {
+private struct NeighborhoodEditorState: Identifiable {
     let id = UUID()
     let title: String
     let initialName: String
-    let parentSection: ListSection?
-    let section: ListSection?
+    let neighborhood: ListSection?
 }
 
-private enum SectionHeaderKind: Equatable {
-    case topLevel
-    case nested
+private enum NeighborhoodHeaderKind: Equatable {
+    case neighborhood
     case unsorted
 
     var labelText: String {
         switch self {
-        case .topLevel:
-            return "Section"
-        case .nested:
-            return "Subsection"
+        case .neighborhood:
+            return "Neighborhood"
         case .unsorted:
             return "Unsorted"
         }
@@ -400,7 +350,7 @@ private enum SectionHeaderKind: Equatable {
 
     var labelColor: Color {
         switch self {
-        case .topLevel, .nested:
+        case .neighborhood:
             return FeastTheme.Colors.secondaryText
         case .unsorted:
             return FeastTheme.Colors.tertiaryText
@@ -409,23 +359,21 @@ private enum SectionHeaderKind: Equatable {
 
     var titleFont: Font {
         switch self {
-        case .topLevel, .unsorted:
+        case .neighborhood, .unsorted:
             return FeastTheme.Typography.sectionTitle
-        case .nested:
-            return FeastTheme.Typography.sectionHeader
         }
     }
 }
 
-private struct SectionHeaderView<TrailingContent: View>: View {
+private struct NeighborhoodHeaderView<TrailingContent: View>: View {
     let title: String
-    let kind: SectionHeaderKind
+    let kind: NeighborhoodHeaderKind
     let subtitle: String?
     let trailingContent: TrailingContent
 
     init(
         title: String,
-        kind: SectionHeaderKind,
+        kind: NeighborhoodHeaderKind,
         subtitle: String? = nil,
         @ViewBuilder trailingContent: () -> TrailingContent
     ) {
@@ -448,17 +396,9 @@ private struct SectionHeaderView<TrailingContent: View>: View {
                 trailingContent
             }
 
-            HStack(spacing: FeastTheme.Spacing.small) {
-                if kind == .nested {
-                    Image(systemName: "arrow.turn.down.right")
-                        .font(FeastTheme.Typography.caption.weight(.semibold))
-                        .foregroundStyle(FeastTheme.Colors.secondaryText)
-                }
-
-                Text(title)
-                    .font(kind.titleFont)
-                    .foregroundStyle(FeastTheme.Colors.primaryText)
-            }
+            Text(title)
+                .font(kind.titleFont)
+                .foregroundStyle(FeastTheme.Colors.primaryText)
 
             if let subtitle {
                 Text(subtitle)
@@ -467,60 +407,22 @@ private struct SectionHeaderView<TrailingContent: View>: View {
                     .lineLimit(2)
             }
         }
-        .padding(.top, kind == .topLevel ? FeastTheme.Spacing.small : 2)
-        .padding(.bottom, kind == .topLevel ? FeastTheme.Spacing.xSmall : 2)
+        .padding(.top, kind == .neighborhood ? FeastTheme.Spacing.small : 2)
+        .padding(.bottom, kind == .neighborhood ? FeastTheme.Spacing.xSmall : 2)
         .textCase(nil)
     }
 }
 
-private struct EmptySectionRow: View {
-    let isNested: Bool
-
+private struct EmptyNeighborhoodRow: View {
     var body: some View {
-        Text("No saved places in this section yet.")
+        Text("No saved places in this neighborhood yet.")
             .font(FeastTheme.Typography.rowMetadata)
             .foregroundStyle(FeastTheme.Colors.secondaryText)
             .padding(.vertical, FeastTheme.Spacing.xSmall)
-            .padding(.leading, isNested ? FeastTheme.Spacing.xLarge : 0)
     }
 }
 
-private struct ChildSectionBlock: View {
-    let section: ListSection
-    let onRename: () -> Void
-    let onDelete: () -> Void
-
-    var body: some View {
-        SectionHeaderView(
-            title: section.displayName,
-            kind: .nested
-        ) {
-            Menu {
-                Button("Rename Section") {
-                    onRename()
-                }
-
-                Button("Delete Section", role: .destructive) {
-                    onDelete()
-                }
-            } label: {
-                Image(systemName: "ellipsis")
-                    .feastUtilitySymbol()
-            }
-        }
-        .padding(.vertical, FeastTheme.Spacing.xSmall)
-
-        if section.sortedSavedPlaces.isEmpty {
-            EmptySectionRow(isNested: true)
-        } else {
-            ForEach(section.sortedSavedPlaces) { place in
-                SavedPlaceListRow(place: place, isNested: true)
-            }
-        }
-    }
-}
-
-private struct SectionNameEditorSheet: View {
+private struct NeighborhoodNameEditorSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var name: String
 
@@ -538,10 +440,10 @@ private struct SectionNameEditorSheet: View {
             Section {
                 FeastFormGroup {
                     FeastFormField(
-                        title: "Section Name",
-                        helper: "Use clear geographic names like city, region, or neighborhood."
+                        title: "Neighborhood Name",
+                        helper: "Use the neighborhood name you want to group places under."
                     ) {
-                        TextField("Section name", text: $name)
+                        TextField("Neighborhood name", text: $name)
                             .textInputAutocapitalization(.words)
                             .autocorrectionDisabled()
                             .feastFieldSurface(minHeight: 52)
@@ -550,7 +452,7 @@ private struct SectionNameEditorSheet: View {
             } header: {
                 FeastFormSectionHeader(
                     title: "Name",
-                    subtitle: "Sections organize places inside a list"
+                    subtitle: "Neighborhoods organize places inside a city"
                 )
             }
         }

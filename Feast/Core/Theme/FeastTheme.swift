@@ -278,6 +278,36 @@ struct FeastToolbarSymbol: View {
     }
 }
 
+struct FeastToolbarActionCluster<Content: View>: View {
+    private let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        HStack(spacing: 2) {
+            content
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
+        .background {
+            Capsule(style: .continuous)
+                .fill(FeastTheme.Colors.surfaceBackground.opacity(0.92))
+        }
+        .overlay {
+            Capsule(style: .continuous)
+                .stroke(FeastTheme.Colors.dividerBorder.opacity(0.9), lineWidth: 1)
+        }
+        .shadow(
+            color: FeastTheme.Chrome.mapOverlayShadow.opacity(0.45),
+            radius: 10,
+            x: 0,
+            y: 4
+        )
+    }
+}
+
 extension View {
     func feastScrollableChrome() -> some View {
         modifier(FeastScrollableChromeModifier())

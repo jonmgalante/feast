@@ -130,8 +130,8 @@ enum SavedPlaceSearchEngine {
     private static func searchableFields(for place: SavedPlace) -> [String] {
         [
             place.displayName,
-            place.displayListName,
-            place.displaySectionPath,
+            place.displayCityName,
+            place.displayNeighborhoodName,
             place.placeStatus.rawValue,
             place.placeTypeValue.rawValue,
             place.note,
@@ -211,8 +211,8 @@ struct SavedPlaceFilterSheet: View {
             Section {
                 FeastFormGroup {
                     FeastFormField(
-                        title: "List",
-                        helper: "Search is already scoped to this Feast list."
+                        title: "City",
+                        helper: "Search is already scoped to this city."
                     ) {
                         Text(fixedFeastList.displayName)
                             .font(FeastTheme.Typography.supporting.weight(.semibold))
@@ -223,18 +223,18 @@ struct SavedPlaceFilterSheet: View {
             } header: {
                 FeastFormSectionHeader(
                     title: "Scope",
-                    subtitle: "These filters only affect the current list"
+                    subtitle: "These filters only affect the current city"
                 )
             }
         } else {
             Section {
                 FeastFormGroup {
                     FeastFormField(
-                        title: "List",
-                        helper: "Choose which Feast list to search."
+                        title: "City",
+                        helper: "Choose which city to search."
                     ) {
-                        Picker("List", selection: $filters.selectedListURIString) {
-                            Text("All Lists").tag(nil as String?)
+                        Picker("City", selection: $filters.selectedListURIString) {
+                            Text("All Cities").tag(nil as String?)
 
                             ForEach(availableLists) { feastList in
                                 Text(feastList.displayName)

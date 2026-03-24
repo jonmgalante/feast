@@ -18,7 +18,7 @@ This document converts the locked Feast v1 product spec into implementation phas
   - `SavedPlaceStatus`
   - supporting enums for `placeType`, cuisine, and tags only if needed by the requested feature
 - Create the two-tab shell only when explicitly requested:
-  - Lists
+  - Cities
   - Map
 - Ensure naming avoids conflicts with SwiftUI `List`.
 
@@ -28,21 +28,23 @@ This document converts the locked Feast v1 product spec into implementation phas
   - `FeastList`
   - `ListSection`
   - `SavedPlace`
-- Encode the section hierarchy with max depth 2 under a list.
+- Keep `FeastList` as the model backing a City in the UI.
+- Keep `ListSection` as the model backing a Neighborhood in the UI.
+- Support exactly one neighborhood level under a city in the app layer.
 - Keep neighborhood data in `ListSection`, not `SavedPlace`.
 - Persist the locked `SavedPlace` fields only unless a later prompt expands the spec.
 - Add timestamps needed for sorting, recency, and auditing.
 
-## Phase 3: Lists Experience
-- Build list browsing around top-level lists such as `NYC`, `USA`, `International`, and future trip lists.
-- Support geographic grouping through sections.
+## Phase 3: Cities Experience
+- Build city browsing around top-level cities such as `NYC`, `London`, and `Philadelphia`.
+- Support geographic grouping through neighborhoods.
 - Present the typical hierarchy:
-  - `FeastList > City/Region > Neighborhood`
-- Support creating and editing list structure within the locked hierarchy rules.
+  - `City (FeastList) > Neighborhood (ListSection) > Place`
+- Support creating and editing city structure within the locked hierarchy rules.
 - Keep sharing UI out until explicitly requested.
 
 ## Phase 4: Saved Place Management
-- Add the place-add flow from the Lists tab.
+- Add the place-add flow from the Cities tab.
 - Require every saved place to originate from an Apple Maps match.
 - Do not allow manual or freeform place creation.
 - Support editing the locked `SavedPlace` content fields.
@@ -56,13 +58,13 @@ This document converts the locked Feast v1 product spec into implementation phas
 ## Phase 5: Map Experience
 - Add the Map tab as a combined saved + explore surface.
 - Support adding places from the Map tab using Apple Maps / MapKit only.
-- Reflect saved places on the map using list and section context.
-- Keep the map experience aligned with the same place source-of-truth rules as Lists.
+- Reflect saved places on the map using city and neighborhood context.
+- Keep the map experience aligned with the same place source-of-truth rules as Cities.
 
 ## Phase 6: Search And Filter
-- Add cross-list search.
+- Add cross-city search.
 - Add filters for:
-  - list
+  - city
   - status
   - place type
   - cuisine
@@ -71,16 +73,16 @@ This document converts the locked Feast v1 product spec into implementation phas
 ## Phase 7: Sharing And Sync
 - This phase is deferred until explicitly requested.
 - When requested, use CloudKit only.
-- The shareable unit is a `FeastList`.
+- The shareable unit is a `FeastList`, surfaced as a City in the UI.
 - Preserve the locked role behavior:
-  - Owner and Editor can both edit content.
+  - Owner and Editor can both edit city content.
   - Only Owner manages sharing.
-  - Only Owner can delete the entire shared list.
+  - Only Owner can delete the entire shared city.
 
 ## Phase 8: Import From Notes
 - This phase is deferred until explicitly requested.
 - Entry points:
-  - Lists tab overflow menu
+  - Cities tab overflow menu
   - Empty-state CTA for first-time users or zero-place state
 - Import sources:
   - pasted content from Apple Notes

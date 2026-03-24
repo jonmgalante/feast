@@ -70,12 +70,12 @@ extension SavedPlace {
         return URL(string: instagramURL)
     }
 
-    var displayListName: String {
-        feastList?.displayName ?? "No List"
+    var displayCityName: String {
+        feastList?.displayName ?? "No City"
     }
 
-    var displaySectionPath: String {
-        listSection?.pathDisplay ?? "No section yet"
+    var displayNeighborhoodName: String {
+        listSection?.displayName ?? "No neighborhood yet"
     }
 
     var statusAndTypeSummary: String {

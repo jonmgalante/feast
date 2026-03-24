@@ -60,7 +60,7 @@ struct AddPlaceView: View {
                         .font(FeastTheme.Typography.formTitle)
                         .foregroundStyle(FeastTheme.Colors.primaryText)
 
-                    Text("Add a place to \(feastList.displayName) by finding the exact Apple Maps match first.")
+                    Text("Add a place to \(feastList.displayName) by choosing the exact Apple Maps match first.")
                         .font(FeastTheme.Typography.rowMetadata)
                         .foregroundStyle(FeastTheme.Colors.secondaryText)
 
@@ -226,7 +226,7 @@ private struct AddPlaceSaveView: View {
     @State private var note = ""
     @State private var skipNote = ""
     @State private var instagramURL = ""
-    @State private var selectedSectionObjectID: NSManagedObjectID?
+    @State private var selectedNeighborhoodObjectID: NSManagedObjectID?
     @State private var showingSaveError = false
     @State private var saveErrorMessage = ""
 
@@ -238,8 +238,8 @@ private struct AddPlaceSaveView: View {
         self.feastList = feastList
         self.place = place
         self.onSaveComplete = onSaveComplete
-        _selectedSectionObjectID = State(
-            initialValue: Self.suggestedSection(in: feastList, for: place)?.objectID
+        _selectedNeighborhoodObjectID = State(
+            initialValue: Self.suggestedNeighborhood(in: feastList, for: place)?.objectID
         )
     }
 
@@ -249,7 +249,7 @@ private struct AddPlaceSaveView: View {
             metadataSection
             categoriesSection
             notesSection
-            sectionAssignmentSection
+            neighborhoodAssignmentSection
         }
         .feastScrollableChrome()
         .listStyle(.insetGrouped)
@@ -280,21 +280,21 @@ private struct AddPlaceSaveView: View {
         )
     }
 
-    private var allSections: [ListSection] {
-        feastList.sortedSections
+    private var allNeighborhoods: [ListSection] {
+        feastList.neighborhoodSections
     }
 
-    private var selectedSection: ListSection? {
-        allSections.first { $0.objectID == selectedSectionObjectID }
+    private var selectedNeighborhood: ListSection? {
+        allNeighborhoods.first { $0.objectID == selectedNeighborhoodObjectID }
     }
 
-    private var sectionSuggestionMessage: String? {
-        if let suggestedSection = Self.suggestedSection(in: feastList, for: place) {
-            return "Apple Maps suggests \(suggestedSection.pathDisplay)."
+    private var neighborhoodSuggestionMessage: String? {
+        if let suggestedNeighborhood = Self.suggestedNeighborhood(in: feastList, for: place) {
+            return "Suggested neighborhood: \(suggestedNeighborhood.displayName)."
         }
 
-        if let path = place.suggestedSectionPath.displayText {
-            return "Apple Maps suggests \(path), but no matching section exists yet. You can save this to Unsorted for now."
+        if let neighborhood = Self.normalized(place.suggestedSectionPath.neighborhood) {
+            return "Suggested neighborhood: \(neighborhood). No matching neighborhood exists yet, so you can save this to Unsorted for now."
         }
 
         return nil
@@ -350,7 +350,7 @@ private struct AddPlaceSaveView: View {
             FeastFormGroup {
                 FeastFormField(
                     title: "Status",
-                    helper: "Choose how the place should read in your list."
+                    helper: "Choose how the place should read in your city."
                 ) {
                     Picker("Status", selection: $status) {
                         ForEach(PlaceStatus.allCases) { status in
@@ -446,21 +446,21 @@ private struct AddPlaceSaveView: View {
         }
     }
 
-    private var sectionAssignmentSection: some View {
+    private var neighborhoodAssignmentSection: some View {
         Section {
             FeastFormGroup {
                 FeastFormField(
-                    title: "Section",
-                    helper: sectionSuggestionMessage ?? "Choose Unsorted if you want to organize this place later.",
-                    helperColor: sectionSuggestionMessage == nil
+                    title: "Neighborhood",
+                    helper: neighborhoodSuggestionMessage ?? "Choose Unsorted if you want to organize this place later.",
+                    helperColor: neighborhoodSuggestionMessage == nil
                         ? FeastTheme.Colors.secondaryText
                         : FeastTheme.Colors.tertiaryText
                 ) {
-                    Picker("Section", selection: $selectedSectionObjectID) {
+                    Picker("Neighborhood", selection: $selectedNeighborhoodObjectID) {
                         Text("Unsorted").tag(nil as NSManagedObjectID?)
 
-                        ForEach(allSections) { section in
-                            Text(section.pathDisplay).tag(section.objectID as NSManagedObjectID?)
+                        ForEach(allNeighborhoods) { neighborhood in
+                            Text(neighborhood.displayName).tag(neighborhood.objectID as NSManagedObjectID?)
                         }
                     }
                     .labelsHidden()
@@ -470,8 +470,8 @@ private struct AddPlaceSaveView: View {
             }
         } header: {
             FeastFormSectionHeader(
-                title: "Section Assignment",
-                subtitle: "Place it where it belongs in \(feastList.displayName)"
+                title: "Neighborhood Assignment",
+                subtitle: "Save it into a neighborhood within \(feastList.displayName)"
             )
         }
     }
@@ -490,7 +490,7 @@ private struct AddPlaceSaveView: View {
                     skipNote: normalizedOptional(skipNote),
                     instagramURL: normalizedOptional(instagramURL),
                     feastList: feastList,
-                    listSection: selectedSection
+                    listSection: selectedNeighborhood
                 )
             )
             onSaveComplete()
@@ -512,31 +512,20 @@ private struct AddPlaceSaveView: View {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    private static func suggestedSection(
+    private static func suggestedNeighborhood(
         in feastList: FeastList,
         for place: ApplePlaceMatch
     ) -> ListSection? {
-        guard let cityOrRegion = normalized(place.suggestedSectionPath.cityOrRegion) else {
+        guard let neighborhood = normalized(place.suggestedSectionPath.neighborhood) else {
             return nil
         }
 
-        guard let topLevelSection = feastList.topLevelSections.first(where: {
-            matches($0.displayName, cityOrRegion)
-        }) else {
-            return nil
-        }
-
-        if let neighborhood = normalized(place.suggestedSectionPath.neighborhood),
-           let childSection = topLevelSection.sortedChildren.first(where: {
-               matches($0.displayName, neighborhood)
-           }) {
-            return childSection
-        }
-
-        return topLevelSection
+        return feastList.neighborhoodSections.first(where: {
+            matches($0.displayName, neighborhood)
+        })
     }
 
-    private static func normalized(_ rawValue: String?) -> String? {
+    fileprivate static func normalized(_ rawValue: String?) -> String? {
         guard let trimmed = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else {
             return nil
         }
@@ -572,8 +561,8 @@ private struct SearchResultRow: View {
                         .foregroundStyle(FeastTheme.Colors.secondaryText)
                 }
 
-                if let suggestedPath = place.suggestedSectionPath.displayText {
-                    Text("Suggested section: \(suggestedPath)")
+                if let neighborhood = AddPlaceSaveView.normalized(place.suggestedSectionPath.neighborhood) {
+                    Text("Suggested neighborhood: \(neighborhood)")
                         .font(FeastTheme.Typography.rowUtility)
                         .foregroundStyle(FeastTheme.Colors.tertiaryText)
                 }

@@ -13,7 +13,7 @@ struct ListsRootView: View {
     private var savedPlaces: FetchedResults<SavedPlace>
 
     @State private var showingImportPlaceholder = false
-    @State private var listEditor: ListEditorState?
+    @State private var cityEditor: CityEditorState?
     @State private var listPendingDeletion: FeastList?
     @State private var searchText = ""
     @State private var searchFilters = SavedPlaceSearchFilters()
@@ -43,19 +43,18 @@ struct ListsRootView: View {
             .feastScrollableChrome()
             .toolbar { toolbarContent }
             .listStyle(.insetGrouped)
-            .navigationTitle("Lists")
-            .navigationBarTitleDisplayMode(.large)
-            .searchable(text: $searchText, prompt: "Search saved places")
-            .sheet(item: $listEditor) { editor in
+            .navigationBarTitleDisplayMode(.inline)
+            .searchable(text: $searchText, prompt: "Search places across cities")
+            .sheet(item: $cityEditor) { editor in
                 NavigationStack {
-                    ListNameEditorSheet(
+                    CityNameEditorSheet(
                         title: editor.title,
                         initialName: editor.initialName
                     ) { newName in
                         if let feastList = editor.feastList {
-                            rename(feastList, to: newName)
+                            renameCity(feastList, to: newName)
                         } else {
-                            createList(named: newName)
+                            createCity(named: newName)
                         }
                     }
                 }
@@ -85,19 +84,19 @@ struct ListsRootView: View {
                 )
             }
             .confirmationDialog(
-                "Delete this list?",
+                "Delete this city?",
                 isPresented: deleteDialogBinding,
                 titleVisibility: .visible,
                 presenting: listPendingDeletion
             ) { feastList in
-                Button("Delete List", role: .destructive) {
+                Button("Delete City", role: .destructive) {
                     delete(feastList)
                 }
                 Button("Cancel", role: .cancel) {
                     listPendingDeletion = nil
                 }
             } message: { feastList in
-                Text("This will remove \(feastList.displayName), its sections, and its saved places.")
+                Text("This will remove \(feastList.displayName), its neighborhoods, and its saved places.")
             }
             .alert("Import from Notes", isPresented: $showingImportPlaceholder) {
                 Button("OK", role: .cancel) { }
@@ -125,7 +124,7 @@ struct ListsRootView: View {
         List {
             importCallToActionSection
             searchResultsSection
-            listsSection
+            citiesSection
         }
     }
 
@@ -157,7 +156,7 @@ struct ListsRootView: View {
                         .font(FeastTheme.Typography.body.weight(.semibold))
                         .foregroundStyle(FeastTheme.Colors.primaryText)
 
-                    Text("Your default lists are ready. Import from Notes when you want to bring in your first saved places.")
+                    Text("Your starter cities are ready. Import from Notes when you want to bring in your first saved places.")
                         .font(FeastTheme.Typography.supporting)
                         .foregroundStyle(FeastTheme.Colors.secondaryText)
 
@@ -198,13 +197,13 @@ struct ListsRootView: View {
         }
     }
 
-    private var listsSection: some View {
-        Section("Lists") {
+    private var citiesSection: some View {
+        Section {
             if feastLists.isEmpty {
                 ContentUnavailableView(
-                    "No Lists Yet",
+                    "No Cities Yet",
                     systemImage: "square.stack",
-                    description: Text("Create a list to start organizing places.")
+                    description: Text("Create a city to start organizing places.")
                 )
             } else {
                 ForEach(feastLists) { feastList in
@@ -217,28 +216,46 @@ struct ListsRootView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        ToolbarItemGroup(placement: .topBarTrailing) {
-            Button {
-                showingSearchFilters = true
-            } label: {
-                FeastToolbarSymbol(
-                    systemName: "line.3.horizontal.decrease",
-                    isEmphasized: searchFilters.hasActiveFilters
-                )
-            }
+        ToolbarItem(placement: .principal) {
+            HStack(spacing: 0) {
+                BrandWordmarkView()
+                    .frame(maxWidth: .infinity, alignment: .leading)
 
-            Button {
-                listEditor = ListEditorState(title: "New List", initialName: "", feastList: nil)
-            } label: {
-                FeastToolbarSymbol(systemName: "plus")
+                Spacer(minLength: 0)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
 
-            Menu {
-                Button("Import from Notes") {
-                    showingImportPlaceholder = true
+        ToolbarItem(placement: .topBarTrailing) {
+            FeastToolbarActionCluster {
+                Button {
+                    showingSearchFilters = true
+                } label: {
+                    FeastToolbarSymbol(
+                        systemName: "line.3.horizontal.decrease",
+                        isEmphasized: searchFilters.hasActiveFilters
+                    )
+                    .frame(width: 36, height: 36)
+                    .contentShape(Rectangle())
                 }
-            } label: {
-                FeastToolbarSymbol(systemName: "ellipsis")
+
+                Button {
+                    cityEditor = CityEditorState(title: "New City", initialName: "", feastList: nil)
+                } label: {
+                    FeastToolbarSymbol(systemName: "plus")
+                        .frame(width: 36, height: 36)
+                        .contentShape(Rectangle())
+                }
+
+                Menu {
+                    Button("Import from Notes") {
+                        showingImportPlaceholder = true
+                    }
+                } label: {
+                    FeastToolbarSymbol(systemName: "ellipsis")
+                        .frame(width: 36, height: 36)
+                        .contentShape(Rectangle())
+                }
             }
         }
     }
@@ -271,7 +288,7 @@ struct ListsRootView: View {
         }
 
         if let feastList = feastLists.first(where: { $0.objectURIString == searchFilters.selectedListURIString }) {
-            components.append("List: \(feastList.displayName)")
+            components.append("City: \(feastList.displayName)")
         }
 
         if let status = searchFilters.selectedStatus {
@@ -369,20 +386,20 @@ struct ListsRootView: View {
                     .disabled(true)
             }
 
-            Button("Rename") {
-                listEditor = ListEditorState(
-                    title: "Rename List",
+            Button("Rename City") {
+                cityEditor = CityEditorState(
+                    title: "Rename City",
                     initialName: feastList.displayName,
                     feastList: feastList
                 )
             }
 
             if sharingState.canDeleteList {
-                Button("Delete List", role: .destructive) {
+                Button("Delete City", role: .destructive) {
                     listPendingDeletion = feastList
                 }
             } else {
-                Button("Only the Owner Can Delete This List") { }
+                Button("Only the Owner Can Delete This City") { }
                     .disabled(true)
             }
         }
@@ -396,14 +413,14 @@ struct ListsRootView: View {
         }
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
             if sharingState.canDeleteList {
-                Button("Delete", role: .destructive) {
+                Button("Delete City", role: .destructive) {
                     listPendingDeletion = feastList
                 }
             }
 
-            Button("Rename") {
-                listEditor = ListEditorState(
-                    title: "Rename List",
+            Button("Rename City") {
+                cityEditor = CityEditorState(
+                    title: "Rename City",
                     initialName: feastList.displayName,
                     feastList: feastList
                 )
@@ -412,26 +429,26 @@ struct ListsRootView: View {
         }
     }
 
-    private func createList(named name: String) {
+    private func createCity(named name: String) {
         do {
             try repository.createFeastList(named: name)
-            listEditor = nil
+            cityEditor = nil
             refreshSharingStates()
         } catch {
             alertState = ListsAlertState(
-                title: "Couldn't Create List",
+                title: "Couldn't Create City",
                 message: error.localizedDescription
             )
         }
     }
 
-    private func rename(_ feastList: FeastList, to name: String) {
+    private func renameCity(_ feastList: FeastList, to name: String) {
         do {
             try repository.rename(feastList, to: name)
-            listEditor = nil
+            cityEditor = nil
         } catch {
             alertState = ListsAlertState(
-                title: "Couldn't Rename List",
+                title: "Couldn't Rename City",
                 message: error.localizedDescription
             )
         }
@@ -444,7 +461,7 @@ struct ListsRootView: View {
             refreshSharingStates()
         } catch {
             alertState = ListsAlertState(
-                title: "Couldn't Delete List",
+                title: "Couldn't Delete City",
                 message: error.localizedDescription
             )
         }
@@ -489,21 +506,21 @@ struct ListsRootView: View {
 
     private func listPrimaryMetadata(for feastList: FeastList) -> String {
         let savedPlacesLabel = "\(feastList.savedPlaceCount) saved"
-        let topLevelSectionCount = feastList.topLevelSections.count
+        let topLevelSectionCount = feastList.neighborhoodSections.count
 
         guard topLevelSectionCount > 0 else {
             return savedPlacesLabel
         }
 
-        let sectionLabel = topLevelSectionCount == 1 ? "1 section" : "\(topLevelSectionCount) sections"
-        return "\(savedPlacesLabel) • \(sectionLabel)"
+        let neighborhoodLabel = topLevelSectionCount == 1 ? "1 neighborhood" : "\(topLevelSectionCount) neighborhoods"
+        return "\(savedPlacesLabel) • \(neighborhoodLabel)"
     }
 
     private func listSecondaryMetadata(for feastList: FeastList) -> String? {
-        let topLevelSectionNames = feastList.topLevelSections.map(\.displayName)
+        let topLevelSectionNames = feastList.neighborhoodSections.map(\.displayName)
 
         guard !topLevelSectionNames.isEmpty else {
-            return "Ready for city and neighborhood sections"
+            return "Add neighborhoods to organize places"
         }
 
         let visibleNames = Array(topLevelSectionNames.prefix(2))
@@ -514,7 +531,7 @@ struct ListsRootView: View {
     }
 }
 
-private struct ListEditorState: Identifiable {
+private struct CityEditorState: Identifiable {
     let id = UUID()
     let title: String
     let initialName: String
@@ -527,7 +544,7 @@ private struct ListsAlertState: Identifiable {
     let message: String
 }
 
-private struct ListNameEditorSheet: View {
+private struct CityNameEditorSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var name: String
 
@@ -545,10 +562,10 @@ private struct ListNameEditorSheet: View {
             Section {
                 FeastFormGroup {
                     FeastFormField(
-                        title: "List Name",
-                        helper: "Keep list names broad and scannable, like NYC, USA, or a future trip."
+                        title: "City Name",
+                        helper: "Use a city name people will recognize quickly, like NYC, London, or Philadelphia."
                     ) {
-                        TextField("List name", text: $name)
+                        TextField("City name", text: $name)
                             .textInputAutocapitalization(.words)
                             .autocorrectionDisabled()
                             .feastFieldSurface(minHeight: 52)
@@ -557,7 +574,7 @@ private struct ListNameEditorSheet: View {
             } header: {
                 FeastFormSectionHeader(
                     title: "Name",
-                    subtitle: "Lists are the top-level buckets in Feast"
+                    subtitle: "Cities are the top-level buckets in Feast"
                 )
             }
         }

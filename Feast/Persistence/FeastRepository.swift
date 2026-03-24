@@ -9,18 +9,18 @@ final class FeastRepository {
         var errorDescription: String? {
             switch self {
             case .ownerRequiredToDeleteSharedList:
-                return "Only the owner can delete an entire shared list."
+                return "Only the owner can delete a shared city."
             }
         }
     }
 
     enum SectionError: LocalizedError {
-        case invalidParentDepth
+        case nestedNeighborhoodsUnavailable
 
         var errorDescription: String? {
             switch self {
-            case .invalidParentDepth:
-                return "Feast v1 supports at most two section levels under a list."
+            case .nestedNeighborhoodsUnavailable:
+                return "Neighborhoods can only be created directly inside a city."
             }
         }
     }
@@ -113,23 +113,36 @@ final class FeastRepository {
         try saveIfNeeded()
     }
 
+    func migrateToCityNeighborhoodModelIfNeeded() throws {
+        let feastLists = try fetchFeastLists()
+        var didChange = false
+
+        for feastList in feastLists {
+            if migrateSections(in: feastList) {
+                didChange = true
+            }
+        }
+
+        if didChange {
+            try saveIfNeeded()
+        }
+    }
+
     @discardableResult
     func createListSection(
         named name: String,
         in feastList: FeastList,
         parent: ListSection? = nil
     ) throws -> ListSection {
-        if let parent, parent.depth >= 1 {
-            throw SectionError.invalidParentDepth
+        if parent != nil {
+            throw SectionError.nestedNeighborhoodsUnavailable
         }
 
         let section = makeListSection(
             name: normalizeSectionName(name),
-            list: feastList,
-            parent: parent
+            list: feastList
         )
         touch(feastList)
-        touch(parent)
         try saveIfNeeded()
         return section
     }
@@ -142,11 +155,9 @@ final class FeastRepository {
     }
 
     func delete(_ section: ListSection) throws {
-        let parent = section.parent
         let feastList = section.feastList
 
         context.delete(section)
-        touch(parent)
         touch(feastList)
         try saveIfNeeded()
     }
@@ -154,7 +165,7 @@ final class FeastRepository {
     @discardableResult
     func createSavedPlace(from draft: SavedPlaceDraft) throws -> SavedPlace {
         if let listSection = draft.listSection, listSection.feastList != draft.feastList {
-            assertionFailure("Attempted to save a place into a section that belongs to a different list.")
+            assertionFailure("Attempted to save a place into a neighborhood that belongs to a different city.")
         }
 
         let savedPlace = makeSavedPlace(
@@ -180,7 +191,7 @@ final class FeastRepository {
         let previousSection = savedPlace.listSection
 
         if let listSection = metadata.listSection, listSection.feastList != savedPlace.feastList {
-            assertionFailure("Attempted to save a place into a section that belongs to a different list.")
+            assertionFailure("Attempted to save a place into a neighborhood that belongs to a different city.")
         }
 
         savedPlace.placeStatus = metadata.status
@@ -230,7 +241,7 @@ final class FeastRepository {
     }
 
     private func seedDefaultLists() -> [String: FeastList] {
-        let names = ["NYC", "USA", "International"]
+        let names = ["NYC", "London", "Philadelphia"]
         return Dictionary(uniqueKeysWithValues: names.map { name in
             (name, makeFeastList(name: name))
         })
@@ -239,22 +250,16 @@ final class FeastRepository {
     private func seedDemoContent(into lists: [String: FeastList]) {
         guard
             let nyc = lists["NYC"],
-            let usa = lists["USA"],
-            let international = lists["International"]
+            let london = lists["London"],
+            let philadelphia = lists["Philadelphia"]
         else {
             return
         }
 
-        let brooklyn = makeListSection(name: "Brooklyn", list: nyc)
-        let ridgewood = makeListSection(name: "Ridgewood", list: nyc, parent: brooklyn)
-        let manhattan = makeListSection(name: "Manhattan", list: nyc)
-        let lowerEastSide = makeListSection(name: "Lower East Side", list: nyc, parent: manhattan)
-
-        let california = makeListSection(name: "California", list: usa)
-        let losAngeles = makeListSection(name: "Los Angeles", list: usa, parent: california)
-
-        let tokyo = makeListSection(name: "Tokyo", list: international)
-        let shibuya = makeListSection(name: "Shibuya", list: international, parent: tokyo)
+        let ridgewood = makeListSection(name: "Ridgewood", list: nyc)
+        let lowerEastSide = makeListSection(name: "Lower East Side", list: nyc)
+        let soho = makeListSection(name: "Soho", list: london)
+        let fishtown = makeListSection(name: "Fishtown", list: philadelphia)
 
         _ = makeSavedPlace(
             applePlaceID: "applemaps-rolo-s-ridgewood",
@@ -291,7 +296,7 @@ final class FeastRepository {
             placeType: .bakery,
             cuisines: ["Bakery", "Middle Eastern"],
             tags: ["Breakfast"],
-            note: "Good unsorted example for the list detail screen.",
+            note: "Good unsorted example for the city detail screen.",
             skipNote: nil,
             instagramURL: nil,
             list: nyc,
@@ -299,31 +304,31 @@ final class FeastRepository {
         )
 
         _ = makeSavedPlace(
-            applePlaceID: "applemaps-bar-etoile-la",
-            displayName: "Bar Etoile",
+            applePlaceID: "applemaps-st-john-soho",
+            displayName: "St. JOHN",
             status: .wantToTry,
-            placeType: .bar,
-            cuisines: ["Wine bar"],
-            tags: ["Date night"],
-            note: nil,
-            skipNote: "Need a trip to LA first.",
-            instagramURL: "https://www.instagram.com/baretoile",
-            list: usa,
-            section: losAngeles
+            placeType: .restaurant,
+            cuisines: ["British"],
+            tags: ["Classic", "Reservation"],
+            note: "A useful London anchor for preview data.",
+            skipNote: nil,
+            instagramURL: nil,
+            list: london,
+            section: soho
         )
 
         _ = makeSavedPlace(
-            applePlaceID: "applemaps-koffee-mameya-kakeru",
-            displayName: "Koffee Mameya Kakeru",
-            status: .justOpened,
-            placeType: .cafe,
-            cuisines: ["Coffee", "Dessert"],
-            tags: ["Reservation", "Coffee"],
-            note: "Good anchor for a Tokyo coffee list.",
+            applePlaceID: "applemaps-middle-child-clubhouse",
+            displayName: "Middle Child Clubhouse",
+            status: .been,
+            placeType: .restaurant,
+            cuisines: ["Sandwiches", "American"],
+            tags: ["Lunch", "Casual"],
+            note: "A good Philadelphia example with a neighborhood assignment.",
             skipNote: nil,
             instagramURL: nil,
-            list: international,
-            section: shibuya
+            list: philadelphia,
+            section: fishtown
         )
     }
 
@@ -343,7 +348,7 @@ final class FeastRepository {
     private func normalizeListName(_ rawValue: String) -> String {
         let normalized = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty else {
-            return "Untitled List"
+            return "Untitled City"
         }
 
         return normalized
@@ -352,7 +357,7 @@ final class FeastRepository {
     private func normalizeSectionName(_ rawValue: String) -> String {
         let normalized = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty else {
-            return "Untitled Section"
+            return "Untitled Neighborhood"
         }
 
         return normalized
@@ -423,5 +428,134 @@ final class FeastRepository {
 
     private func touch(_ section: ListSection?) {
         section?.updatedAt = Date()
+    }
+
+    private func migrateSections(in feastList: FeastList) -> Bool {
+        let allSections = stableSections(from: feastList.sortedSections)
+        guard !allSections.isEmpty else {
+            return false
+        }
+
+        let retirementCandidates = Set(
+            allSections
+                .filter { !$0.sortedChildren.isEmpty && $0.sortedSavedPlaces.isEmpty }
+                .map(\.objectID)
+        )
+
+        var didChange = false
+        var neighborhoodsByKey: [String: ListSection] = [:]
+
+        for section in stableSections(from: feastList.topLevelSections) {
+            let key = normalizedSectionKey(for: section.displayName)
+
+            if let existing = neighborhoodsByKey[key] {
+                didChange = merge(section, into: existing) || didChange
+            } else {
+                neighborhoodsByKey[key] = section
+            }
+        }
+
+        let nestedSections = allSections.sorted { lhs, rhs in
+            if lhs.depth != rhs.depth {
+                return lhs.depth > rhs.depth
+            }
+
+            return stableSectionLessThan(lhs, rhs)
+        }
+
+        for section in nestedSections where section.parent != nil && !section.isDeleted {
+            let key = normalizedSectionKey(for: section.displayName)
+
+            if let existing = neighborhoodsByKey[key], existing.objectID != section.objectID {
+                didChange = merge(section, into: existing) || didChange
+            } else {
+                section.parent = nil
+                touch(section)
+                touch(feastList)
+                neighborhoodsByKey[key] = section
+                didChange = true
+            }
+        }
+
+        neighborhoodsByKey.removeAll()
+
+        for section in stableSections(from: feastList.topLevelSections) where !section.isDeleted {
+            let key = normalizedSectionKey(for: section.displayName)
+
+            if let existing = neighborhoodsByKey[key], existing.objectID != section.objectID {
+                didChange = merge(section, into: existing) || didChange
+            } else {
+                neighborhoodsByKey[key] = section
+            }
+        }
+
+        for section in allSections where retirementCandidates.contains(section.objectID) && !section.isDeleted {
+            if section.parent == nil && section.sortedChildren.isEmpty && section.sortedSavedPlaces.isEmpty {
+                context.delete(section)
+                touch(feastList)
+                didChange = true
+            }
+        }
+
+        return didChange
+    }
+
+    @discardableResult
+    private func merge(_ source: ListSection, into destination: ListSection) -> Bool {
+        guard source.objectID != destination.objectID, !source.isDeleted else {
+            return false
+        }
+
+        var didChange = false
+        let now = Date()
+
+        let savedPlaces = source.savedPlaces as? Set<SavedPlace> ?? []
+        for savedPlace in savedPlaces where savedPlace.listSection != destination {
+            savedPlace.listSection = destination
+            savedPlace.updatedAt = now
+            didChange = true
+        }
+
+        let children = source.children as? Set<ListSection> ?? []
+        for child in children where child.parent == source {
+            child.parent = nil
+            touch(child)
+            didChange = true
+        }
+
+        if didChange {
+            touch(destination)
+            touch(destination.feastList)
+        }
+
+        context.delete(source)
+        touch(destination.feastList)
+        return true
+    }
+
+    private func stableSections(from sections: [ListSection]) -> [ListSection] {
+        sections.sorted(by: stableSectionLessThan)
+    }
+
+    private func stableSectionLessThan(_ lhs: ListSection, _ rhs: ListSection) -> Bool {
+        let lhsCreatedAt = lhs.createdAt ?? .distantPast
+        let rhsCreatedAt = rhs.createdAt ?? .distantPast
+
+        if lhsCreatedAt != rhsCreatedAt {
+            return lhsCreatedAt < rhsCreatedAt
+        }
+
+        let nameComparison = lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName)
+        if nameComparison != .orderedSame {
+            return nameComparison == .orderedAscending
+        }
+
+        return lhs.objectID.uriRepresentation().absoluteString < rhs.objectID.uriRepresentation().absoluteString
+    }
+
+    private func normalizedSectionKey(for rawValue: String) -> String {
+        rawValue
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
     }
 }

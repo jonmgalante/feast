@@ -21,7 +21,7 @@ extension ListSection: Identifiable {}
 
 extension ListSection {
     var displayName: String {
-        name ?? "Untitled Section"
+        name ?? "Untitled Neighborhood"
     }
 
     var sortedChildren: [ListSection] {

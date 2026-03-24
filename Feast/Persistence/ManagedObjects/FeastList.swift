@@ -23,7 +23,7 @@ extension FeastList {
     }
 
     var displayName: String {
-        name ?? "Untitled List"
+        name ?? "Untitled City"
     }
 
     var sortedSections: [ListSection] {
@@ -35,6 +35,10 @@ extension FeastList {
 
     var topLevelSections: [ListSection] {
         sortedSections.filter { $0.parent == nil }
+    }
+
+    var neighborhoodSections: [ListSection] {
+        topLevelSections
     }
 
     var sortedSavedPlaces: [SavedPlace] {
@@ -52,10 +56,10 @@ extension FeastList {
         (savedPlaces as? Set<SavedPlace>)?.count ?? 0
     }
 
-    var sectionSummary: String {
-        let names = topLevelSections.map(\.displayName)
+    var neighborhoodSummary: String {
+        let names = neighborhoodSections.map(\.displayName)
         guard !names.isEmpty else {
-            return "Ready for city and neighborhood groupings"
+            return "Add neighborhoods to organize places"
         }
 
         return names.joined(separator: ", ")

@@ -115,7 +115,7 @@ extension ApplePlacesService {
             secondaryText: "Ridgewood, Queens, NY",
             coordinate: ApplePlaceCoordinate(latitude: 40.7068, longitude: -73.9215),
             suggestedSectionPath: ApplePlaceSectionPathSuggestion(
-                cityOrRegion: "Brooklyn",
+                cityOrRegion: "NYC",
                 neighborhood: "Ridgewood"
             )
         ),
@@ -125,7 +125,7 @@ extension ApplePlacesService {
             secondaryText: "Lower East Side, New York, NY",
             coordinate: ApplePlaceCoordinate(latitude: 40.7180, longitude: -73.9897),
             suggestedSectionPath: ApplePlaceSectionPathSuggestion(
-                cityOrRegion: "Manhattan",
+                cityOrRegion: "NYC",
                 neighborhood: "Lower East Side"
             )
         ),
@@ -135,28 +135,28 @@ extension ApplePlacesService {
             secondaryText: "East Williamsburg, Brooklyn, NY",
             coordinate: ApplePlaceCoordinate(latitude: 40.7147, longitude: -73.9377),
             suggestedSectionPath: ApplePlaceSectionPathSuggestion(
-                cityOrRegion: "Brooklyn",
-                neighborhood: nil
+                cityOrRegion: "NYC",
+                neighborhood: "East Williamsburg"
             )
         ),
         ApplePlaceMatch(
-            applePlaceID: "applemaps-bar-etoile-la",
-            displayName: "Bar Etoile",
-            secondaryText: "Los Angeles, CA",
-            coordinate: ApplePlaceCoordinate(latitude: 34.0407, longitude: -118.2468),
+            applePlaceID: "applemaps-st-john-soho",
+            displayName: "St. JOHN",
+            secondaryText: "Soho, London",
+            coordinate: ApplePlaceCoordinate(latitude: 51.5146, longitude: -0.1357),
             suggestedSectionPath: ApplePlaceSectionPathSuggestion(
-                cityOrRegion: "California",
-                neighborhood: "Los Angeles"
+                cityOrRegion: "London",
+                neighborhood: "Soho"
             )
         ),
         ApplePlaceMatch(
-            applePlaceID: "applemaps-koffee-mameya-kakeru",
-            displayName: "Koffee Mameya Kakeru",
-            secondaryText: "Shibuya, Tokyo",
-            coordinate: ApplePlaceCoordinate(latitude: 35.6595, longitude: 139.7005),
+            applePlaceID: "applemaps-middle-child-clubhouse",
+            displayName: "Middle Child Clubhouse",
+            secondaryText: "Fishtown, Philadelphia, PA",
+            coordinate: ApplePlaceCoordinate(latitude: 39.9692, longitude: -75.1336),
             suggestedSectionPath: ApplePlaceSectionPathSuggestion(
-                cityOrRegion: "Tokyo",
-                neighborhood: "Shibuya"
+                cityOrRegion: "Philadelphia",
+                neighborhood: "Fishtown"
             )
         )
     ]

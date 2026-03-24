@@ -62,9 +62,9 @@ struct MapRootView: View {
                         AddPlaceView(feastList: selectedFeastList)
                     } else {
                         ContentUnavailableView(
-                            "No List Selected",
+                            "No City Selected",
                             systemImage: "magnifyingglass",
-                            description: Text("Choose a Feast list before searching Apple Maps.")
+                            description: Text("Choose a city before searching Apple Maps.")
                         )
                         .navigationTitle("Search")
                         .navigationBarTitleDisplayMode(.inline)
@@ -77,9 +77,9 @@ struct MapRootView: View {
         Group {
             if feastLists.isEmpty {
                 ContentUnavailableView(
-                    "No Lists Yet",
+                    "No Cities Yet",
                     systemImage: "map",
-                    description: Text("Create a Feast list to start mapping saved places.")
+                    description: Text("Create a city to start mapping saved places.")
                 )
             } else {
                 mapScreen
@@ -109,7 +109,7 @@ struct MapRootView: View {
         return feastLists.first
     }
 
-    private var selectedListSavedPlaces: [SavedPlace] {
+    private var selectedCitySavedPlaces: [SavedPlace] {
         guard let selectedFeastList else {
             return []
         }
@@ -119,7 +119,7 @@ struct MapRootView: View {
 
     private var markerResolutionKey: String {
         let listKey = selectedFeastList.map(uriString(for:)) ?? "none"
-        let placeKeys = selectedListSavedPlaces.map { place in
+        let placeKeys = selectedCitySavedPlaces.map { place in
             let objectKey = place.objectID.uriRepresentation().absoluteString
             let updateKey = place.updatedAtValue.timeIntervalSinceReferenceDate
             return "\(objectKey)-\(updateKey)"
@@ -131,7 +131,7 @@ struct MapRootView: View {
     private var mapHeaderOverlay: some View {
         HStack(alignment: .top, spacing: FeastTheme.Spacing.medium) {
             VStack(alignment: .leading, spacing: FeastTheme.Spacing.small) {
-                Text("Viewing")
+                Text("City")
                     .font(FeastTheme.Typography.sectionLabel)
                     .tracking(0.8)
                     .foregroundStyle(FeastTheme.Colors.secondaryText)
@@ -148,7 +148,7 @@ struct MapRootView: View {
                             .font(.system(size: 14, weight: .semibold))
                             .foregroundStyle(FeastTheme.Colors.accentSelection)
 
-                        Text(selectedFeastList?.displayName ?? "Select List")
+                        Text(selectedFeastList?.displayName ?? "Select City")
                             .font(FeastTheme.Typography.listTitle)
                             .foregroundStyle(FeastTheme.Colors.primaryText)
                             .lineLimit(1)
@@ -162,9 +162,9 @@ struct MapRootView: View {
                 }
                 .buttonStyle(.plain)
 
-                Text(listSummaryText)
+                Text(citySummaryText)
                     .font(FeastTheme.Typography.rowMetadata)
-                    .foregroundStyle(listSummaryColor)
+                    .foregroundStyle(citySummaryColor)
                     .lineLimit(2)
                     .multilineTextAlignment(.leading)
             }
@@ -225,7 +225,7 @@ struct MapRootView: View {
 
             if markerItems.isEmpty && !isResolvingMarkers {
                 ContentUnavailableView {
-                    Label("No Saved Places On This Map", systemImage: "mappin.and.ellipse")
+                    Label("No Places in This City Yet", systemImage: "mappin.and.ellipse")
                 } description: {
                     Text(emptyStateText)
                 } actions: {
@@ -244,7 +244,7 @@ struct MapRootView: View {
             if isResolvingMarkers {
                 HStack(spacing: FeastTheme.Spacing.small) {
                     ProgressView()
-                    Text("Loading saved places")
+                    Text("Loading places")
                         .font(FeastTheme.Typography.rowMetadata)
                         .foregroundStyle(FeastTheme.Colors.primaryText)
                 }
@@ -255,16 +255,16 @@ struct MapRootView: View {
         }
     }
 
-    private var listSummaryColor: Color {
-        selectedListSavedPlaces.isEmpty ? FeastTheme.Colors.secondaryText : FeastTheme.Colors.tertiaryText
+    private var citySummaryColor: Color {
+        selectedCitySavedPlaces.isEmpty ? FeastTheme.Colors.secondaryText : FeastTheme.Colors.tertiaryText
     }
 
-    private var listSummaryText: String {
+    private var citySummaryText: String {
         let mappedCount = markerItems.count
-        let savedCount = selectedListSavedPlaces.count
+        let savedCount = selectedCitySavedPlaces.count
 
         if savedCount == 0 {
-            return "Search Apple Maps and save places into this list to start building the map."
+            return "Search Apple Maps and save places into this city to start building the map."
         }
 
         if unresolvedPlaceCount > 0 {
@@ -272,18 +272,18 @@ struct MapRootView: View {
         }
 
         if mappedCount == 0 {
-            return "Saved places in this list will appear here once Apple Maps can resolve them."
+            return "Saved places in this city will appear here once Apple Maps can resolve them."
         }
 
         return "\(mappedCount) saved places on the map"
     }
 
     private var emptyStateText: String {
-        if selectedListSavedPlaces.isEmpty {
-            return "Search Apple Maps and save places into \(selectedFeastList?.displayName ?? "this list") to see them on the map."
+        if selectedCitySavedPlaces.isEmpty {
+            return "Search Apple Maps and save places into \(selectedFeastList?.displayName ?? "this city") to see them on the map."
         }
 
-        return "Feast could not resolve any saved places for this list in Apple Maps right now."
+        return "Feast could not resolve any saved places for this city in Apple Maps right now."
     }
 
     @MainActor
@@ -292,7 +292,7 @@ struct MapRootView: View {
             selectedFeastListURI = uriString(for: firstList)
         }
 
-        let places = selectedListSavedPlaces
+        let places = selectedCitySavedPlaces
 
         isResolvingMarkers = true
         defer {

@@ -15,21 +15,21 @@
 - No app account in v1
 
 ## Core UX Structure
-- Feast v1 has exactly two main tabs: Lists and Map.
+- Feast v1 has exactly two main tabs: Cities and Map.
 - The Map tab is both saved and explore.
-- The add flow must work from both Lists and Map.
-- The shareable unit is a `FeastList`.
-- Lists are top-level buckets such as `NYC`, `USA`, `International`, and future trip lists.
-- Sections live inside a list and store the geographic grouping.
-- Section hierarchy is capped at depth 2 under a list.
-- Typical structure: `FeastList > City/Region > Neighborhood`
+- The add flow must work from both Cities and Map.
+- The shareable unit is a `FeastList`, surfaced in the UI as a City.
+- Cities are the top-level buckets in the product.
+- Neighborhoods live directly inside a city and are stored in `ListSection`.
+- The product and UI support exactly one neighborhood level under a city.
+- Typical structure: `City (FeastList) > Neighborhood (ListSection) > Place`
 - Neighborhood belongs in `ListSection`, not `SavedPlace`.
 
 ## Sharing Rules
 - User-visible roles in v1: Owner and Editor
-- Owner and Editor both have full content-editing power over list content.
+- Owner and Editor both have full content-editing power over city content.
 - Only Owner manages sharing.
-- Only Owner can delete the entire shared list.
+- Only Owner can delete the entire shared city.
 
 ## Place Creation Rules
 - Every saved place must come from an Apple Maps match.
@@ -65,13 +65,13 @@
 - Regulars
 
 ## Search And Filter Baseline
-- Search across lists
-- Filters by list, status, place type, cuisine
+- Search across cities
+- Filters by city, status, place type, cuisine
 
 ## Import Rules
 - Import strategy is locked but is not part of the first coding pass.
 - Entry points:
-  - Lists tab overflow menu: Import from Notes
+  - Cities tab overflow menu: Import from Notes
   - Empty-state CTA for first-time users or zero-place state
 - Primary import: paste from Apple Notes
 - Secondary import: Markdown file exported from Apple Notes

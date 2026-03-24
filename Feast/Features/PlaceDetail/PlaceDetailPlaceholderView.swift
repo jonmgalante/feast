@@ -22,7 +22,7 @@ struct SavedPlaceDetailView: View {
     @State private var note: String
     @State private var skipNote: String
     @State private var instagramURL: String
-    @State private var selectedSectionObjectID: NSManagedObjectID?
+    @State private var selectedNeighborhoodObjectID: NSManagedObjectID?
 
     init(savedPlace: SavedPlace) {
         self.savedPlace = savedPlace
@@ -33,7 +33,7 @@ struct SavedPlaceDetailView: View {
         _note = State(initialValue: savedPlace.note ?? "")
         _skipNote = State(initialValue: savedPlace.skipNote ?? "")
         _instagramURL = State(initialValue: savedPlace.instagramURL ?? "")
-        _selectedSectionObjectID = State(initialValue: savedPlace.listSection?.objectID)
+        _selectedNeighborhoodObjectID = State(initialValue: savedPlace.listSection?.objectID)
     }
 
     var body: some View {
@@ -42,7 +42,7 @@ struct SavedPlaceDetailView: View {
             metadataSection
             categoriesSection
             notesSection
-            sectionAssignmentSection
+            neighborhoodAssignmentSection
             actionsSection
         }
         .feastScrollableChrome()
@@ -73,7 +73,7 @@ struct SavedPlaceDetailView: View {
             }
             Button("Cancel", role: .cancel) { }
         } message: {
-            Text("This deletes the place from \(savedPlace.displayListName).")
+            Text("This deletes the place from \(savedPlace.displayCityName).")
         }
         .alert(item: $detailAlert) { alert in
             Alert(
@@ -103,21 +103,21 @@ struct SavedPlaceDetailView: View {
         return nil
     }
 
-    private var sectionContextText: String {
-        let sectionName = selectedSection?.pathDisplay ?? "Unsorted"
-        return "\(savedPlace.displayListName) • \(sectionName)"
+    private var neighborhoodContextText: String {
+        let neighborhoodName = selectedNeighborhood?.displayName ?? "Unsorted"
+        return "\(savedPlace.displayCityName) • \(neighborhoodName)"
     }
 
     private var headerStatusSummary: String {
         "\(status.rawValue) • \(placeType.rawValue)"
     }
 
-    private var allSections: [ListSection] {
-        savedPlace.feastList?.sortedSections ?? []
+    private var allNeighborhoods: [ListSection] {
+        savedPlace.feastList?.neighborhoodSections ?? []
     }
 
-    private var selectedSection: ListSection? {
-        allSections.first { $0.objectID == selectedSectionObjectID }
+    private var selectedNeighborhood: ListSection? {
+        allNeighborhoods.first { $0.objectID == selectedNeighborhoodObjectID }
     }
 
     private var headerSection: some View {
@@ -125,7 +125,7 @@ struct SavedPlaceDetailView: View {
             FeastFormGroup {
                 HStack(alignment: .top, spacing: FeastTheme.Spacing.medium) {
                     VStack(alignment: .leading, spacing: FeastTheme.Spacing.small) {
-                        Text(sectionContextText.uppercased())
+                        Text(neighborhoodContextText.uppercased())
                             .font(FeastTheme.Typography.sectionLabel)
                             .tracking(0.8)
                             .foregroundStyle(FeastTheme.Colors.secondaryText)
@@ -183,7 +183,7 @@ struct SavedPlaceDetailView: View {
         } header: {
             FeastFormSectionHeader(
                 title: "Place Profile",
-                subtitle: "Apple Maps context and editable notes together"
+                subtitle: "City and neighborhood context, plus editable notes together"
             )
         }
     }
@@ -193,7 +193,7 @@ struct SavedPlaceDetailView: View {
             FeastFormGroup {
                 FeastFormField(
                     title: "Status",
-                    helper: "How this place should read in your list."
+                    helper: "How this place should read in your city."
                 ) {
                     Picker("Status", selection: $status) {
                         ForEach(PlaceStatus.allCases) { status in
@@ -289,18 +289,18 @@ struct SavedPlaceDetailView: View {
         }
     }
 
-    private var sectionAssignmentSection: some View {
+    private var neighborhoodAssignmentSection: some View {
         Section {
             FeastFormGroup {
                 FeastFormField(
-                    title: "Section",
-                    helper: "Choose Unsorted if the place should stay on the list without a section for now."
+                    title: "Neighborhood",
+                    helper: "Choose Unsorted if the place should stay in the city without a neighborhood for now."
                 ) {
-                    Picker("Section", selection: $selectedSectionObjectID) {
+                    Picker("Neighborhood", selection: $selectedNeighborhoodObjectID) {
                         Text("Unsorted").tag(nil as NSManagedObjectID?)
 
-                        ForEach(allSections) { section in
-                            Text(section.pathDisplay).tag(section.objectID as NSManagedObjectID?)
+                        ForEach(allNeighborhoods) { neighborhood in
+                            Text(neighborhood.displayName).tag(neighborhood.objectID as NSManagedObjectID?)
                         }
                     }
                     .labelsHidden()
@@ -310,8 +310,8 @@ struct SavedPlaceDetailView: View {
             }
         } header: {
             FeastFormSectionHeader(
-                title: "Section Assignment",
-                subtitle: "Move the place without changing its list"
+                title: "Neighborhood Assignment",
+                subtitle: "Move the place without changing its city"
             )
         }
     }
@@ -329,7 +329,7 @@ struct SavedPlaceDetailView: View {
         } header: {
             FeastFormSectionHeader(
                 title: "Actions",
-                subtitle: "Deleting removes the place from \(savedPlace.displayListName)"
+                subtitle: "Deleting removes the place from \(savedPlace.displayCityName)"
             )
         }
     }
@@ -394,7 +394,7 @@ struct SavedPlaceDetailView: View {
                     note: normalizedOptional(note),
                     skipNote: normalizedOptional(skipNote),
                     instagramURL: normalizedOptional(instagramURL),
-                    listSection: selectedSection
+                    listSection: selectedNeighborhood
                 )
             )
         } catch {

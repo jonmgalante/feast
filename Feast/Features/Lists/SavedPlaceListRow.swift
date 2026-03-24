@@ -72,12 +72,12 @@ struct SavedPlaceListRow: View {
     }
 
     private var locationContext: String? {
-        let sectionPath = place.listSection?.pathDisplay
+        let neighborhoodName = place.listSection?.displayName
 
-        if let sectionPath, !sectionPath.isEmpty {
-            return "\(place.displayListName) • \(sectionPath)"
+        if let neighborhoodName, !neighborhoodName.isEmpty {
+            return "\(place.displayCityName) • \(neighborhoodName)"
         }
 
-        return place.displayListName
+        return place.displayCityName
     }
 }
