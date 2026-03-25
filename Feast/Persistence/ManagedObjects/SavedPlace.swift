@@ -58,8 +58,8 @@ extension SavedPlace {
     }
 
     var tags: [String] {
-        get { decodeList(from: tagsStorage) }
-        set { tagsStorage = encodeList(newValue) }
+        get { decodeTags(from: tagsStorage) }
+        set { tagsStorage = encodeTags(newValue) }
     }
 
     var instagramURLValue: URL? {
@@ -102,6 +102,10 @@ extension SavedPlace {
             .filter { !$0.isEmpty }
     }
 
+    private func decodeTags(from storedValue: String?) -> [String] {
+        FeastTag.normalizedTags(decodeList(from: storedValue))
+    }
+
     private func encodeList(_ values: [String]) -> String? {
         let normalized = values
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -112,5 +116,9 @@ extension SavedPlace {
         }
 
         return normalized.joined(separator: "\n")
+    }
+
+    private func encodeTags(_ values: [String]) -> String? {
+        encodeList(FeastTag.normalizedTags(values))
     }
 }

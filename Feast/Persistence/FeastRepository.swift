@@ -50,6 +50,38 @@ final class FeastRepository {
         let listSection: ListSection?
     }
 
+    struct ImportedSavedPlaceDraft {
+        let applePlaceID: String
+        let displayNameSnapshot: String
+        let status: PlaceStatus
+        let placeType: PlaceType
+        let cuisines: [String]
+        let tags: [String]
+        let note: String?
+        let skipNote: String?
+        let instagramURL: String?
+        let neighborhoodName: String?
+    }
+
+    struct ImportSavedPlacesResult: Identifiable, Hashable {
+        let id = UUID()
+        let cityURIString: String
+        let cityName: String
+        let addedCount: Int
+        let duplicateCount: Int
+    }
+
+    enum ImportError: LocalizedError {
+        case cityUnavailable
+
+        var errorDescription: String? {
+            switch self {
+            case .cityUnavailable:
+                return "The selected city is no longer available for import."
+            }
+        }
+    }
+
     enum SeedMode {
         case defaultListsOnly
         case previewDemoContent
@@ -185,6 +217,91 @@ final class FeastRepository {
         touch(draft.listSection)
         try saveIfNeeded()
         return savedPlace
+    }
+
+    func importSavedPlaces(
+        from drafts: [ImportedSavedPlaceDraft],
+        into feastList: FeastList
+    ) throws -> ImportSavedPlacesResult {
+        guard
+            !feastList.isDeleted,
+            feastList.managedObjectContext === context
+        else {
+            throw ImportError.cityUnavailable
+        }
+
+        let existingPlaceIDs = Set(
+            (feastList.savedPlaces as? Set<SavedPlace> ?? [])
+                .compactMap(\.applePlaceIDValue)
+        )
+        var seenPlaceIDs = existingPlaceIDs
+        var neighborhoodsByKey: [String: ListSection] = [:]
+        for section in feastList.neighborhoodSections {
+            guard
+                let key = FeastTag.normalizedKey(for: section.displayName),
+                neighborhoodsByKey[key] == nil
+            else {
+                continue
+            }
+
+            neighborhoodsByKey[key] = section
+        }
+
+        var addedCount = 0
+        var duplicateCount = 0
+
+        do {
+            for draft in drafts {
+                guard
+                    let applePlaceID = normalizedOptional(draft.applePlaceID),
+                    let displayNameSnapshot = normalizedOptional(draft.displayNameSnapshot)
+                else {
+                    continue
+                }
+
+                guard !seenPlaceIDs.contains(applePlaceID) else {
+                    duplicateCount += 1
+                    continue
+                }
+
+                let neighborhood = importedNeighborhood(
+                    named: draft.neighborhoodName,
+                    in: feastList,
+                    cache: &neighborhoodsByKey
+                )
+
+                _ = makeSavedPlace(
+                    applePlaceID: applePlaceID,
+                    displayName: displayNameSnapshot,
+                    status: draft.status,
+                    placeType: draft.placeType,
+                    cuisines: normalizedListValues(draft.cuisines),
+                    tags: FeastTag.normalizedTags(draft.tags),
+                    note: normalizedOptional(draft.note),
+                    skipNote: normalizedOptional(draft.skipNote),
+                    instagramURL: normalizedOptional(draft.instagramURL),
+                    list: feastList,
+                    section: neighborhood
+                )
+                seenPlaceIDs.insert(applePlaceID)
+                addedCount += 1
+            }
+
+            if addedCount > 0 {
+                touch(feastList)
+                try saveIfNeeded()
+            }
+        } catch {
+            context.rollback()
+            throw error
+        }
+
+        return ImportSavedPlacesResult(
+            cityURIString: feastList.objectURIString,
+            cityName: feastList.displayName,
+            addedCount: addedCount,
+            duplicateCount: duplicateCount
+        )
     }
 
     func update(_ savedPlace: SavedPlace, with metadata: SavedPlaceMetadata) throws {
@@ -412,6 +529,63 @@ final class FeastRepository {
         persistenceController?.assign(savedPlace, toSameStoreAs: list)
 
         return savedPlace
+    }
+
+    private func importedNeighborhood(
+        named rawName: String?,
+        in feastList: FeastList,
+        cache: inout [String: ListSection]
+    ) -> ListSection? {
+        guard let normalizedName = FeastTag.collapsed(rawName ?? "") else {
+            return nil
+        }
+
+        guard let key = FeastTag.normalizedKey(for: normalizedName) else {
+            return nil
+        }
+
+        if let existingNeighborhood = cache[key] {
+            return existingNeighborhood
+        }
+
+        let neighborhood = makeListSection(name: normalizedName, list: feastList)
+        cache[key] = neighborhood
+        touch(neighborhood)
+        return neighborhood
+    }
+
+    private func normalizedOptional(_ rawValue: String?) -> String? {
+        guard let rawValue else {
+            return nil
+        }
+
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func normalizedListValues(_ values: [String]) -> [String] {
+        var normalizedValues: [String] = []
+        var seenKeys: Set<String> = []
+
+        for value in values {
+            guard let normalizedValue = normalizedOptional(value) else {
+                continue
+            }
+
+            let key = normalizedValue.folding(
+                options: [.caseInsensitive, .diacriticInsensitive],
+                locale: .current
+            )
+
+            guard !seenKeys.contains(key) else {
+                continue
+            }
+
+            seenKeys.insert(key)
+            normalizedValues.append(normalizedValue)
+        }
+
+        return normalizedValues
     }
 
     private func saveIfNeeded() throws {

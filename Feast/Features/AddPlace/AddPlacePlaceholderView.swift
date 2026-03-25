@@ -215,6 +215,7 @@ private struct AddPlaceSaveView: View {
     @Environment(\.persistenceController) private var persistenceController
 
     @ObservedObject var feastList: FeastList
+    @FetchRequest(fetchRequest: Self.savedPlacesFetchRequest) private var savedPlaces: FetchedResults<SavedPlace>
 
     let place: ApplePlaceMatch
     let onSaveComplete: () -> Void
@@ -222,7 +223,7 @@ private struct AddPlaceSaveView: View {
     @State private var status: PlaceStatus = .wantToTry
     @State private var placeType: PlaceType = .restaurant
     @State private var cuisinesText = ""
-    @State private var tagsText = ""
+    @State private var tags: [String] = []
     @State private var note = ""
     @State private var skipNote = ""
     @State private var instagramURL = ""
@@ -280,6 +281,15 @@ private struct AddPlaceSaveView: View {
         )
     }
 
+    private static let savedPlacesFetchRequest: NSFetchRequest<SavedPlace> = {
+        let request = SavedPlace.fetchRequest()
+        request.sortDescriptors = [
+            NSSortDescriptor(key: "updatedAt", ascending: false),
+            NSSortDescriptor(key: "displayNameSnapshot", ascending: true)
+        ]
+        return request
+    }()
+
     private var allNeighborhoods: [ListSection] {
         feastList.neighborhoodSections
     }
@@ -298,6 +308,10 @@ private struct AddPlaceSaveView: View {
         }
 
         return nil
+    }
+
+    private var existingTags: [String] {
+        FeastTag.catalog(from: savedPlaces.map(\.tags))
     }
 
     private var matchSection: some View {
@@ -397,16 +411,21 @@ private struct AddPlaceSaveView: View {
 
                 FeastFormDivider()
 
-                FeastFormField(title: "Tags") {
-                    TextField("Date night, walk-in, worth a detour", text: $tagsText)
-                        .textInputAutocapitalization(.words)
-                        .feastFieldSurface()
+                FeastFormField(
+                    title: "Tags",
+                    helper: "Reuse an existing tag or press Return, comma, or the add button to create one."
+                ) {
+                    FeastTagInputView(
+                        tags: $tags,
+                        existingTags: existingTags,
+                        placeholder: "Date Night, Brunch, Worth a Detour"
+                    )
                 }
             }
         } header: {
             FeastFormSectionHeader(
                 title: "Cuisines And Tags",
-                subtitle: "Use commas to separate multiple values"
+                subtitle: "Cuisines stay freeform; tags are reusable labels"
             )
         }
     }
@@ -489,7 +508,7 @@ private struct AddPlaceSaveView: View {
                     status: status,
                     placeType: placeType,
                     cuisines: splitValues(from: cuisinesText),
-                    tags: splitValues(from: tagsText),
+                    tags: tags,
                     note: normalizedOptional(note),
                     skipNote: normalizedOptional(skipNote),
                     instagramURL: normalizedOptional(instagramURL),

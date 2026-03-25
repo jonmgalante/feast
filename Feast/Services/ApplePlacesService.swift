@@ -70,10 +70,40 @@ struct ApplePlacesService {
                 return []
             }
 
-            return Self.previewMatches.filter { match in
-                match.displayName.localizedCaseInsensitiveContains(trimmed)
-                    || match.secondaryText.localizedCaseInsensitiveContains(trimmed)
-            }
+            let queryTokens = Self.searchTokens(from: trimmed)
+            let rankedMatches = Self.previewMatches
+                .compactMap { match -> (match: ApplePlaceMatch, score: Int)? in
+                    let searchableText = [
+                        match.displayName,
+                        match.secondaryText,
+                        match.suggestedSectionPath.cityOrRegion,
+                        match.suggestedSectionPath.neighborhood
+                    ]
+                    .compactMap { $0 }
+                    .joined(separator: " ")
+
+                    let searchableTokens = Self.searchTokens(from: searchableText)
+                    let sharedTokenCount = queryTokens.intersection(searchableTokens).count
+
+                    guard sharedTokenCount > 0 else {
+                        return nil
+                    }
+
+                    let score = sharedTokenCount * 20
+                        + (match.displayName.localizedCaseInsensitiveContains(trimmed) ? 12 : 0)
+                        + (match.secondaryText.localizedCaseInsensitiveContains(trimmed) ? 8 : 0)
+
+                    return (match, score)
+                }
+                .sorted { lhs, rhs in
+                    if lhs.score != rhs.score {
+                        return lhs.score > rhs.score
+                    }
+
+                    return lhs.match.displayName.localizedCaseInsensitiveCompare(rhs.match.displayName) == .orderedAscending
+                }
+
+            return rankedMatches.map { $0.match }
         }
     }
 
@@ -249,6 +279,27 @@ extension ApplePlacesService {
         }
 
         return trimmed
+    }
+
+    nonisolated private static func searchTokens(from rawValue: String) -> Set<String> {
+        let folded = rawValue.folding(
+            options: [.caseInsensitive, .diacriticInsensitive],
+            locale: .current
+        )
+
+        let normalized = folded.unicodeScalars.map { scalar -> Character in
+            if CharacterSet.alphanumerics.contains(scalar) {
+                return Character(scalar)
+            }
+
+            return " "
+        }
+
+        return Set(
+            String(normalized)
+                .split(whereSeparator: \.isWhitespace)
+                .map(String.init)
+        )
     }
 }
 

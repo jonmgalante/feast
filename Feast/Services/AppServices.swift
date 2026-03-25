@@ -12,7 +12,6 @@ struct AppServices {
             persistenceController: persistenceController
         )
         do {
-            try repository.seedIfNeeded(mode: .defaultListsOnly)
             try repository.migrateToCityNeighborhoodModelIfNeeded()
         } catch {
             assertionFailure("Failed to initialize Feast data: \(error.localizedDescription)")

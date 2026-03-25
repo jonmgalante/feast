@@ -8,6 +8,7 @@ struct SavedPlaceDetailView: View {
     @Environment(\.applePlacesService) private var applePlacesService
 
     @ObservedObject var savedPlace: SavedPlace
+    @FetchRequest(fetchRequest: Self.savedPlacesFetchRequest) private var savedPlaces: FetchedResults<SavedPlace>
 
     @State private var resolvedPlace: ApplePlaceMatch?
     @State private var isResolvingPlace = false
@@ -18,7 +19,7 @@ struct SavedPlaceDetailView: View {
     @State private var status: PlaceStatus
     @State private var placeType: PlaceType
     @State private var cuisinesText: String
-    @State private var tagsText: String
+    @State private var tags: [String]
     @State private var note: String
     @State private var skipNote: String
     @State private var instagramURL: String
@@ -29,7 +30,7 @@ struct SavedPlaceDetailView: View {
         _status = State(initialValue: savedPlace.placeStatus)
         _placeType = State(initialValue: savedPlace.placeTypeValue)
         _cuisinesText = State(initialValue: savedPlace.cuisines.joined(separator: ", "))
-        _tagsText = State(initialValue: savedPlace.tags.joined(separator: ", "))
+        _tags = State(initialValue: savedPlace.tags)
         _note = State(initialValue: savedPlace.note ?? "")
         _skipNote = State(initialValue: savedPlace.skipNote ?? "")
         _instagramURL = State(initialValue: savedPlace.instagramURL ?? "")
@@ -91,6 +92,15 @@ struct SavedPlaceDetailView: View {
         )
     }
 
+    private static let savedPlacesFetchRequest: NSFetchRequest<SavedPlace> = {
+        let request = SavedPlace.fetchRequest()
+        request.sortDescriptors = [
+            NSSortDescriptor(key: "updatedAt", ascending: false),
+            NSSortDescriptor(key: "displayNameSnapshot", ascending: true)
+        ]
+        return request
+    }()
+
     private var headerTitle: String {
         resolvedPlace?.displayName ?? savedPlace.displayName
     }
@@ -118,6 +128,10 @@ struct SavedPlaceDetailView: View {
 
     private var selectedNeighborhood: ListSection? {
         allNeighborhoods.first { $0.objectID == selectedNeighborhoodObjectID }
+    }
+
+    private var existingTags: [String] {
+        FeastTag.catalog(from: savedPlaces.map(\.tags))
     }
 
     private var headerSection: some View {
@@ -240,16 +254,21 @@ struct SavedPlaceDetailView: View {
 
                 FeastFormDivider()
 
-                FeastFormField(title: "Tags") {
-                    TextField("Date night, lunch, worth a detour", text: $tagsText)
-                        .textInputAutocapitalization(.words)
-                        .feastFieldSurface()
+                FeastFormField(
+                    title: "Tags",
+                    helper: "Reuse an existing tag or press Return, comma, or the add button to create one."
+                ) {
+                    FeastTagInputView(
+                        tags: $tags,
+                        existingTags: existingTags,
+                        placeholder: "Date Night, Brunch, Worth a Detour"
+                    )
                 }
             }
         } header: {
             FeastFormSectionHeader(
                 title: "Cuisines And Tags",
-                subtitle: "Use commas to separate multiple values"
+                subtitle: "Cuisines stay freeform; tags are reusable labels"
             )
         }
     }
@@ -394,7 +413,7 @@ struct SavedPlaceDetailView: View {
                     status: status,
                     placeType: placeType,
                     cuisines: splitValues(from: cuisinesText),
-                    tags: splitValues(from: tagsText),
+                    tags: tags,
                     note: normalizedOptional(note),
                     skipNote: normalizedOptional(skipNote),
                     instagramURL: normalizedOptional(instagramURL),

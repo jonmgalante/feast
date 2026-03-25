@@ -220,9 +220,9 @@ struct FeastListDetailView: View {
                         neighborhoodPendingDeletion = neighborhood
                     }
                 } label: {
-                    Image(systemName: "ellipsis")
-                        .feastUtilitySymbol()
+                    NeighborhoodHeaderActionLabel()
                 }
+                .accessibilityLabel("Neighborhood Actions")
             }
         }
         .feastSectionSurface()
@@ -256,8 +256,9 @@ struct FeastListDetailView: View {
                     presentAddNeighborhoodEditor()
                 }
             } label: {
-                FeastToolbarSymbol(systemName: "folder.badge.plus")
+                AddNeighborhoodIcon()
             }
+            .accessibilityLabel("Add Neighborhood")
         }
     }
 
@@ -363,6 +364,42 @@ private enum NeighborhoodHeaderKind: Equatable {
             return FeastTheme.Typography.sectionTitle
         }
     }
+
+    var contentSpacing: CGFloat {
+        switch self {
+        case .neighborhood:
+            return 5
+        case .unsorted:
+            return 4
+        }
+    }
+
+    var topPadding: CGFloat {
+        switch self {
+        case .neighborhood:
+            return 10
+        case .unsorted:
+            return 2
+        }
+    }
+
+    var bottomPadding: CGFloat {
+        switch self {
+        case .neighborhood:
+            return 6
+        case .unsorted:
+            return 2
+        }
+    }
+
+    var actionTopPadding: CGFloat {
+        switch self {
+        case .neighborhood:
+            return 6
+        case .unsorted:
+            return 0
+        }
+    }
 }
 
 private struct NeighborhoodHeaderView<TrailingContent: View>: View {
@@ -384,32 +421,64 @@ private struct NeighborhoodHeaderView<TrailingContent: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .firstTextBaseline, spacing: FeastTheme.Spacing.small) {
+        HStack(alignment: .top, spacing: FeastTheme.Spacing.medium) {
+            VStack(alignment: .leading, spacing: kind.contentSpacing) {
                 Text(kind.labelText.uppercased())
                     .font(FeastTheme.Typography.sectionLabel)
                     .tracking(0.8)
                     .foregroundStyle(kind.labelColor)
 
-                Spacer()
+                Text(title)
+                    .font(kind.titleFont)
+                    .foregroundStyle(FeastTheme.Colors.primaryText)
 
-                trailingContent
+                if let subtitle {
+                    Text(subtitle)
+                        .font(FeastTheme.Typography.rowUtility)
+                        .foregroundStyle(FeastTheme.Colors.secondaryText)
+                        .lineLimit(2)
+                }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
 
-            Text(title)
-                .font(kind.titleFont)
-                .foregroundStyle(FeastTheme.Colors.primaryText)
-
-            if let subtitle {
-                Text(subtitle)
-                    .font(FeastTheme.Typography.rowUtility)
-                    .foregroundStyle(FeastTheme.Colors.secondaryText)
-                    .lineLimit(2)
-            }
+            trailingContent
+                .padding(.top, kind.actionTopPadding)
         }
-        .padding(.top, kind == .neighborhood ? FeastTheme.Spacing.small : 2)
-        .padding(.bottom, kind == .neighborhood ? FeastTheme.Spacing.xSmall : 2)
+        .padding(.top, kind.topPadding)
+        .padding(.bottom, kind.bottomPadding)
         .textCase(nil)
+    }
+}
+
+private struct NeighborhoodHeaderActionLabel: View {
+    var body: some View {
+        Image(systemName: "ellipsis")
+            .font(.system(size: 15, weight: .semibold))
+            .symbolRenderingMode(.hierarchical)
+            .foregroundStyle(FeastTheme.Colors.secondaryText)
+            .frame(width: 32, height: 32)
+            .contentShape(Rectangle())
+            .offset(y: -1)
+            .accessibilityHidden(true)
+    }
+}
+
+private struct AddNeighborhoodIcon: View {
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            FeastToolbarSymbol(systemName: "map")
+
+            Image(systemName: "plus.circle.fill")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(FeastTheme.Colors.accentSelection)
+                .background {
+                    Circle()
+                        .fill(FeastTheme.Colors.surfaceBackground)
+                }
+                .offset(x: 3.5, y: -2.5)
+        }
+        .frame(width: 18, height: 18)
+        .accessibilityHidden(true)
     }
 }
 

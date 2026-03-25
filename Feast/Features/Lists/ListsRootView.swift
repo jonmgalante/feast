@@ -12,9 +12,10 @@ struct ListsRootView: View {
     @FetchRequest(fetchRequest: Self.savedPlacesFetchRequest, animation: .default)
     private var savedPlaces: FetchedResults<SavedPlace>
 
-    @State private var showingImportPlaceholder = false
+    @State private var showingNotesImportFlow = false
     @State private var cityEditor: CityEditorState?
     @State private var listPendingDeletion: FeastList?
+    @State private var importedCityRoute: ImportedCityRoute?
     @State private var searchText = ""
     @State private var searchFilters = SavedPlaceSearchFilters()
     @State private var showingSearchFilters = false
@@ -39,12 +40,22 @@ struct ListsRootView: View {
     }()
 
     var body: some View {
-        content
-            .feastScrollableChrome()
+        Group {
+            if isZeroCityState {
+                zeroCityContent
+            } else if shouldShowSearch {
+                listContent
+                    .feastScrollableChrome()
+                    .listStyle(.insetGrouped)
+                    .searchable(text: $searchText, prompt: "Search places across cities")
+            } else {
+                listContent
+                    .feastScrollableChrome()
+                    .listStyle(.insetGrouped)
+            }
+        }
             .toolbar { toolbarContent }
-            .listStyle(.insetGrouped)
             .navigationBarTitleDisplayMode(.inline)
-            .searchable(text: $searchText, prompt: "Search places across cities")
             .sheet(item: $cityEditor) { editor in
                 NavigationStack {
                     CityNameEditorSheet(
@@ -67,6 +78,11 @@ struct ListsRootView: View {
                         availableCuisines: availableCuisines,
                         fixedFeastList: nil
                     )
+                }
+            }
+            .sheet(isPresented: $showingNotesImportFlow) {
+                NavigationStack {
+                    NotesImportFlowView(onViewImportedCity: openImportedCity)
                 }
             }
             .sheet(item: $listSharingPresentation, onDismiss: refreshSharingStates) { preparedShare in
@@ -98,11 +114,6 @@ struct ListsRootView: View {
             } message: { feastList in
                 Text("This will remove \(feastList.displayName), its neighborhoods, and its saved places.")
             }
-            .alert("Import from Notes", isPresented: $showingImportPlaceholder) {
-                Button("OK", role: .cancel) { }
-            } message: {
-                Text("Import is part of the locked Feast v1 plan, but the flow is not implemented yet.")
-            }
             .alert(item: $alertState) { alert in
                 Alert(
                     title: Text(alert.title),
@@ -118,13 +129,61 @@ struct ListsRootView: View {
                     refreshSharingStates()
                 }
             }
+            .onChange(of: isZeroCityState) { _, isZeroCityState in
+                if isZeroCityState {
+                    resetSearchState()
+                }
+            }
+            .onChange(of: hasSavedPlaces) { _, hasSavedPlaces in
+                if !hasSavedPlaces {
+                    resetSearchState()
+                }
+            }
+            .navigationDestination(item: $importedCityRoute) { route in
+                importedCityDestination(for: route)
+            }
     }
 
-    private var content: some View {
+    private var isZeroCityState: Bool {
+        feastLists.isEmpty
+    }
+
+    private var hasSavedPlaces: Bool {
+        !savedPlaces.isEmpty
+    }
+
+    private var shouldShowSearch: Bool {
+        !isZeroCityState && hasSavedPlaces
+    }
+
+    private var isZeroSavedPlacesState: Bool {
+        !isZeroCityState && !hasSavedPlaces
+    }
+
+    private var listContent: some View {
         List {
-            importCallToActionSection
             searchResultsSection
             citiesSection
+            importCallToActionSection
+        }
+    }
+
+    private var zeroCityContent: some View {
+        GeometryReader { proxy in
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: 0) {
+                    Spacer(minLength: max(proxy.size.height * 0.14, FeastTheme.Spacing.xxLarge * 2))
+
+                    zeroCityEmptyState
+
+                    Spacer(minLength: max(proxy.size.height * 0.24, FeastTheme.Spacing.xxLarge * 3))
+                }
+                .frame(maxWidth: .infinity)
+                .frame(minHeight: proxy.size.height, alignment: .top)
+                .padding(.horizontal, FeastTheme.Spacing.xxLarge)
+                .padding(.vertical, FeastTheme.Spacing.large)
+            }
+            .background(FeastTheme.Colors.groupedBackground.ignoresSafeArea())
         }
     }
 
@@ -147,25 +206,93 @@ struct ListsRootView: View {
         )
     }
 
+    private var zeroCityEmptyState: some View {
+        VStack(spacing: FeastTheme.Spacing.xLarge) {
+            zeroCityArtwork
+
+            VStack(spacing: FeastTheme.Spacing.small) {
+                Text("No cities yet")
+                    .font(FeastTheme.Typography.formTitle)
+                    .foregroundStyle(FeastTheme.Colors.primaryText)
+                    .multilineTextAlignment(.center)
+
+                Text("Add a city to start saving places by neighborhood, or import from Notes.")
+                    .font(FeastTheme.Typography.supporting)
+                    .foregroundStyle(FeastTheme.Colors.secondaryText)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 286)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            VStack(spacing: FeastTheme.Spacing.medium) {
+                Button {
+                    presentCreateCity()
+                } label: {
+                    Label("Add City", systemImage: "plus")
+                        .frame(minWidth: 176)
+                }
+                .buttonStyle(FeastProminentButtonStyle())
+
+                Button("Import from Notes") {
+                    presentImportFromNotes()
+                }
+                .buttonStyle(FeastQuietChipButtonStyle())
+            }
+        }
+        .frame(maxWidth: 360)
+        .frame(maxWidth: .infinity)
+    }
+
+    private var zeroCityArtwork: some View {
+        ZStack {
+            Circle()
+                .fill(FeastTheme.Colors.surfaceBackground.opacity(0.96))
+                .frame(width: 86, height: 86)
+
+            Circle()
+                .stroke(FeastTheme.Colors.dividerBorder.opacity(0.64), lineWidth: 0.8)
+                .frame(width: 86, height: 86)
+
+            Image("FeastEmptyStateLogo")
+                .resizable()
+                .renderingMode(.original)
+                .scaledToFit()
+                .frame(width: 62, height: 62)
+                .padding(FeastTheme.Spacing.small)
+                .offset(y: -0.5)
+        }
+        .accessibilityHidden(true)
+    }
+
     @ViewBuilder
     private var importCallToActionSection: some View {
-        if savedPlaces.isEmpty {
+        if isZeroSavedPlacesState && !isShowingSearchResults {
             Section {
-                VStack(alignment: .leading, spacing: FeastTheme.Spacing.small) {
-                    Text("Start by importing places")
-                        .font(FeastTheme.Typography.body.weight(.semibold))
-                        .foregroundStyle(FeastTheme.Colors.primaryText)
+                HStack(alignment: .center, spacing: FeastTheme.Spacing.medium) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Import places from Notes")
+                            .font(FeastTheme.Typography.supporting.weight(.semibold))
+                            .foregroundStyle(FeastTheme.Colors.primaryText)
 
-                    Text("Your starter cities are ready. Import from Notes when you want to bring in your first saved places.")
-                        .font(FeastTheme.Typography.supporting)
-                        .foregroundStyle(FeastTheme.Colors.secondaryText)
+                        Text("Bring in places you already track.")
+                            .font(FeastTheme.Typography.rowMetadata)
+                            .foregroundStyle(FeastTheme.Colors.secondaryText)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    Spacer(minLength: FeastTheme.Spacing.medium)
 
                     Button("Import from Notes") {
-                        showingImportPlaceholder = true
+                        presentImportFromNotes()
                     }
-                    .buttonStyle(FeastProminentButtonStyle())
+                    .buttonStyle(FeastQuietChipButtonStyle())
                 }
                 .padding(.vertical, FeastTheme.Spacing.xSmall)
+            } header: {
+                FeastFormSectionHeader(
+                    title: "Import",
+                    subtitle: "Optional"
+                )
             }
             .feastSectionSurface()
         }
@@ -200,15 +327,34 @@ struct ListsRootView: View {
     private var citiesSection: some View {
         Section {
             if feastLists.isEmpty {
-                ContentUnavailableView(
-                    "No Cities Yet",
-                    systemImage: "square.stack",
-                    description: Text("Create a city to start organizing places.")
-                )
+                ContentUnavailableView {
+                    Label("No cities yet", systemImage: "building.2.crop.circle")
+                } description: {
+                    Text("Add your first city to start organizing places by neighborhood, or import from Notes to bring in places you already keep elsewhere.")
+                } actions: {
+                    VStack(spacing: FeastTheme.Spacing.small) {
+                        Button("Add City") {
+                            presentCreateCity()
+                        }
+                        .buttonStyle(FeastProminentButtonStyle())
+
+                        Button("Import from Notes") {
+                            presentImportFromNotes()
+                        }
+                        .buttonStyle(FeastQuietChipButtonStyle())
+                    }
+                }
             } else {
                 ForEach(feastLists) { feastList in
                     listLink(for: feastList)
                 }
+            }
+        } header: {
+            if isZeroSavedPlacesState {
+                FeastFormSectionHeader(
+                    title: "Cities",
+                    subtitle: "Your cities come first. Add places when you're ready."
+                )
             }
         }
         .feastSectionSurface()
@@ -227,34 +373,65 @@ struct ListsRootView: View {
         }
 
         ToolbarItem(placement: .topBarTrailing) {
-            FeastToolbarActionCluster {
+            if isZeroCityState {
                 Button {
-                    showingSearchFilters = true
-                } label: {
-                    FeastToolbarSymbol(
-                        systemName: "line.3.horizontal.decrease",
-                        isEmphasized: searchFilters.hasActiveFilters
-                    )
-                    .frame(width: 36, height: 36)
-                    .contentShape(Rectangle())
-                }
-
-                Button {
-                    cityEditor = CityEditorState(title: "New City", initialName: "", feastList: nil)
+                    presentCreateCity()
                 } label: {
                     FeastToolbarSymbol(systemName: "plus")
                         .frame(width: 36, height: 36)
                         .contentShape(Rectangle())
                 }
-
-                Menu {
-                    Button("Import from Notes") {
-                        showingImportPlaceholder = true
+                .accessibilityLabel("Add City")
+            } else if isZeroSavedPlacesState {
+                FeastToolbarActionCluster {
+                    Button {
+                        presentCreateCity()
+                    } label: {
+                        FeastToolbarSymbol(systemName: "plus")
+                            .frame(width: 36, height: 36)
+                            .contentShape(Rectangle())
                     }
-                } label: {
-                    FeastToolbarSymbol(systemName: "ellipsis")
+
+                    Menu {
+                        Button("Import from Notes") {
+                            presentImportFromNotes()
+                        }
+                    } label: {
+                        FeastToolbarSymbol(systemName: "ellipsis")
+                            .frame(width: 36, height: 36)
+                            .contentShape(Rectangle())
+                    }
+                }
+            } else {
+                FeastToolbarActionCluster {
+                    Button {
+                        showingSearchFilters = true
+                    } label: {
+                        FeastToolbarSymbol(
+                            systemName: "line.3.horizontal.decrease",
+                            isEmphasized: searchFilters.hasActiveFilters
+                        )
                         .frame(width: 36, height: 36)
                         .contentShape(Rectangle())
+                    }
+
+                    Button {
+                        presentCreateCity()
+                    } label: {
+                        FeastToolbarSymbol(systemName: "plus")
+                        .frame(width: 36, height: 36)
+                        .contentShape(Rectangle())
+                    }
+
+                    Menu {
+                        Button("Import from Notes") {
+                            presentImportFromNotes()
+                        }
+                    } label: {
+                        FeastToolbarSymbol(systemName: "ellipsis")
+                            .frame(width: 36, height: 36)
+                            .contentShape(Rectangle())
+                    }
                 }
             }
         }
@@ -319,6 +496,24 @@ struct ListsRootView: View {
                 }
             }
         )
+    }
+
+    private func presentCreateCity() {
+        cityEditor = CityEditorState(title: "New City", initialName: "", feastList: nil)
+    }
+
+    private func presentImportFromNotes() {
+        showingNotesImportFlow = true
+    }
+
+    private func openImportedCity(_ cityURIString: String) {
+        importedCityRoute = ImportedCityRoute(cityURIString: cityURIString)
+    }
+
+    private func resetSearchState() {
+        searchText = ""
+        searchFilters.reset()
+        showingSearchFilters = false
     }
 
     private func listRow(for feastList: FeastList) -> some View {
@@ -529,6 +724,19 @@ struct ListsRootView: View {
 
         return visibleNames.joined(separator: " • ") + remainingSuffix
     }
+
+    @ViewBuilder
+    private func importedCityDestination(for route: ImportedCityRoute) -> some View {
+        if let feastList = feastLists.first(where: { $0.objectURIString == route.cityURIString }) {
+            FeastListDetailView(feastList: feastList)
+        } else {
+            ContentUnavailableView(
+                "City Unavailable",
+                systemImage: "building.2.slash",
+                description: Text("The imported city is no longer available.")
+            )
+        }
+    }
 }
 
 private struct CityEditorState: Identifiable {
@@ -544,7 +752,13 @@ private struct ListsAlertState: Identifiable {
     let message: String
 }
 
-private struct CityNameEditorSheet: View {
+private struct ImportedCityRoute: Identifiable, Hashable {
+    let cityURIString: String
+
+    var id: String { cityURIString }
+}
+
+struct CityNameEditorSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var name: String
 
