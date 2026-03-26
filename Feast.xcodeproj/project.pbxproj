@@ -10,9 +10,22 @@
 		124EB57F2F70564600FAEEA9 /* Feast.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Feast.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		124EB6932F75A8F900FAEEA9 /* Exceptions for "Feast" folder in "Feast" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 124EB57E2F70564600FAEEA9 /* Feast */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		124EB5812F70564600FAEEA9 /* Feast */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				124EB6932F75A8F900FAEEA9 /* Exceptions for "Feast" folder in "Feast" target */,
+			);
 			path = Feast;
 			sourceTree = "<group>";
 		};
@@ -257,6 +270,7 @@
 				DEVELOPMENT_TEAM = 8GXZW5Y4V4;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Feast/Info.plist;
 				INFOPLIST_KEY_CKSharingSupported = YES;
 				INFOPLIST_KEY_FeastCloudKitContainerIdentifier = iCloud.com.jongalante.Feast;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -292,6 +306,7 @@
 				DEVELOPMENT_TEAM = 8GXZW5Y4V4;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Feast/Info.plist;
 				INFOPLIST_KEY_CKSharingSupported = YES;
 				INFOPLIST_KEY_FeastCloudKitContainerIdentifier = iCloud.com.jongalante.Feast;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
