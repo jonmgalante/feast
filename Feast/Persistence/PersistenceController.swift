@@ -168,6 +168,21 @@ final class PersistenceController {
         cloudKitContainer != nil && privateCloudKitStore != nil && sharedCloudKitStore != nil
     }
 
+    var sharingUnavailableMessage: String? {
+        guard !supportsSharing else {
+            return nil
+        }
+
+        switch storeMode {
+        case .localOnly:
+            return "This Feast build wasn't configured for iCloud City sharing."
+        case .localFallback:
+            return "Feast couldn't start iCloud sharing on this device. Sign into iCloud, turn on iCloud Drive, and try again."
+        case .cloudKit:
+            return "Feast couldn't access its iCloud sharing stores right now. Try again in a moment."
+        }
+    }
+
     init(
         inMemory: Bool = false,
         cloudKitSyncConfiguration: CloudKitSyncConfiguration? = nil

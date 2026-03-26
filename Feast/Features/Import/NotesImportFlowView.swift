@@ -236,17 +236,23 @@ private struct NotesPasteImportView: View {
     }
 
     private var bottomCallToAction: some View {
-        VStack(alignment: .leading, spacing: FeastTheme.Spacing.small) {
-            Text(reviewReadinessMessage)
-                .font(FeastTheme.Typography.rowMetadata)
-                .foregroundStyle(FeastTheme.Colors.secondaryText)
-                .frame(maxWidth: .infinity, alignment: .leading)
+        FeastFormGroup {
+            VStack(alignment: .leading, spacing: FeastTheme.Spacing.small) {
+                Text(reviewReadinessMessage)
+                    .font(FeastTheme.Typography.rowMetadata)
+                    .foregroundStyle(FeastTheme.Colors.secondaryText)
+                    .frame(maxWidth: .infinity, alignment: .leading)
 
-            Button("Review Import") {
-                reviewImport()
+                Button {
+                    reviewImport()
+                } label: {
+                    Text("Review Import")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(FeastProminentButtonStyle())
+                .disabled(!canReview)
             }
-            .buttonStyle(FeastProminentButtonStyle())
-            .disabled(!canReview)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .feastBottomBarChrome()
     }

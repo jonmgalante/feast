@@ -549,54 +549,28 @@ struct ListsRootView: View {
             }
 
             Spacer(minLength: FeastTheme.Spacing.small)
-
-            if listPreparingShareObjectID == feastList.objectID {
-                ProgressView()
-                    .controlSize(.small)
-                    .padding(.top, 2)
-            } else if sharingState.isShared {
-                Image(systemName: "person.2.fill")
-                    .foregroundStyle(FeastTheme.Colors.tertiaryText)
-                    .padding(.top, 2)
-            }
         }
         .padding(.vertical, 6)
     }
 
     private func listLink(for feastList: FeastList) -> some View {
         let sharingState = listSharingState(for: feastList)
+        let showsTrailingStatus = listPreparingShareObjectID == feastList.objectID || sharingState.isShared
 
         return NavigationLink {
             FeastListDetailView(feastList: feastList)
         } label: {
             listRow(for: feastList)
+                .padding(.trailing, showsTrailingStatus ? 34 : 0)
+        }
+        .overlay(alignment: .trailing) {
+            if showsTrailingStatus {
+                cityRowTrailingStatus(for: feastList, sharingState: sharingState)
+                    .padding(.trailing, 2)
+            }
         }
         .contextMenu {
-            if sharingState.canManageSharing {
-                Button(sharingState.shareActionTitle) {
-                    beginSharing(for: feastList)
-                }
-            } else {
-                Button("Sharing Managed by Owner") { }
-                    .disabled(true)
-            }
-
-            Button("Rename City") {
-                cityEditor = CityEditorState(
-                    title: "Rename City",
-                    initialName: feastList.displayName,
-                    feastList: feastList
-                )
-            }
-
-            if sharingState.canDeleteList {
-                Button("Delete City", role: .destructive) {
-                    listPendingDeletion = feastList
-                }
-            } else {
-                Button("Only the Owner Can Delete This City") { }
-                    .disabled(true)
-            }
+            cityActionMenuContent(for: feastList, sharingState: sharingState)
         }
         .swipeActions(edge: .leading, allowsFullSwipe: false) {
             if sharingState.canManageSharing {
@@ -621,6 +595,56 @@ struct ListsRootView: View {
                 )
             }
             .tint(FeastTheme.Colors.secondaryAction)
+        }
+    }
+
+    @ViewBuilder
+    private func cityRowTrailingStatus(
+        for feastList: FeastList,
+        sharingState: FeastListSharingState
+    ) -> some View {
+        if listPreparingShareObjectID == feastList.objectID {
+            ProgressView()
+                .controlSize(.small)
+                .frame(width: 28, height: 28)
+        } else if sharingState.isShared {
+            Image(systemName: "person.2.fill")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(FeastTheme.Colors.tertiaryText)
+                .frame(width: 28, height: 28)
+        }
+    }
+
+    @ViewBuilder
+    private func cityActionMenuContent(
+        for feastList: FeastList,
+        sharingState: FeastListSharingState
+    ) -> some View {
+        if sharingState.canManageSharing {
+            Button(sharingState.shareActionTitle) {
+                beginSharing(for: feastList)
+            }
+            .disabled(listPreparingShareObjectID != nil)
+        } else {
+            Button("Sharing Managed by Owner") { }
+                .disabled(true)
+        }
+
+        Button("Rename City") {
+            cityEditor = CityEditorState(
+                title: "Rename City",
+                initialName: feastList.displayName,
+                feastList: feastList
+            )
+        }
+
+        if sharingState.canDeleteList {
+            Button("Delete City", role: .destructive) {
+                listPendingDeletion = feastList
+            }
+        } else {
+            Button("Only the Owner Can Delete This City") { }
+                .disabled(true)
         }
     }
 
@@ -676,6 +700,14 @@ struct ListsRootView: View {
 
     private func beginSharing(for feastList: FeastList) {
         guard listPreparingShareObjectID == nil else {
+            return
+        }
+
+        if let unavailableMessage = activePersistenceController.sharingUnavailableMessage {
+            alertState = ListsAlertState(
+                title: "iCloud Sharing Unavailable",
+                message: unavailableMessage
+            )
             return
         }
 

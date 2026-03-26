@@ -10,6 +10,9 @@ struct FeastListDetailView: View {
     @State private var searchText = ""
     @State private var searchFilters = SavedPlaceSearchFilters()
     @State private var showingSearchFilters = false
+    @State private var listSharingPresentation: PreparedFeastListShare?
+    @State private var listPreparingShare = false
+    @State private var alertState: FeastListDetailAlertState?
 
     var body: some View {
         content
@@ -63,6 +66,27 @@ struct FeastListDetailView: View {
                     )
                 }
             }
+            .sheet(item: $listSharingPresentation) { preparedShare in
+                FeastListSharingSheet(
+                    preparedShare: preparedShare,
+                    persistenceController: activePersistenceController,
+                    onDidSaveShare: { },
+                    onDidStopSharing: { },
+                    onError: { error in
+                        alertState = FeastListDetailAlertState(
+                            title: "Couldn't Update Sharing",
+                            message: error.localizedDescription
+                        )
+                    }
+                )
+            }
+            .alert(item: $alertState) { alert in
+                Alert(
+                    title: Text(alert.title),
+                    message: Text(alert.message),
+                    dismissButton: .default(Text("OK"))
+                )
+            }
             .safeAreaInset(edge: .bottom) {
                 addPlaceCallToAction
             }
@@ -90,6 +114,18 @@ struct FeastListDetailView: View {
             context: viewContext,
             persistenceController: persistenceController
         )
+    }
+
+    private var activePersistenceController: PersistenceController {
+        guard let persistenceController else {
+            preconditionFailure("Missing persistence controller in FeastListDetailView.")
+        }
+
+        return persistenceController
+    }
+
+    private var sharingState: FeastListSharingState {
+        activePersistenceController.sharingState(for: feastList)
     }
 
     private var filteredSavedPlaces: [SavedPlace] {
@@ -262,6 +298,18 @@ struct FeastListDetailView: View {
         }
     }
 
+    private var sharingToolbarSymbolName: String {
+        sharingState.isShared ? "person.2.fill" : "square.and.arrow.up"
+    }
+
+    private var sharingToolbarAccessibilityLabel: String {
+        if sharingState.canManageSharing {
+            return sharingState.shareActionTitle
+        }
+
+        return "Sharing Managed by Owner"
+    }
+
     private var searchSummaryText: String? {
         var components: [String] = []
 
@@ -324,9 +372,46 @@ struct FeastListDetailView: View {
         }
     }
 
+    private func beginSharing() {
+        guard !listPreparingShare else {
+            return
+        }
+
+        if let unavailableMessage = activePersistenceController.sharingUnavailableMessage {
+            alertState = FeastListDetailAlertState(
+                title: "iCloud Sharing Unavailable",
+                message: unavailableMessage
+            )
+            return
+        }
+
+        listPreparingShare = true
+
+        Task { @MainActor in
+            defer {
+                listPreparingShare = false
+            }
+
+            do {
+                listSharingPresentation = try await activePersistenceController.prepareShare(for: feastList)
+            } catch {
+                alertState = FeastListDetailAlertState(
+                    title: "Couldn't Open Sharing",
+                    message: error.localizedDescription
+                )
+            }
+        }
+    }
+
     private func deleteMessage(for neighborhood: ListSection) -> String {
         "Places in \(neighborhood.displayName) will stay in \(feastList.displayName) and move to Unsorted."
     }
+}
+
+private struct FeastListDetailAlertState: Identifiable {
+    let id = UUID()
+    let title: String
+    let message: String
 }
 
 private struct NeighborhoodEditorState: Identifiable {
@@ -377,7 +462,7 @@ private enum NeighborhoodHeaderKind: Equatable {
     var bottomPadding: CGFloat {
         switch self {
         case .neighborhood:
-            return 2
+            return 1
         case .unsorted:
             return 2
         }
@@ -386,7 +471,7 @@ private enum NeighborhoodHeaderKind: Equatable {
     var actionTopPadding: CGFloat {
         switch self {
         case .neighborhood:
-            return 0
+            return -1
         case .unsorted:
             return 0
         }
