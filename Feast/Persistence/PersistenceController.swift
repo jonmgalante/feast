@@ -113,12 +113,23 @@ final class PersistenceController {
         case missingSharedPersistentStore
         case missingPersistentStore
         case failedToPrepareShare
+        case invalidInviteRecipient
+        case shareParticipantNotFound
+        case shareParticipantAlreadyAdded
 
         var isAvailabilityFailure: Bool {
             switch self {
             case .noCloudKitAccount, .restrictedCloudKitAccount, .cloudKitTemporarilyUnavailable:
                 return true
-            case .unavailable, .missingCloudKitContainer, .missingSharedPersistentStore, .missingPersistentStore, .failedToPrepareShare:
+            case
+                    .unavailable,
+                    .missingCloudKitContainer,
+                    .missingSharedPersistentStore,
+                    .missingPersistentStore,
+                    .failedToPrepareShare,
+                    .invalidInviteRecipient,
+                    .shareParticipantNotFound,
+                    .shareParticipantAlreadyAdded:
                 return false
             }
         }
@@ -141,6 +152,12 @@ final class PersistenceController {
                 return "Feast couldn't determine which persistent store this city belongs to."
             case .failedToPrepareShare:
                 return "Feast couldn't prepare sharing for this city."
+            case .invalidInviteRecipient:
+                return "Enter the Apple Account email address or phone number for the person you want to invite."
+            case .shareParticipantNotFound:
+                return "Feast couldn't find an iCloud sharing participant for that email address or phone number."
+            case .shareParticipantAlreadyAdded:
+                return "That person is already invited to this city."
             }
         }
     }
@@ -149,6 +166,54 @@ final class PersistenceController {
         case local
         case privateCloudKit
         case sharedCloudKit
+    }
+
+    private enum ShareParticipantLookup {
+        case emailAddress(String)
+        case phoneNumber(String)
+
+        init?(rawValue: String) {
+            let trimmedValue = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedValue.isEmpty else {
+                return nil
+            }
+
+            if trimmedValue.contains("@") {
+                self = .emailAddress(trimmedValue)
+                return
+            }
+
+            let normalizedPhoneNumber = Self.normalizedPhoneNumber(from: trimmedValue)
+            guard !normalizedPhoneNumber.isEmpty else {
+                return nil
+            }
+
+            self = .phoneNumber(normalizedPhoneNumber)
+        }
+
+        var kindDescription: String {
+            switch self {
+            case .emailAddress:
+                return "email"
+            case .phoneNumber:
+                return "phone"
+            }
+        }
+
+        private static func normalizedPhoneNumber(from rawValue: String) -> String {
+            var normalizedPhoneNumber = ""
+
+            for character in rawValue {
+                if character.isNumber {
+                    normalizedPhoneNumber.append(character)
+                } else if character == "+", normalizedPhoneNumber.isEmpty {
+                    normalizedPhoneNumber.append(character)
+                }
+            }
+
+            let containsDigits = normalizedPhoneNumber.contains(where: \.isNumber)
+            return containsDigits ? normalizedPhoneNumber : ""
+        }
     }
 
     private struct ConfiguredStoreDescription {
@@ -694,6 +759,7 @@ final class PersistenceController {
 
         if let existingShare = try share(for: feastList) {
             existingShare[CKShare.SystemFieldKey.title] = feastListName as CKRecordValue
+            existingShare.publicPermission = .none
             return PreparedFeastListShare(
                 feastListObjectID: feastListObjectID,
                 feastListName: feastListName,
@@ -715,6 +781,7 @@ final class PersistenceController {
                 }
 
                 share[CKShare.SystemFieldKey.title] = feastListName as CKRecordValue
+                share.publicPermission = .none
 
                 continuation.resume(
                     returning: PreparedFeastListShare(
@@ -725,6 +792,73 @@ final class PersistenceController {
                     )
                 )
             }
+        }
+    }
+
+    func inviteParticipant(
+        matching rawLookupValue: String,
+        to preparedShare: PreparedFeastListShare
+    ) async throws {
+        guard supportsSharing else {
+            throw SharingError.unavailable
+        }
+
+        guard let lookup = ShareParticipantLookup(rawValue: rawLookupValue) else {
+            throw SharingError.invalidInviteRecipient
+        }
+
+        Self.logger.log(
+            "Looking up CloudKit share participant by \(lookup.kindDescription, privacy: .public) for city \(preparedShare.feastListName, privacy: .public)."
+        )
+
+        let participant: CKShare.Participant
+
+        do {
+            guard let resolvedParticipant = try await fetchShareParticipant(
+                matching: lookup,
+                in: preparedShare.container
+            ) else {
+                Self.logger.error(
+                    "No CloudKit share participant found for \(lookup.kindDescription, privacy: .public) lookup when inviting collaborators to city \(preparedShare.feastListName, privacy: .public)."
+                )
+                throw SharingError.shareParticipantNotFound
+            }
+
+            participant = resolvedParticipant
+        } catch let sharingError as SharingError {
+            throw sharingError
+        } catch {
+            Self.logger.error(
+                "CloudKit share participant lookup failed for \(lookup.kindDescription, privacy: .public) when inviting collaborators to city \(preparedShare.feastListName, privacy: .public). Error: \(error.localizedDescription, privacy: .public)"
+            )
+            throw error
+        }
+
+        if shareAlreadyContainsParticipant(participant, in: preparedShare.share) {
+            Self.logger.log(
+                "Skipping duplicate CloudKit participant invite for city \(preparedShare.feastListName, privacy: .public)."
+            )
+            throw SharingError.shareParticipantAlreadyAdded
+        }
+
+        participant.permission = .readWrite
+        preparedShare.share.publicPermission = .none
+        preparedShare.share.addParticipant(participant)
+
+        do {
+            try await persistUpdatedShare(
+                preparedShare.share,
+                forManagedObjectWith: preparedShare.feastListObjectID
+            )
+            Self.logger.log(
+                "Persisted updated private share for city \(preparedShare.feastListName, privacy: .public) after inviting collaborator by \(lookup.kindDescription, privacy: .public)."
+            )
+        } catch {
+            preparedShare.share.removeParticipant(participant)
+            Self.logger.error(
+                "Failed to persist updated private share for city \(preparedShare.feastListName, privacy: .public) after inviting collaborator by \(lookup.kindDescription, privacy: .public). Error: \(error.localizedDescription, privacy: .public)"
+            )
+            throw error
         }
     }
 
@@ -768,6 +902,47 @@ final class PersistenceController {
         }
 
         viewContext.refreshAllObjects()
+    }
+
+    private func fetchShareParticipant(
+        matching lookup: ShareParticipantLookup,
+        in container: CKContainer
+    ) async throws -> CKShare.Participant? {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<CKShare.Participant?, Error>) in
+            let completionHandler: @Sendable (CKShare.Participant?, Error?) -> Void = { participant, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(returning: participant)
+                }
+            }
+
+            switch lookup {
+            case let .emailAddress(emailAddress):
+                container.fetchShareParticipant(
+                    withEmailAddress: emailAddress,
+                    completionHandler: completionHandler
+                )
+            case let .phoneNumber(phoneNumber):
+                container.fetchShareParticipant(
+                    withPhoneNumber: phoneNumber,
+                    completionHandler: completionHandler
+                )
+            }
+        }
+    }
+
+    private func shareAlreadyContainsParticipant(
+        _ participant: CKShare.Participant,
+        in share: CKShare
+    ) -> Bool {
+        guard let userRecordID = participant.userIdentity.userRecordID else {
+            return false
+        }
+
+        return share.participants.contains { existingParticipant in
+            existingParticipant.userIdentity.userRecordID == userRecordID
+        }
     }
 
     private func ensureCloudKitAccountAvailable(for container: CKContainer) async throws {
