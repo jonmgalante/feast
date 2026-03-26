@@ -340,21 +340,12 @@ private enum NeighborhoodHeaderKind: Equatable {
     case neighborhood
     case unsorted
 
-    var labelText: String {
+    var accessibilityPrefix: String {
         switch self {
         case .neighborhood:
             return "Neighborhood"
         case .unsorted:
-            return "Unsorted"
-        }
-    }
-
-    var labelColor: Color {
-        switch self {
-        case .neighborhood:
-            return FeastTheme.Colors.secondaryText
-        case .unsorted:
-            return FeastTheme.Colors.tertiaryText
+            return "Unsorted section"
         }
     }
 
@@ -368,7 +359,7 @@ private enum NeighborhoodHeaderKind: Equatable {
     var contentSpacing: CGFloat {
         switch self {
         case .neighborhood:
-            return 5
+            return 4
         case .unsorted:
             return 4
         }
@@ -377,16 +368,16 @@ private enum NeighborhoodHeaderKind: Equatable {
     var topPadding: CGFloat {
         switch self {
         case .neighborhood:
-            return 10
+            return 0
         case .unsorted:
-            return 2
+            return 1
         }
     }
 
     var bottomPadding: CGFloat {
         switch self {
         case .neighborhood:
-            return 6
+            return 2
         case .unsorted:
             return 2
         }
@@ -395,7 +386,7 @@ private enum NeighborhoodHeaderKind: Equatable {
     var actionTopPadding: CGFloat {
         switch self {
         case .neighborhood:
-            return 6
+            return 0
         case .unsorted:
             return 0
         }
@@ -423,14 +414,10 @@ private struct NeighborhoodHeaderView<TrailingContent: View>: View {
     var body: some View {
         HStack(alignment: .top, spacing: FeastTheme.Spacing.medium) {
             VStack(alignment: .leading, spacing: kind.contentSpacing) {
-                Text(kind.labelText.uppercased())
-                    .font(FeastTheme.Typography.sectionLabel)
-                    .tracking(0.8)
-                    .foregroundStyle(kind.labelColor)
-
                 Text(title)
                     .font(kind.titleFont)
                     .foregroundStyle(FeastTheme.Colors.primaryText)
+                    .fixedSize(horizontal: false, vertical: true)
 
                 if let subtitle {
                     Text(subtitle)
@@ -440,6 +427,9 @@ private struct NeighborhoodHeaderView<TrailingContent: View>: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isHeader)
+            .accessibilityLabel(accessibilityLabel)
 
             trailingContent
                 .padding(.top, kind.actionTopPadding)
@@ -447,6 +437,14 @@ private struct NeighborhoodHeaderView<TrailingContent: View>: View {
         .padding(.top, kind.topPadding)
         .padding(.bottom, kind.bottomPadding)
         .textCase(nil)
+    }
+
+    private var accessibilityLabel: String {
+        if let subtitle {
+            return "\(kind.accessibilityPrefix), \(title). \(subtitle)"
+        }
+
+        return "\(kind.accessibilityPrefix), \(title)"
     }
 }
 
@@ -456,9 +454,8 @@ private struct NeighborhoodHeaderActionLabel: View {
             .font(.system(size: 15, weight: .semibold))
             .symbolRenderingMode(.hierarchical)
             .foregroundStyle(FeastTheme.Colors.secondaryText)
-            .frame(width: 32, height: 32)
+            .frame(width: 36, height: 36)
             .contentShape(Rectangle())
-            .offset(y: -1)
             .accessibilityHidden(true)
     }
 }

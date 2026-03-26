@@ -134,7 +134,6 @@ private struct NotesPasteImportView: View {
         List {
             destinationSection
             contentSection
-            actionSection
         }
         .feastScrollableChrome()
         .listStyle(.insetGrouped)
@@ -147,6 +146,9 @@ private struct NotesPasteImportView: View {
                 onDone: onDone,
                 onViewImportedCity: onViewImportedCity
             )
+        }
+        .safeAreaInset(edge: .bottom) {
+            bottomCallToAction
         }
     }
 
@@ -233,41 +235,42 @@ private struct NotesPasteImportView: View {
         .feastSectionSurface()
     }
 
-    private var actionSection: some View {
-        Section {
-            FeastFormGroup {
-                VStack(alignment: .leading, spacing: FeastTheme.Spacing.small) {
-                    Text(reviewReadinessMessage)
-                        .font(FeastTheme.Typography.rowMetadata)
-                        .foregroundStyle(FeastTheme.Colors.secondaryText)
+    private var bottomCallToAction: some View {
+        VStack(alignment: .leading, spacing: FeastTheme.Spacing.small) {
+            Text(reviewReadinessMessage)
+                .font(FeastTheme.Typography.rowMetadata)
+                .foregroundStyle(FeastTheme.Colors.secondaryText)
+                .frame(maxWidth: .infinity, alignment: .leading)
 
-                    Button("Review Import") {
-                        guard
-                            let selectedCity,
-                            let selectedCityURIString
-                        else {
-                            return
-                        }
-
-                        reviewDestination = NotesImportReviewDestination(
-                            cityURIString: selectedCityURIString,
-                            reviewState: NotesImportParser.parse(
-                                text: trimmedPastedText,
-                                cityName: selectedCity.displayName,
-                                source: NotesImportSourceDescriptor(
-                                    title: "Pasted Note",
-                                    detailTitle: "Contents",
-                                    detail: "\(trimmedPastedText.count) characters"
-                                )
-                            )
-                        )
-                    }
-                    .buttonStyle(FeastProminentButtonStyle())
-                    .disabled(!canReview)
-                }
+            Button("Review Import") {
+                reviewImport()
             }
+            .buttonStyle(FeastProminentButtonStyle())
+            .disabled(!canReview)
         }
-        .feastSectionSurface()
+        .feastBottomBarChrome()
+    }
+
+    private func reviewImport() {
+        guard
+            let selectedCity,
+            let selectedCityURIString
+        else {
+            return
+        }
+
+        reviewDestination = NotesImportReviewDestination(
+            cityURIString: selectedCityURIString,
+            reviewState: NotesImportParser.parse(
+                text: trimmedPastedText,
+                cityName: selectedCity.displayName,
+                source: NotesImportSourceDescriptor(
+                    title: "Pasted Note",
+                    detailTitle: "Contents",
+                    detail: "\(trimmedPastedText.count) characters"
+                )
+            )
+        )
     }
 }
 
@@ -1743,22 +1746,43 @@ private struct NotesImportSuccessView: View {
     let onViewImportedCity: (String) -> Void
 
     var body: some View {
-        List {
-            summarySection
-            actionSection
+        GeometryReader { proxy in
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 0) {
+                    summarySection
+
+                    Spacer(minLength: FeastTheme.Spacing.xLarge)
+
+                    actionSection
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(minHeight: proxy.size.height, alignment: .top)
+                .padding(.horizontal, FeastTheme.Spacing.large)
+                .padding(.top, FeastTheme.Spacing.large)
+                .padding(.bottom, FeastTheme.Spacing.xxLarge)
+            }
         }
         .feastScrollableChrome()
-        .listStyle(.insetGrouped)
         .navigationTitle("Import Complete")
         .navigationBarTitleDisplayMode(.inline)
     }
 
     private var summarySection: some View {
-        Section {
-            FeastFormGroup {
-                VStack(alignment: .leading, spacing: FeastTheme.Spacing.medium) {
-                    Label(successTitle, systemImage: successIconName)
-                        .font(FeastTheme.Typography.body.weight(.semibold))
+        VStack(alignment: .leading, spacing: FeastTheme.Spacing.large) {
+            HStack(alignment: .top, spacing: FeastTheme.Spacing.medium) {
+                ZStack {
+                    Circle()
+                        .fill(successIconBackground)
+                        .frame(width: 44, height: 44)
+
+                    Image(systemName: successIconName)
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(successIconForeground)
+                }
+
+                VStack(alignment: .leading, spacing: FeastTheme.Spacing.small) {
+                    Text(successTitle)
+                        .font(FeastTheme.Typography.sectionTitle)
                         .foregroundStyle(FeastTheme.Colors.primaryText)
 
                     Text(successMessage)
@@ -1766,104 +1790,168 @@ private struct NotesImportSuccessView: View {
                         .foregroundStyle(FeastTheme.Colors.secondaryText)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+            }
 
-                FeastFormDivider()
+            VStack(alignment: .leading, spacing: FeastTheme.Spacing.medium) {
+                summaryRow(title: "City", value: success.cityName)
 
-                FeastFormField(title: "City") {
-                    Text(success.cityName)
-                        .font(FeastTheme.Typography.supporting.weight(.semibold))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .feastFieldSurface(minHeight: 52)
-                }
+                HStack(alignment: .top, spacing: FeastTheme.Spacing.large) {
+                    summaryMetric(title: "Added", value: addedSummaryValue)
 
-                FeastFormDivider()
+                    if success.skippedCount > 0 {
+                        Rectangle()
+                            .fill(FeastTheme.Colors.dividerBorder.opacity(0.8))
+                            .frame(width: 1)
+                            .padding(.vertical, 2)
 
-                FeastFormField(title: "Added") {
-                    Text(success.addedCount == 1 ? "1 place" : "\(success.addedCount) places")
-                        .font(FeastTheme.Typography.supporting.weight(.semibold))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .feastFieldSurface(minHeight: 52)
-                }
-
-                if success.skippedCount > 0 {
-                    FeastFormDivider()
-
-                    FeastFormField(
-                        title: "Skipped",
-                        helper: success.duplicateCount > 0
-                            ? "\(success.duplicateCount) place\(success.duplicateCount == 1 ? "" : "s") already exist\(success.duplicateCount == 1 ? "s" : "") in this City."
-                            : nil
-                    ) {
-                        Text(success.skippedCount == 1 ? "1 item" : "\(success.skippedCount) items")
-                            .font(FeastTheme.Typography.supporting.weight(.semibold))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .feastFieldSurface(minHeight: 52)
+                        summaryMetric(title: "Skipped", value: skippedSummaryValue)
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, FeastTheme.Spacing.xSmall)
+
+                if let skippedDetailText {
+                    Text(skippedDetailText)
+                        .font(FeastTheme.Typography.rowUtility)
+                        .foregroundStyle(FeastTheme.Colors.tertiaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
-        } header: {
-            FeastFormSectionHeader(
-                title: "Summary",
-                subtitle: "Feast only imported confirmed matched places"
-            )
+            .padding(.top, FeastTheme.Spacing.small)
+            .overlay(alignment: .top) {
+                Rectangle()
+                    .fill(FeastTheme.Colors.dividerBorder.opacity(0.7))
+                    .frame(height: 1)
+                    .offset(y: -FeastTheme.Spacing.small)
+            }
         }
-        .feastSectionSurface()
+        .padding(FeastTheme.Spacing.large)
+        .feastCardSurface()
     }
 
     private var actionSection: some View {
-        Section {
-            FeastFormGroup {
-                VStack(spacing: FeastTheme.Spacing.medium) {
-                    Button("View City") {
-                        onViewImportedCity(success.cityURIString)
-                    }
-                    .buttonStyle(FeastProminentButtonStyle())
+        VStack(alignment: .leading, spacing: FeastTheme.Spacing.large) {
+            Rectangle()
+                .fill(FeastTheme.Colors.dividerBorder.opacity(0.65))
+                .frame(height: 1)
 
-                    Button("Done") {
-                        onDone()
-                    }
-                    .buttonStyle(FeastQuietChipButtonStyle())
+            VStack(spacing: FeastTheme.Spacing.small) {
+                Button("View City") {
+                    onViewImportedCity(success.cityURIString)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .buttonStyle(FeastProminentButtonStyle())
+
+                Button {
+                    onDone()
+                } label: {
+                    Text("Done")
+                        .frame(maxWidth: .infinity, alignment: .center)
+                }
+                .buttonStyle(FeastInlineActionButtonStyle())
+                .padding(.top, FeastTheme.Spacing.xSmall)
             }
         }
-        .feastSectionSurface()
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var successTitle: String {
         if success.addedCount > 0 {
-            return success.addedCount == 1 ? "1 place added" : "\(success.addedCount) places added"
+            return success.addedCount == 1 ? "1 place imported" : "\(success.addedCount) places imported"
         }
 
-        return "Nothing new added"
+        return "Nothing new imported"
     }
 
     private var successMessage: String {
         if success.addedCount > 0, success.duplicateCount > 0 {
-            return "Added the new places to \(success.cityName). \(duplicateSummaryText) already there and were skipped."
+            return "Added confirmed places to \(success.cityName). \(duplicateSummaryText) already there."
         }
 
         if success.addedCount > 0, success.skippedCount > 0 {
-            return "Added the confirmed places to \(success.cityName). The rest stayed out for now."
+            return "Added confirmed places to \(success.cityName). Some items stayed out for now."
         }
 
         if success.addedCount > 0 {
-            return "The confirmed places are now in \(success.cityName) and ready to organize by Neighborhood."
+            return "Added confirmed places to \(success.cityName)."
         }
 
         if success.duplicateCount > 0 {
-            return "Everything you confirmed already exists in \(success.cityName)."
+            return "Everything you confirmed is already in \(success.cityName)."
         }
 
-        return "This pass didn’t add anything new to \(success.cityName)."
+        return "This import didn’t add anything new to \(success.cityName)."
     }
 
     private var successIconName: String {
         success.addedCount > 0 ? "checkmark.circle.fill" : "tray.fill"
     }
 
+    private var successIconBackground: Color {
+        success.addedCount > 0
+            ? FeastTheme.Colors.accentSelection.opacity(0.22)
+            : FeastTheme.Colors.surfaceBackground
+    }
+
+    private var successIconForeground: Color {
+        success.addedCount > 0
+            ? FeastTheme.Colors.primaryActionLabel
+            : FeastTheme.Colors.secondaryText
+    }
+
+    private var addedSummaryValue: String {
+        success.addedCount == 1 ? "1 place" : "\(success.addedCount) places"
+    }
+
+    private var skippedSummaryValue: String {
+        success.skippedCount == 1 ? "1 item" : "\(success.skippedCount) items"
+    }
+
+    private var skippedDetailText: String? {
+        guard success.skippedCount > 0 else {
+            return nil
+        }
+
+        if success.duplicateCount > 0 {
+            return "\(duplicateSummaryText) already in this City."
+        }
+
+        return "Skipped items stayed out of this import."
+    }
+
     private var duplicateSummaryText: String {
         success.duplicateCount == 1 ? "1 place was" : "\(success.duplicateCount) places were"
+    }
+
+    @ViewBuilder
+    private func summaryRow(title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title.uppercased())
+                .font(FeastTheme.Typography.sectionLabel)
+                .tracking(0.8)
+                .foregroundStyle(FeastTheme.Colors.secondaryText)
+
+            Text(value)
+                .font(FeastTheme.Typography.body.weight(.semibold))
+                .foregroundStyle(FeastTheme.Colors.primaryText)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private func summaryMetric(title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title.uppercased())
+                .font(FeastTheme.Typography.sectionLabel)
+                .tracking(0.8)
+                .foregroundStyle(FeastTheme.Colors.secondaryText)
+
+            Text(value)
+                .font(FeastTheme.Typography.sectionTitle)
+                .foregroundStyle(FeastTheme.Colors.primaryText)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
