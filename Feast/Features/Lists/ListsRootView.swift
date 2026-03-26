@@ -703,14 +703,6 @@ struct ListsRootView: View {
             return
         }
 
-        if let unavailableMessage = activePersistenceController.sharingUnavailableMessage {
-            alertState = ListsAlertState(
-                title: "iCloud Sharing Unavailable",
-                message: unavailableMessage
-            )
-            return
-        }
-
         listPreparingShareObjectID = feastList.objectID
 
         Task { @MainActor in
@@ -724,11 +716,22 @@ struct ListsRootView: View {
                 listSharingPresentation = preparedShare
             } catch {
                 alertState = ListsAlertState(
-                    title: "Couldn't Open Sharing",
+                    title: sharingAlertTitle(for: error),
                     message: error.localizedDescription
                 )
             }
         }
+    }
+
+    private func sharingAlertTitle(for error: Error) -> String {
+        guard
+            let sharingError = error as? PersistenceController.SharingError,
+            sharingError.isAvailabilityFailure
+        else {
+            return "Couldn't Open Sharing"
+        }
+
+        return "iCloud Sharing Unavailable"
     }
 
     private func listPrimaryMetadata(for feastList: FeastList) -> String {

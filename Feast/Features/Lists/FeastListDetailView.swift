@@ -377,14 +377,6 @@ struct FeastListDetailView: View {
             return
         }
 
-        if let unavailableMessage = activePersistenceController.sharingUnavailableMessage {
-            alertState = FeastListDetailAlertState(
-                title: "iCloud Sharing Unavailable",
-                message: unavailableMessage
-            )
-            return
-        }
-
         listPreparingShare = true
 
         Task { @MainActor in
@@ -396,11 +388,22 @@ struct FeastListDetailView: View {
                 listSharingPresentation = try await activePersistenceController.prepareShare(for: feastList)
             } catch {
                 alertState = FeastListDetailAlertState(
-                    title: "Couldn't Open Sharing",
+                    title: sharingAlertTitle(for: error),
                     message: error.localizedDescription
                 )
             }
         }
+    }
+
+    private func sharingAlertTitle(for error: Error) -> String {
+        guard
+            let sharingError = error as? PersistenceController.SharingError,
+            sharingError.isAvailabilityFailure
+        else {
+            return "Couldn't Open Sharing"
+        }
+
+        return "iCloud Sharing Unavailable"
     }
 
     private func deleteMessage(for neighborhood: ListSection) -> String {

@@ -75,14 +75,21 @@ final class PersistenceController {
         let containerIdentifier: String
 
         static func liveFromInfoPlist(in bundle: Bundle) -> CloudKitSyncConfiguration? {
-            guard
+            if
                 let rawValue = bundle.object(forInfoDictionaryKey: infoPlistKey) as? String,
                 let containerIdentifier = normalized(rawValue)
-            else {
-                return nil
+            {
+                return CloudKitSyncConfiguration(containerIdentifier: containerIdentifier)
             }
 
-            return CloudKitSyncConfiguration(containerIdentifier: containerIdentifier)
+            if
+                let bundleIdentifier = normalized(bundle.bundleIdentifier ?? ""),
+                let containerIdentifier = normalized("iCloud.\(bundleIdentifier)")
+            {
+                return CloudKitSyncConfiguration(containerIdentifier: containerIdentifier)
+            }
+
+            return nil
         }
 
         private static func normalized(_ rawValue: String) -> String? {
@@ -99,15 +106,33 @@ final class PersistenceController {
 
     enum SharingError: LocalizedError {
         case unavailable
+        case noCloudKitAccount
+        case restrictedCloudKitAccount
+        case cloudKitTemporarilyUnavailable
         case missingCloudKitContainer
         case missingSharedPersistentStore
         case missingPersistentStore
         case failedToPrepareShare
 
+        var isAvailabilityFailure: Bool {
+            switch self {
+            case .noCloudKitAccount, .restrictedCloudKitAccount, .cloudKitTemporarilyUnavailable:
+                return true
+            case .unavailable, .missingCloudKitContainer, .missingSharedPersistentStore, .missingPersistentStore, .failedToPrepareShare:
+                return false
+            }
+        }
+
         var errorDescription: String? {
             switch self {
             case .unavailable:
-                return "iCloud sharing is unavailable for this Feast build."
+                return "Feast couldn't access its CloudKit sharing stores right now. Try reopening Feast and trying again."
+            case .noCloudKitAccount:
+                return "Sign into iCloud on this iPhone and try sharing again."
+            case .restrictedCloudKitAccount:
+                return "iCloud sharing is restricted on this iPhone."
+            case .cloudKitTemporarilyUnavailable:
+                return "Feast couldn't reach iCloud right now. Check your network connection and try again."
             case .missingCloudKitContainer:
                 return "Feast couldn't find its CloudKit container."
             case .missingSharedPersistentStore:
@@ -135,6 +160,39 @@ final class PersistenceController {
         var local: NSPersistentStore?
         var privateCloudKit: NSPersistentStore?
         var sharedCloudKit: NSPersistentStore?
+    }
+
+    private struct PersistentStoreLoadCompletion {
+        let description: NSPersistentStoreDescription
+        let error: NSError?
+    }
+
+    private struct PersistentStoreLoadFailure {
+        let description: NSPersistentStoreDescription
+        let error: NSError
+    }
+
+    private struct PersistentStoreLoadError: LocalizedError {
+        let expectedStoreCount: Int
+        let completions: [PersistentStoreLoadCompletion]
+
+        var failures: [PersistentStoreLoadFailure] {
+            completions.compactMap { completion in
+                guard let error = completion.error else {
+                    return nil
+                }
+
+                return PersistentStoreLoadFailure(description: completion.description, error: error)
+            }
+        }
+
+        var errorDescription: String? {
+            if failures.count == 1 {
+                return failures[0].error.localizedDescription
+            }
+
+            return "Failed to load \(failures.count) of \(expectedStoreCount) persistent stores."
+        }
     }
 
     let container: NSPersistentCloudKitContainer
@@ -166,21 +224,6 @@ final class PersistenceController {
 
     var supportsSharing: Bool {
         cloudKitContainer != nil && privateCloudKitStore != nil && sharedCloudKitStore != nil
-    }
-
-    var sharingUnavailableMessage: String? {
-        guard !supportsSharing else {
-            return nil
-        }
-
-        switch storeMode {
-        case .localOnly:
-            return "This Feast build wasn't configured for iCloud City sharing."
-        case .localFallback:
-            return "Feast couldn't start iCloud sharing on this device. Sign into iCloud, turn on iCloud Drive, and try again."
-        case .cloudKit:
-            return "Feast couldn't access its iCloud sharing stores right now. Try again in a moment."
-        }
     }
 
     init(
@@ -219,8 +262,9 @@ final class PersistenceController {
                 fatalError("Failed to load persistent stores: \(error.localizedDescription)")
             }
 
-            Self.logger.error(
-                "CloudKit store setup failed for \(preferredCloudKitSyncConfiguration.containerIdentifier, privacy: .public). Falling back to local storage. Error: \(error.localizedDescription, privacy: .public)"
+            Self.logCloudKitStoreSetupFailure(
+                containerIdentifier: preferredCloudKitSyncConfiguration.containerIdentifier,
+                error: error
             )
 
             let fallbackStoreDescriptions = Self.makeStoreDescriptions(
@@ -338,18 +382,202 @@ final class PersistenceController {
     }
 
     private static func loadPersistentStores(in container: NSPersistentCloudKitContainer) throws {
-        var loadError: Error?
-        let semaphore = DispatchSemaphore(value: 0)
-
-        container.loadPersistentStores { _, error in
-            loadError = error
-            semaphore.signal()
+        let expectedStoreCount = container.persistentStoreDescriptions.count
+        guard expectedStoreCount > 0 else {
+            return
         }
 
-        semaphore.wait()
+        let dispatchGroup = DispatchGroup()
+        let lock = NSLock()
+        var completions: [PersistentStoreLoadCompletion] = []
 
-        if let loadError {
+        for _ in 0..<expectedStoreCount {
+            dispatchGroup.enter()
+        }
+
+        container.loadPersistentStores { description, error in
+            lock.lock()
+            completions.append(
+                PersistentStoreLoadCompletion(
+                    description: description,
+                    error: error as NSError?
+                )
+            )
+            lock.unlock()
+            dispatchGroup.leave()
+        }
+
+        dispatchGroup.wait()
+
+        let loadError = PersistentStoreLoadError(
+            expectedStoreCount: expectedStoreCount,
+            completions: completions
+        )
+        if !loadError.failures.isEmpty {
             throw loadError
+        }
+    }
+
+    private static func logCloudKitStoreSetupFailure(
+        containerIdentifier: String,
+        error: Error
+    ) {
+        logger.error(
+            """
+            CloudKit store setup failed for \(containerIdentifier, privacy: .public). Falling back to local storage.
+            \(persistentStoreLoadDiagnostics(for: error), privacy: .public)
+            """
+        )
+    }
+
+    private static func persistentStoreLoadDiagnostics(for error: Error) -> String {
+        if let loadError = error as? PersistentStoreLoadError {
+            var lines = [
+                "Persistent store load diagnostics:",
+                "expectedStoreCount: \(loadError.expectedStoreCount)",
+                "completedStoreCount: \(loadError.completions.count)",
+                "failureCount: \(loadError.failures.count)"
+            ]
+
+            for (index, completion) in loadError.completions.enumerated() {
+                lines.append("completion[\(index)] store: \(describeStoreDescription(completion.description))")
+
+                if let error = completion.error {
+                    lines.append("completion[\(index)] error:")
+                    lines.append(contentsOf: formatNSError(error, indent: "  "))
+                } else {
+                    lines.append("completion[\(index)] error: none")
+                }
+            }
+
+            return lines.joined(separator: "\n")
+        }
+
+        var lines = [
+            "Persistent store load diagnostics:",
+            "unexpected load error:"
+        ]
+        lines.append(contentsOf: formatNSError(error as NSError, indent: "  "))
+        return lines.joined(separator: "\n")
+    }
+
+    private static func describeStoreDescription(_ description: NSPersistentStoreDescription) -> String {
+        var components = [
+            "role=\(storeRoleDescription(for: description))",
+            "type=\(description.type)"
+        ]
+
+        if let url = description.url {
+            components.append("url=\(url.path)")
+        } else {
+            components.append("url=nil")
+        }
+
+        if let configuration = description.configuration {
+            components.append("configuration=\(configuration)")
+        }
+
+        if let containerIdentifier = description.cloudKitContainerOptions?.containerIdentifier {
+            components.append("containerIdentifier=\(containerIdentifier)")
+        }
+
+        return components.joined(separator: ", ")
+    }
+
+    private static func storeRoleDescription(for description: NSPersistentStoreDescription) -> String {
+        guard let cloudKitOptions = description.cloudKitContainerOptions else {
+            return "local"
+        }
+
+        switch cloudKitOptions.databaseScope {
+        case .private:
+            return "private"
+        case .shared:
+            return "shared"
+        case .public:
+            return "public"
+        @unknown default:
+            return "unknown"
+        }
+    }
+
+    private static func formatNSError(
+        _ error: NSError,
+        indent: String,
+        visited: inout Set<ObjectIdentifier>
+    ) -> [String] {
+        let identifier = ObjectIdentifier(error)
+        guard visited.insert(identifier).inserted else {
+            return ["\(indent)<already visited \(error.domain) code=\(error.code)>"]
+        }
+
+        var lines = [
+            "\(indent)domain: \(error.domain)",
+            "\(indent)code: \(error.code)",
+            "\(indent)localizedDescription: \(error.localizedDescription)",
+            "\(indent)localizedFailureReason: \(error.localizedFailureReason ?? "nil")"
+        ]
+        lines.append(contentsOf: formatUserInfo(error.userInfo, indent: indent))
+
+        let nestedErrors = nestedErrors(in: error)
+        if nestedErrors.isEmpty {
+            lines.append("\(indent)nestedErrors: none")
+        } else {
+            for (index, nestedError) in nestedErrors.enumerated() {
+                lines.append("\(indent)nestedError[\(index)]:")
+                lines.append(
+                    contentsOf: formatNSError(
+                        nestedError,
+                        indent: indent + "  ",
+                        visited: &visited
+                    )
+                )
+            }
+        }
+
+        return lines
+    }
+
+    private static func formatNSError(_ error: NSError, indent: String) -> [String] {
+        var visited = Set<ObjectIdentifier>()
+        return formatNSError(error, indent: indent, visited: &visited)
+    }
+
+    private static func formatUserInfo(_ userInfo: [String: Any], indent: String) -> [String] {
+        guard !userInfo.isEmpty else {
+            return ["\(indent)userInfo: {}"]
+        }
+
+        let sortedKeys = userInfo.keys.sorted()
+        var lines = ["\(indent)userInfo:"]
+        for key in sortedKeys {
+            let valueDescription = String(describing: userInfo[key]!)
+            lines.append("\(indent)  \(key): \(valueDescription)")
+        }
+
+        return lines
+    }
+
+    private static func nestedErrors(in error: NSError) -> [NSError] {
+        error.userInfo.values.flatMap { nestedErrors(from: $0) }
+    }
+
+    private static func nestedErrors(from value: Any) -> [NSError] {
+        switch value {
+        case let error as NSError:
+            return [error]
+        case let error as Error:
+            return [error as NSError]
+        case let errors as [NSError]:
+            return errors
+        case let errors as [Error]:
+            return errors.map { $0 as NSError }
+        case let dictionary as [AnyHashable: Error]:
+            return dictionary.values.map { $0 as NSError }
+        case let dictionary as [AnyHashable: NSError]:
+            return Array(dictionary.values)
+        default:
+            return []
         }
     }
 
@@ -451,12 +679,14 @@ final class PersistenceController {
     }
 
     func prepareShare(for feastList: FeastList) async throws -> PreparedFeastListShare {
-        guard supportsSharing else {
-            throw SharingError.unavailable
-        }
-
         guard let cloudKitContainer else {
             throw SharingError.missingCloudKitContainer
+        }
+
+        try await ensureCloudKitAccountAvailable(for: cloudKitContainer)
+
+        guard supportsSharing else {
+            throw SharingError.unavailable
         }
 
         let feastListName = feastList.displayName
@@ -538,6 +768,50 @@ final class PersistenceController {
         }
 
         viewContext.refreshAllObjects()
+    }
+
+    private func ensureCloudKitAccountAvailable(for container: CKContainer) async throws {
+        do {
+            let accountStatus = try await cloudKitAccountStatus(for: container)
+
+            switch accountStatus {
+            case .available:
+                return
+            case .noAccount:
+                throw SharingError.noCloudKitAccount
+            case .restricted:
+                throw SharingError.restrictedCloudKitAccount
+            case .couldNotDetermine, .temporarilyUnavailable:
+                throw SharingError.cloudKitTemporarilyUnavailable
+            @unknown default:
+                throw SharingError.cloudKitTemporarilyUnavailable
+            }
+        } catch let sharingError as SharingError {
+            throw sharingError
+        } catch let cloudKitError as CKError {
+            switch cloudKitError.code {
+            case .notAuthenticated:
+                throw SharingError.noCloudKitAccount
+            case .permissionFailure:
+                throw SharingError.restrictedCloudKitAccount
+            default:
+                throw SharingError.cloudKitTemporarilyUnavailable
+            }
+        } catch {
+            throw SharingError.cloudKitTemporarilyUnavailable
+        }
+    }
+
+    private func cloudKitAccountStatus(for container: CKContainer) async throws -> CKAccountStatus {
+        try await withCheckedThrowingContinuation { continuation in
+            container.accountStatus { accountStatus, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(returning: accountStatus)
+                }
+            }
+        }
     }
 
     private var defaultWriteStore: NSPersistentStore? {
