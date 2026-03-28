@@ -4,6 +4,7 @@ import SwiftUI
 struct SavedPlaceDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.managedObjectContext) private var viewContext
+    @Environment(\.openURL) private var openURL
     @Environment(\.persistenceController) private var persistenceController
     @Environment(\.applePlacesService) private var applePlacesService
 
@@ -21,7 +22,7 @@ struct SavedPlaceDetailView: View {
     @State private var cuisinesText: String
     @State private var tags: [String]
     @State private var note: String
-    @State private var skipNote: String
+    @State private var websiteURL: String
     @State private var instagramURL: String
     @State private var selectedNeighborhoodObjectID: NSManagedObjectID?
 
@@ -32,7 +33,7 @@ struct SavedPlaceDetailView: View {
         _cuisinesText = State(initialValue: savedPlace.cuisines.joined(separator: ", "))
         _tags = State(initialValue: savedPlace.tags)
         _note = State(initialValue: savedPlace.note ?? "")
-        _skipNote = State(initialValue: savedPlace.skipNote ?? "")
+        _websiteURL = State(initialValue: savedPlace.websiteURL ?? "")
         _instagramURL = State(initialValue: savedPlace.instagramURL ?? "")
         _selectedNeighborhoodObjectID = State(initialValue: savedPlace.listSection?.objectID)
     }
@@ -132,6 +133,14 @@ struct SavedPlaceDetailView: View {
 
     private var existingTags: [String] {
         FeastTag.catalog(from: savedPlaces.map(\.tags))
+    }
+
+    private var websiteURLValue: URL? {
+        validatedURL(from: websiteURL)
+    }
+
+    private var instagramURLValue: URL? {
+        validatedURL(from: instagramURL)
     }
 
     private var headerSection: some View {
@@ -276,9 +285,9 @@ struct SavedPlaceDetailView: View {
     private var notesSection: some View {
         Section {
             FeastFormGroup {
-                FeastFormField(title: "Note", helper: "What makes the place worth returning to?") {
+                FeastFormField(title: "Note", helper: "Anything useful to remember, including when you would skip it.") {
                     FeastMultilineTextEditor(
-                        placeholder: "Why it matters",
+                        placeholder: "Why it matters or what gave you pause",
                         text: $note,
                         minHeight: 92
                     )
@@ -286,12 +295,12 @@ struct SavedPlaceDetailView: View {
 
                 FeastFormDivider()
 
-                FeastFormField(title: "Skip Note", helper: "What would make you pass on it next time?") {
-                    FeastMultilineTextEditor(
-                        placeholder: "Why you might skip it",
-                        text: $skipNote,
-                        minHeight: 76
-                    )
+                FeastFormField(title: "Website URL") {
+                    TextField("https://example.com", text: $websiteURL)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .feastFieldSurface()
                 }
 
                 FeastFormDivider()
@@ -342,6 +351,40 @@ struct SavedPlaceDetailView: View {
     private var actionsSection: some View {
         Section {
             FeastFormGroup {
+                if let websiteURLValue {
+                    Button {
+                        openExternalURL(
+                            websiteURLValue,
+                            failureTitle: "Website Unavailable",
+                            failureMessage: "Feast couldn't open this website."
+                        )
+                    } label: {
+                        Label("Open Website", systemImage: "globe")
+                    }
+                    .buttonStyle(FeastInlineActionButtonStyle())
+                }
+
+                if websiteURLValue != nil, instagramURLValue != nil {
+                    FeastFormDivider()
+                }
+
+                if let instagramURLValue {
+                    Button {
+                        openExternalURL(
+                            instagramURLValue,
+                            failureTitle: "Instagram Unavailable",
+                            failureMessage: "Feast couldn't open this Instagram link."
+                        )
+                    } label: {
+                        Label("Open Instagram", systemImage: "camera")
+                    }
+                    .buttonStyle(FeastInlineActionButtonStyle())
+                }
+
+                if websiteURLValue != nil || instagramURLValue != nil {
+                    FeastFormDivider()
+                }
+
                 Button(role: .destructive) {
                     showingDeleteConfirmation = true
                 } label: {
@@ -415,7 +458,7 @@ struct SavedPlaceDetailView: View {
                     cuisines: splitValues(from: cuisinesText),
                     tags: tags,
                     note: normalizedOptional(note),
-                    skipNote: normalizedOptional(skipNote),
+                    websiteURL: normalizedOptional(websiteURL),
                     instagramURL: normalizedOptional(instagramURL),
                     listSection: selectedNeighborhood
                 )
@@ -451,6 +494,32 @@ struct SavedPlaceDetailView: View {
     private func normalizedOptional(_ rawValue: String) -> String? {
         let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func validatedURL(from rawValue: String) -> URL? {
+        guard
+            let normalizedURL = normalizedOptional(rawValue),
+            let url = URL(string: normalizedURL)
+        else {
+            return nil
+        }
+
+        return url
+    }
+
+    private func openExternalURL(
+        _ url: URL,
+        failureTitle: String,
+        failureMessage: String
+    ) {
+        openURL(url) { accepted in
+            if !accepted {
+                detailAlert = DetailAlertState(
+                    title: failureTitle,
+                    message: failureMessage
+                )
+            }
+        }
     }
 
     private func errorMessage(for error: Error) -> String {

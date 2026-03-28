@@ -40,7 +40,7 @@ struct NotesImportCandidatePlace: Identifiable, Hashable {
     let cuisines: [String]
     let tags: [String]
     let note: String?
-    let skipNote: String?
+    let websiteURL: String?
     let instagramURL: String?
 }
 
@@ -295,6 +295,7 @@ private struct PlaceBuilder {
     var cuisines: [String]
     var tags: [String]
     var noteFragments: [String]
+    var websiteURL: String?
     var instagramURL: String?
 
     var reviewValue: NotesImportCandidatePlace {
@@ -307,7 +308,7 @@ private struct PlaceBuilder {
             cuisines: cuisines,
             tags: tags,
             note: joinedNote,
-            skipNote: nil,
+            websiteURL: websiteURL,
             instagramURL: instagramURL
         )
     }
@@ -649,6 +650,7 @@ private extension NotesImportParser {
             cuisines: mergedDisplayValues(context.cuisines, baseInference.cuisines),
             tags: FeastTag.normalizedTags(context.tags + baseInference.tags),
             noteFragments: [],
+            websiteURL: nil,
             instagramURL: nil
         )
 
@@ -729,6 +731,15 @@ private extension NotesImportParser {
     }
 
     static func appendNote(_ note: String, to builder: inout PlaceBuilder) {
+        let trimmedNote = noteAfterExtractingFieldURLs(from: note, into: &builder)
+        guard !trimmedNote.isEmpty else {
+            return
+        }
+
+        appendProcessedNote(trimmedNote, to: &builder)
+    }
+
+    static func appendProcessedNote(_ note: String, to builder: inout PlaceBuilder) {
         let trimmedNote = trimmed(note)
         guard !trimmedNote.isEmpty else {
             return
@@ -759,12 +770,11 @@ private extension NotesImportParser {
     }
 
     static func appendURL(_ url: URL, to builder: inout PlaceBuilder) {
-        if isInstagramURL(url), builder.instagramURL == nil {
-            builder.instagramURL = url.absoluteString
+        if assignedClassifiedURL(url, to: &builder) {
             return
         }
 
-        appendNote(url.absoluteString, to: &builder)
+        appendProcessedNote(url.absoluteString, to: &builder)
     }
 
     static func shouldAttachBulletAsNote(
@@ -894,12 +904,133 @@ private extension NotesImportParser {
         return orderedValues
     }
 
-    static func isInstagramURL(_ url: URL) -> Bool {
-        guard let host = url.host?.lowercased() else {
-            return false
+    static func noteAfterExtractingFieldURLs(from rawNote: String, into builder: inout PlaceBuilder) -> String {
+        let trimmedNote = trimmed(rawNote)
+        guard !trimmedNote.isEmpty else {
+            return ""
         }
 
-        return host.contains("instagram.com")
+        let matches = urlDetector.matches(
+            in: trimmedNote,
+            options: [],
+            range: NSRange(location: 0, length: (trimmedNote as NSString).length)
+        )
+        guard !matches.isEmpty else {
+            return trimmedNote
+        }
+
+        let mutableNote = NSMutableString(string: trimmedNote)
+
+        for match in matches.reversed() {
+            guard
+                let url = match.url,
+                assignedClassifiedURL(url, to: &builder)
+            else {
+                continue
+            }
+
+            mutableNote.replaceCharacters(in: match.range, with: "")
+        }
+
+        let cleanedNote = cleanedNoteAfterRemovingFieldURLs(String(mutableNote))
+        return shouldDropResidualLinkLabel(cleanedNote) ? "" : cleanedNote
+    }
+
+    static func cleanedNoteAfterRemovingFieldURLs(_ value: String) -> String {
+        let cleaned = value
+            .replacingOccurrences(
+                of: #"\[([^\]]+)\]\(\s*\)"#,
+                with: "$1",
+                options: .regularExpression
+            )
+            .replacingOccurrences(of: "<>", with: "")
+            .replacingOccurrences(
+                of: #"[\t ]+"#,
+                with: " ",
+                options: .regularExpression
+            )
+            .replacingOccurrences(
+                of: #"\s+([,.;:!?])"#,
+                with: "$1",
+                options: .regularExpression
+            )
+            .replacingOccurrences(
+                of: #"([(\[])\s+"#,
+                with: "$1",
+                options: .regularExpression
+            )
+            .replacingOccurrences(
+                of: #"\s+([)\]])"#,
+                with: "$1",
+                options: .regularExpression
+            )
+            .replacingOccurrences(
+                of: #"(?i)\b(?:website|web ?site|site|link|url|instagram|insta|ig)\b\s*[:\-–—]?\s*$"#,
+                with: "",
+                options: .regularExpression
+            )
+
+        return trimmed(cleaned)
+    }
+
+    static func shouldDropResidualLinkLabel(_ value: String) -> Bool {
+        let searchable = searchableText(from: value)
+        return searchable == " website "
+            || searchable == " web site "
+            || searchable == " site "
+            || searchable == " link "
+            || searchable == " url "
+            || searchable == " instagram "
+            || searchable == " insta "
+            || searchable == " ig "
+    }
+
+    static func assignedClassifiedURL(_ url: URL, to builder: inout PlaceBuilder) -> Bool {
+        let classification = classifiedPlaceURL(from: url)
+
+        if let instagramURL = classification.instagramURL, builder.instagramURL == nil {
+            builder.instagramURL = instagramURL
+            return true
+        }
+
+        if let websiteURL = classification.websiteURL, builder.websiteURL == nil {
+            builder.websiteURL = websiteURL
+            return true
+        }
+
+        return false
+    }
+
+    static func classifiedPlaceURL(from url: URL) -> ClassifiedImportedURL {
+        guard
+            let scheme = url.scheme?.lowercased(),
+            scheme == "http" || scheme == "https",
+            let host = normalizedHost(for: url)
+        else {
+            return ClassifiedImportedURL(websiteURL: nil, instagramURL: nil)
+        }
+
+        let absoluteString = url.absoluteString
+        if isInstagramHost(host) {
+            return ClassifiedImportedURL(websiteURL: nil, instagramURL: absoluteString)
+        }
+
+        return ClassifiedImportedURL(websiteURL: absoluteString, instagramURL: nil)
+    }
+
+    static func normalizedHost(for url: URL) -> String? {
+        guard let host = url.host?.trimmingCharacters(in: CharacterSet(charactersIn: ".")), !host.isEmpty else {
+            return nil
+        }
+
+        return host.lowercased()
+    }
+
+    static func isInstagramHost(_ host: String) -> Bool {
+        host == "instagram.com"
+            || host.hasSuffix(".instagram.com")
+            || host == "instagr.am"
+            || host.hasSuffix(".instagr.am")
     }
 
     static func trimmed(_ value: String) -> String {
@@ -998,6 +1129,8 @@ private extension NotesImportParser {
         (.dessert, ["dessert", "gelato", "ice cream"]),
         (.market, ["market", "grocery"])
     ]
+
+    static let urlDetector = try! NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
 }
 
 private enum NotesImportRegex {
@@ -1011,4 +1144,9 @@ private extension NSRegularExpression {
     func firstMatch(in string: String) -> NSTextCheckingResult? {
         firstMatch(in: string, options: [], range: NSRange(location: 0, length: string.utf16.count))
     }
+}
+
+private struct ClassifiedImportedURL {
+    let websiteURL: String?
+    let instagramURL: String?
 }

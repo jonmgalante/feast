@@ -34,7 +34,7 @@ struct NotesImportReviewItem: Identifiable, Hashable {
     let cuisines: [String]
     let tags: [String]
     let note: String?
-    let skipNote: String?
+    let websiteURL: String?
     let instagramURL: String?
     let parsedNeighborhoodName: String?
     var selectedNeighborhoodName: String?
@@ -124,7 +124,7 @@ enum NotesImportReviewBuilder {
             cuisines: place.cuisines,
             tags: place.tags,
             note: place.note,
-            skipNote: place.skipNote,
+            websiteURL: place.websiteURL,
             instagramURL: place.instagramURL,
             parsedNeighborhoodName: canonicalNeighborhoodName,
             selectedNeighborhoodName: selectedNeighborhoodName,

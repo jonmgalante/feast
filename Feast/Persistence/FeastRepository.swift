@@ -1,5 +1,6 @@
 import CoreData
 import Foundation
+import os
 
 @MainActor
 final class FeastRepository {
@@ -33,7 +34,7 @@ final class FeastRepository {
         let cuisines: [String]
         let tags: [String]
         let note: String?
-        let skipNote: String?
+        let websiteURL: String?
         let instagramURL: String?
         let feastList: FeastList
         let listSection: ListSection?
@@ -45,7 +46,7 @@ final class FeastRepository {
         let cuisines: [String]
         let tags: [String]
         let note: String?
-        let skipNote: String?
+        let websiteURL: String?
         let instagramURL: String?
         let listSection: ListSection?
     }
@@ -58,7 +59,7 @@ final class FeastRepository {
         let cuisines: [String]
         let tags: [String]
         let note: String?
-        let skipNote: String?
+        let websiteURL: String?
         let instagramURL: String?
         let neighborhoodName: String?
     }
@@ -89,6 +90,9 @@ final class FeastRepository {
 
     private let context: NSManagedObjectContext
     private let persistenceController: PersistenceController?
+
+    private static let logger = Logger(subsystem: "com.jongalante.Feast", category: "Repository")
+    private static let legacySkipGuidancePrefix = "Skip guidance: "
 
     init(
         context: NSManagedObjectContext,
@@ -160,6 +164,34 @@ final class FeastRepository {
         }
     }
 
+    func migrateDeprecatedSkipNotesIfNeeded() throws {
+        let request = SavedPlace.fetchRequest()
+        request.predicate = NSPredicate(format: "skipNote != nil AND skipNote != ''")
+
+        let savedPlaces = try context.fetch(request)
+        var migratedCount = 0
+
+        for savedPlace in savedPlaces {
+            if migrateDeprecatedSkipNoteIfNeeded(for: savedPlace) {
+                migratedCount += 1
+            }
+        }
+
+        guard migratedCount > 0 else {
+            return
+        }
+
+        do {
+            try saveIfNeeded()
+            Self.logger.notice(
+                "Migrated legacy skip notes for \(migratedCount, privacy: .public) saved places."
+            )
+        } catch {
+            context.rollback()
+            throw error
+        }
+    }
+
     @discardableResult
     func createListSection(
         named name: String,
@@ -208,7 +240,7 @@ final class FeastRepository {
             cuisines: draft.cuisines,
             tags: draft.tags,
             note: draft.note,
-            skipNote: draft.skipNote,
+            websiteURL: draft.websiteURL,
             instagramURL: draft.instagramURL,
             list: draft.feastList,
             section: draft.listSection
@@ -278,7 +310,7 @@ final class FeastRepository {
                     cuisines: normalizedListValues(draft.cuisines),
                     tags: FeastTag.normalizedTags(draft.tags),
                     note: normalizedOptional(draft.note),
-                    skipNote: normalizedOptional(draft.skipNote),
+                    websiteURL: normalizedOptional(draft.websiteURL),
                     instagramURL: normalizedOptional(draft.instagramURL),
                     list: feastList,
                     section: neighborhood
@@ -316,7 +348,7 @@ final class FeastRepository {
         savedPlace.cuisines = metadata.cuisines
         savedPlace.tags = metadata.tags
         savedPlace.note = metadata.note
-        savedPlace.skipNote = metadata.skipNote
+        savedPlace.websiteURL = metadata.websiteURL
         savedPlace.instagramURL = metadata.instagramURL
         savedPlace.listSection = metadata.listSection
         savedPlace.updatedAt = Date()
@@ -386,7 +418,7 @@ final class FeastRepository {
             cuisines: ["American", "Wood-fired"],
             tags: ["Dinner", "Group spot"],
             note: "Excellent for a big dinner and easy repeat visits.",
-            skipNote: nil,
+            websiteURL: nil,
             instagramURL: "https://www.instagram.com/rolosnyc",
             list: nyc,
             section: ridgewood
@@ -400,7 +432,7 @@ final class FeastRepository {
             cuisines: ["Indian"],
             tags: ["Spicy", "Special occasion"],
             note: "Still worth revisiting for the larger-format dishes.",
-            skipNote: nil,
+            websiteURL: nil,
             instagramURL: nil,
             list: nyc,
             section: lowerEastSide
@@ -414,7 +446,7 @@ final class FeastRepository {
             cuisines: ["Bakery", "Middle Eastern"],
             tags: ["Breakfast"],
             note: "Good unsorted example for the city detail screen.",
-            skipNote: nil,
+            websiteURL: nil,
             instagramURL: nil,
             list: nyc,
             section: nil
@@ -428,7 +460,7 @@ final class FeastRepository {
             cuisines: ["British"],
             tags: ["Classic", "Reservation"],
             note: "A useful London anchor for preview data.",
-            skipNote: nil,
+            websiteURL: nil,
             instagramURL: nil,
             list: london,
             section: soho
@@ -442,7 +474,7 @@ final class FeastRepository {
             cuisines: ["Sandwiches", "American"],
             tags: ["Lunch", "Casual"],
             note: "A good Philadelphia example with a neighborhood assignment.",
-            skipNote: nil,
+            websiteURL: nil,
             instagramURL: nil,
             list: philadelphia,
             section: fishtown
@@ -504,7 +536,7 @@ final class FeastRepository {
         cuisines: [String],
         tags: [String],
         note: String?,
-        skipNote: String?,
+        websiteURL: String?,
         instagramURL: String?,
         list: FeastList,
         section: ListSection?
@@ -520,7 +552,7 @@ final class FeastRepository {
         savedPlace.cuisines = cuisines
         savedPlace.tags = tags
         savedPlace.note = note
-        savedPlace.skipNote = skipNote
+        savedPlace.websiteURL = websiteURL
         savedPlace.instagramURL = instagramURL
         savedPlace.feastList = list
         savedPlace.listSection = section
@@ -602,6 +634,57 @@ final class FeastRepository {
 
     private func touch(_ section: ListSection?) {
         section?.updatedAt = Date()
+    }
+
+    private func migrateDeprecatedSkipNoteIfNeeded(for savedPlace: SavedPlace) -> Bool {
+        guard let skipNote = normalizedOptional(savedPlace.skipNote) else {
+            return false
+        }
+
+        let mergedNote = mergedNote(savedPlace.note, withDeprecatedSkipNote: skipNote)
+        let didChangeNote = savedPlace.note != mergedNote
+        let hadLegacySkipNote = savedPlace.skipNote != nil
+
+        if didChangeNote {
+            savedPlace.note = mergedNote
+        }
+
+        guard hadLegacySkipNote else {
+            return didChangeNote
+        }
+
+        savedPlace.skipNote = nil
+        return didChangeNote || hadLegacySkipNote
+    }
+
+    private func mergedNote(_ existingNote: String?, withDeprecatedSkipNote skipNote: String) -> String {
+        let skipGuidanceBlock = Self.legacySkipGuidancePrefix + skipNote
+
+        guard let existingNote, !existingNote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return skipGuidanceBlock
+        }
+
+        if noteContainsDeprecatedSkipGuidance(existingNote, skipNote: skipNote) {
+            return existingNote
+        }
+
+        return existingNote + "\n\n" + skipGuidanceBlock
+    }
+
+    private func noteContainsDeprecatedSkipGuidance(_ note: String, skipNote: String) -> Bool {
+        let normalizedNote = normalizedMigrationText(note)
+        let normalizedSkipNote = normalizedMigrationText(skipNote)
+        let normalizedGuidanceBlock = normalizedMigrationText(Self.legacySkipGuidancePrefix + skipNote)
+
+        return normalizedNote.contains(normalizedGuidanceBlock) || normalizedNote.contains(normalizedSkipNote)
+    }
+
+    private func normalizedMigrationText(_ rawValue: String) -> String {
+        rawValue
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
     }
 
     private func migrateSections(in feastList: FeastList) -> Bool {

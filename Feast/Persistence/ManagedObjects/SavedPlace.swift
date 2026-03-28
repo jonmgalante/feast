@@ -19,6 +19,7 @@ public final class SavedPlace: NSManagedObject {
     @NSManaged public var status: String?
     @NSManaged public var tagsStorage: String?
     @NSManaged public var updatedAt: Date?
+    @NSManaged public var websiteURL: String?
     @NSManaged public var feastList: FeastList?
     @NSManaged public var listSection: ListSection?
 }
@@ -68,6 +69,14 @@ extension SavedPlace {
         }
 
         return URL(string: instagramURL)
+    }
+
+    var websiteURLValue: URL? {
+        guard let websiteURL, !websiteURL.isEmpty else {
+            return nil
+        }
+
+        return URL(string: websiteURL)
     }
 
     var displayCityName: String {

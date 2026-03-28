@@ -17,6 +17,8 @@ struct ApplePlaceMatch: Identifiable, Hashable {
     let secondaryText: String
     let coordinate: ApplePlaceCoordinate?
     let suggestedSectionPath: ApplePlaceSectionPathSuggestion
+    let websiteURL: String?
+    let instagramURL: String?
 
     var id: String { applePlaceID }
 }
@@ -147,7 +149,9 @@ extension ApplePlacesService {
             suggestedSectionPath: ApplePlaceSectionPathSuggestion(
                 cityOrRegion: "NYC",
                 neighborhood: "Ridgewood"
-            )
+            ),
+            websiteURL: nil,
+            instagramURL: nil
         ),
         ApplePlaceMatch(
             applePlaceID: "applemaps-dhamaka-les",
@@ -157,7 +161,9 @@ extension ApplePlacesService {
             suggestedSectionPath: ApplePlaceSectionPathSuggestion(
                 cityOrRegion: "NYC",
                 neighborhood: "Lower East Side"
-            )
+            ),
+            websiteURL: nil,
+            instagramURL: nil
         ),
         ApplePlaceMatch(
             applePlaceID: "applemaps-librae-bakery",
@@ -167,7 +173,9 @@ extension ApplePlacesService {
             suggestedSectionPath: ApplePlaceSectionPathSuggestion(
                 cityOrRegion: "NYC",
                 neighborhood: "East Williamsburg"
-            )
+            ),
+            websiteURL: nil,
+            instagramURL: nil
         ),
         ApplePlaceMatch(
             applePlaceID: "applemaps-st-john-soho",
@@ -177,7 +185,9 @@ extension ApplePlacesService {
             suggestedSectionPath: ApplePlaceSectionPathSuggestion(
                 cityOrRegion: "London",
                 neighborhood: "Soho"
-            )
+            ),
+            websiteURL: nil,
+            instagramURL: nil
         ),
         ApplePlaceMatch(
             applePlaceID: "applemaps-middle-child-clubhouse",
@@ -187,7 +197,9 @@ extension ApplePlacesService {
             suggestedSectionPath: ApplePlaceSectionPathSuggestion(
                 cityOrRegion: "Philadelphia",
                 neighborhood: "Fishtown"
-            )
+            ),
+            websiteURL: nil,
+            instagramURL: nil
         )
     ]
 
@@ -237,6 +249,7 @@ extension ApplePlacesService {
         let secondaryText = normalized(mapItem.address?.shortAddress)
             ?? normalized(mapItem.address?.fullAddress)
             ?? ""
+        let urlAutofill = classifiedPlaceURL(from: mapItem.url)
 
         return ApplePlaceMatch(
             applePlaceID: applePlaceID,
@@ -246,7 +259,9 @@ extension ApplePlacesService {
             suggestedSectionPath: ApplePlaceSectionPathSuggestion(
                 cityOrRegion: suggestedCityOrRegion(from: mapItem),
                 neighborhood: suggestedNeighborhood(from: mapItem)
-            )
+            ),
+            websiteURL: urlAutofill.websiteURL,
+            instagramURL: urlAutofill.instagramURL
         )
     }
 
@@ -281,6 +296,39 @@ extension ApplePlacesService {
         return trimmed
     }
 
+    nonisolated private static func classifiedPlaceURL(from url: URL?) -> ClassifiedPlaceURL {
+        guard
+            let url,
+            let scheme = url.scheme?.lowercased(),
+            scheme == "http" || scheme == "https",
+            let host = normalizedHost(for: url)
+        else {
+            return ClassifiedPlaceURL(websiteURL: nil, instagramURL: nil)
+        }
+
+        let absoluteString = url.absoluteString
+        if isInstagramHost(host) {
+            return ClassifiedPlaceURL(websiteURL: nil, instagramURL: absoluteString)
+        }
+
+        return ClassifiedPlaceURL(websiteURL: absoluteString, instagramURL: nil)
+    }
+
+    nonisolated private static func normalizedHost(for url: URL) -> String? {
+        guard let host = url.host?.trimmingCharacters(in: CharacterSet(charactersIn: ".")), !host.isEmpty else {
+            return nil
+        }
+
+        return host.lowercased()
+    }
+
+    nonisolated private static func isInstagramHost(_ host: String) -> Bool {
+        host == "instagram.com"
+            || host.hasSuffix(".instagram.com")
+            || host == "instagr.am"
+            || host.hasSuffix(".instagr.am")
+    }
+
     nonisolated private static func searchTokens(from rawValue: String) -> Set<String> {
         let folded = rawValue.folding(
             options: [.caseInsensitive, .diacriticInsensitive],
@@ -301,6 +349,11 @@ extension ApplePlacesService {
                 .map(String.init)
         )
     }
+}
+
+private struct ClassifiedPlaceURL {
+    let websiteURL: String?
+    let instagramURL: String?
 }
 
 private enum ApplePlacesError: LocalizedError {

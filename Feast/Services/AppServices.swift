@@ -13,6 +13,7 @@ struct AppServices {
         )
         do {
             try repository.migrateToCityNeighborhoodModelIfNeeded()
+            try repository.migrateDeprecatedSkipNotesIfNeeded()
         } catch {
             assertionFailure("Failed to initialize Feast data: \(error.localizedDescription)")
         }
@@ -32,6 +33,7 @@ struct AppServices {
         do {
             try repository.seedIfNeeded(mode: .previewDemoContent)
             try repository.migrateToCityNeighborhoodModelIfNeeded()
+            try repository.migrateDeprecatedSkipNotesIfNeeded()
         } catch {
             assertionFailure("Failed to initialize Feast preview data: \(error.localizedDescription)")
         }

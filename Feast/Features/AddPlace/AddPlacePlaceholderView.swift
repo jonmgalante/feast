@@ -225,7 +225,7 @@ private struct AddPlaceSaveView: View {
     @State private var cuisinesText = ""
     @State private var tags: [String] = []
     @State private var note = ""
-    @State private var skipNote = ""
+    @State private var websiteURL = ""
     @State private var instagramURL = ""
     @State private var selectedNeighborhoodObjectID: NSManagedObjectID?
     @State private var showingSaveError = false
@@ -239,6 +239,8 @@ private struct AddPlaceSaveView: View {
         self.feastList = feastList
         self.place = place
         self.onSaveComplete = onSaveComplete
+        _websiteURL = State(initialValue: place.websiteURL ?? "")
+        _instagramURL = State(initialValue: place.instagramURL ?? "")
         _selectedNeighborhoodObjectID = State(
             initialValue: Self.suggestedNeighborhood(in: feastList, for: place)?.objectID
         )
@@ -433,9 +435,9 @@ private struct AddPlaceSaveView: View {
     private var notesSection: some View {
         Section {
             FeastFormGroup {
-                FeastFormField(title: "Note", helper: "Why it’s worth saving.") {
+                FeastFormField(title: "Note", helper: "Anything useful to remember, including reasons you might skip it later.") {
                     FeastMultilineTextEditor(
-                        placeholder: "What stood out?",
+                        placeholder: "What stood out or gave you pause?",
                         text: $note,
                         minHeight: 92
                     )
@@ -443,12 +445,12 @@ private struct AddPlaceSaveView: View {
 
                 FeastFormDivider()
 
-                FeastFormField(title: "Skip Note", helper: "Why you might pass on it next time.") {
-                    FeastMultilineTextEditor(
-                        placeholder: "What gave you pause?",
-                        text: $skipNote,
-                        minHeight: 76
-                    )
+                FeastFormField(title: "Website URL") {
+                    TextField("https://example.com", text: $websiteURL)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .feastFieldSurface()
                 }
 
                 FeastFormDivider()
@@ -510,7 +512,7 @@ private struct AddPlaceSaveView: View {
                     cuisines: splitValues(from: cuisinesText),
                     tags: tags,
                     note: normalizedOptional(note),
-                    skipNote: normalizedOptional(skipNote),
+                    websiteURL: normalizedOptional(websiteURL),
                     instagramURL: normalizedOptional(instagramURL),
                     feastList: feastList,
                     listSection: selectedNeighborhood

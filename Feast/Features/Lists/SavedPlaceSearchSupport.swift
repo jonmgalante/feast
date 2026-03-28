@@ -135,7 +135,7 @@ enum SavedPlaceSearchEngine {
             place.placeStatus.rawValue,
             place.placeTypeValue.rawValue,
             place.note,
-            place.skipNote,
+            place.websiteURL,
             place.instagramURL
         ]
         .compactMap { normalized($0) }

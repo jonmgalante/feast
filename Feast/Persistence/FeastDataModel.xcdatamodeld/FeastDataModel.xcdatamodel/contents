@@ -31,6 +31,7 @@
         <attribute name="status" optional="YES" attributeType="String"/>
         <attribute name="tagsStorage" optional="YES" attributeType="String"/>
         <attribute name="updatedAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="websiteURL" optional="YES" attributeType="String"/>
         <relationship name="feastList" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="FeastList" inverseName="savedPlaces" inverseEntity="FeastList"/>
         <relationship name="listSection" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="ListSection" inverseName="savedPlaces" inverseEntity="ListSection"/>
     </entity>
