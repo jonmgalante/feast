@@ -555,18 +555,17 @@ struct ListsRootView: View {
 
     private func listLink(for feastList: FeastList) -> some View {
         let sharingState = listSharingState(for: feastList)
-        let showsTrailingStatus = listPreparingShareObjectID == feastList.objectID || sharingState.isShared
+        let showsTrailingStatus = listPreparingShareObjectID == feastList.objectID
 
         return NavigationLink {
             FeastListDetailView(feastList: feastList)
         } label: {
             listRow(for: feastList)
-                .padding(.trailing, showsTrailingStatus ? 34 : 0)
         }
         .overlay(alignment: .trailing) {
             if showsTrailingStatus {
-                cityRowTrailingStatus(for: feastList, sharingState: sharingState)
-                    .padding(.trailing, 2)
+                cityRowTrailingStatus(for: feastList)
+                    .padding(.trailing, 24)
             }
         }
         .contextMenu {
@@ -599,18 +598,10 @@ struct ListsRootView: View {
     }
 
     @ViewBuilder
-    private func cityRowTrailingStatus(
-        for feastList: FeastList,
-        sharingState: FeastListSharingState
-    ) -> some View {
+    private func cityRowTrailingStatus(for feastList: FeastList) -> some View {
         if listPreparingShareObjectID == feastList.objectID {
             ProgressView()
                 .controlSize(.small)
-                .frame(width: 28, height: 28)
-        } else if sharingState.isShared {
-            Image(systemName: "person.2.fill")
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(FeastTheme.Colors.tertiaryText)
                 .frame(width: 28, height: 28)
         }
     }

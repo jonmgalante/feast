@@ -1,8 +1,12 @@
 import CloudKit
+import MessageUI
 import SwiftUI
 import UIKit
+import os
 
 struct FeastListSharingSheet: View {
+    private static let logger = Logger(subsystem: "com.jongalante.Feast", category: "Sharing")
+
     @Environment(\.dismiss) private var dismiss
 
     let preparedShare: PreparedFeastListShare
@@ -15,7 +19,8 @@ struct FeastListSharingSheet: View {
     @State private var isInviting = false
     @State private var inviteResultMessage: String?
     @State private var showingSystemSharingSheet = false
-    @State private var alertState: FeastListSharingAlertState?
+    @State private var activeDeliveryPresentation: InviteDeliveryPresentation?
+    @State private var activeAlert: FeastListSharingAlert?
 
     private var invitedEditorCount: Int {
         preparedShare.share.participants.filter { $0.role != .owner }.count
@@ -148,12 +153,37 @@ struct FeastListSharingSheet: View {
                 onError: handleSystemSharingError
             )
         }
-        .alert(item: $alertState) { alert in
-            Alert(
-                title: Text(alert.title),
-                message: Text(alert.message),
-                dismissButton: .default(Text("OK"))
-            )
+        .sheet(item: $activeDeliveryPresentation) { presentation in
+            switch presentation.kind {
+            case .messages:
+                MessageInviteComposeSheet(draft: presentation.draft)
+            case .mail:
+                MailInviteComposeSheet(draft: presentation.draft)
+            case .share:
+                InviteLinkShareSheet(draft: presentation.draft)
+            }
+        }
+        .alert(item: $activeAlert) { alert in
+            switch alert {
+            case let .error(errorAlert):
+                Alert(
+                    title: Text(errorAlert.title),
+                    message: Text(errorAlert.message),
+                    dismissButton: .default(Text("OK"))
+                )
+            case let .manualFallback(fallback):
+                Alert(
+                    title: Text("Invite Created"),
+                    message: Text(fallback.message),
+                    primaryButton: .default(Text("Open Share Sheet")) {
+                        activeDeliveryPresentation = InviteDeliveryPresentation(
+                            kind: .share,
+                            draft: fallback.draft
+                        )
+                    },
+                    secondaryButton: .cancel(Text("Not Now"))
+                )
+            }
         }
     }
 
@@ -176,17 +206,19 @@ struct FeastListSharingSheet: View {
             }
 
             do {
-                try await persistenceController.inviteParticipant(
+                let delivery = try await persistenceController.inviteParticipant(
                     matching: lookupValue,
                     to: preparedShare
                 )
                 inviteRecipient = ""
-                inviteResultMessage = "Added as an editor to this city share."
                 onDidSaveShare()
+                beginDelivery(using: delivery)
             } catch {
-                alertState = FeastListSharingAlertState(
-                    title: alertTitle(for: error),
-                    message: error.localizedDescription
+                activeAlert = .error(
+                    FeastListSharingErrorAlert(
+                        title: alertTitle(for: error),
+                        message: error.localizedDescription
+                    )
                 )
             }
         }
@@ -200,9 +232,70 @@ struct FeastListSharingSheet: View {
 
     private func handleSystemSharingError(_ error: Error) {
         onError(error)
-        alertState = FeastListSharingAlertState(
-            title: alertTitle(for: error),
-            message: error.localizedDescription
+        activeAlert = .error(
+            FeastListSharingErrorAlert(
+                title: alertTitle(for: error),
+                message: error.localizedDescription
+            )
+        )
+    }
+
+    private func beginDelivery(using delivery: PrivateShareInvitationDelivery) {
+        let draft = InviteDeliveryDraft(
+            feastListName: preparedShare.feastListName,
+            delivery: delivery
+        )
+
+        switch delivery.contact {
+        case .phoneNumber:
+            if MFMessageComposeViewController.canSendText() {
+                Self.logger.log(
+                    "Using direct text invite delivery for city \(preparedShare.feastListName, privacy: .public)."
+                )
+                inviteResultMessage = "Invite created. Finish sending it in Messages."
+                activeDeliveryPresentation = InviteDeliveryPresentation(
+                    kind: .messages,
+                    draft: draft
+                )
+            } else {
+                presentFallbackDelivery(
+                    draft,
+                    unavailableReason: "Messages isn't available here."
+                )
+            }
+        case .emailAddress:
+            if MFMailComposeViewController.canSendMail() {
+                Self.logger.log(
+                    "Using direct mail invite delivery for city \(preparedShare.feastListName, privacy: .public)."
+                )
+                inviteResultMessage = "Invite created. Finish sending it in Mail."
+                activeDeliveryPresentation = InviteDeliveryPresentation(
+                    kind: .mail,
+                    draft: draft
+                )
+            } else {
+                presentFallbackDelivery(
+                    draft,
+                    unavailableReason: "Mail isn't available here."
+                )
+            }
+        }
+    }
+
+    private func presentFallbackDelivery(
+        _ draft: InviteDeliveryDraft,
+        unavailableReason: String
+    ) {
+        let fallbackMessage = "Invite created. \(unavailableReason) Send it manually from the share sheet."
+        Self.logger.log(
+            "Using generic share-sheet fallback for city \(preparedShare.feastListName, privacy: .public). Reason: \(unavailableReason, privacy: .public)"
+        )
+        inviteResultMessage = fallbackMessage
+        activeAlert = .manualFallback(
+            ManualInviteFallback(
+                draft: draft,
+                message: fallbackMessage
+            )
         )
     }
 
@@ -218,6 +311,8 @@ struct FeastListSharingSheet: View {
             return "Couldn't Find iCloud Participant"
         case .shareParticipantAlreadyAdded:
             return "Already Invited"
+        case .missingShareURL:
+            return "Couldn't Prepare Invite Link"
         case .noCloudKitAccount, .restrictedCloudKitAccount, .cloudKitTemporarilyUnavailable:
             return "iCloud Sharing Unavailable"
         case .unavailable, .missingCloudKitContainer, .missingSharedPersistentStore, .missingPersistentStore, .failedToPrepareShare:
@@ -226,10 +321,154 @@ struct FeastListSharingSheet: View {
     }
 }
 
-private struct FeastListSharingAlertState: Identifiable {
+private enum FeastListSharingAlert: Identifiable {
+    case error(FeastListSharingErrorAlert)
+    case manualFallback(ManualInviteFallback)
+
+    var id: UUID {
+        switch self {
+        case let .error(errorAlert):
+            return errorAlert.id
+        case let .manualFallback(fallback):
+            return fallback.id
+        }
+    }
+}
+
+private struct FeastListSharingErrorAlert {
     let id = UUID()
     let title: String
     let message: String
+}
+
+private struct ManualInviteFallback {
+    let id = UUID()
+    let draft: InviteDeliveryDraft
+    let message: String
+}
+
+private struct InviteDeliveryDraft {
+    let feastListName: String
+    let delivery: PrivateShareInvitationDelivery
+
+    var messageBody: String {
+        "I'm inviting you to collaborate on \(feastListName) in Feast. Open this private invite on your iPhone: \(delivery.shareURL.absoluteString)"
+    }
+
+    var mailSubject: String {
+        "Feast invite: \(feastListName)"
+    }
+}
+
+private struct InviteDeliveryPresentation: Identifiable {
+    enum Kind {
+        case messages
+        case mail
+        case share
+    }
+
+    let id = UUID()
+    let kind: Kind
+    let draft: InviteDeliveryDraft
+}
+
+private struct MessageInviteComposeSheet: UIViewControllerRepresentable {
+    @Environment(\.dismiss) private var dismiss
+
+    let draft: InviteDeliveryDraft
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator {
+            dismiss()
+        }
+    }
+
+    func makeUIViewController(context: Context) -> MFMessageComposeViewController {
+        let controller = MFMessageComposeViewController()
+        controller.recipients = [draft.delivery.contact.value]
+        controller.body = draft.messageBody
+        controller.messageComposeDelegate = context.coordinator
+        return controller
+    }
+
+    func updateUIViewController(_ uiViewController: MFMessageComposeViewController, context: Context) { }
+}
+
+private extension MessageInviteComposeSheet {
+    final class Coordinator: NSObject, MFMessageComposeViewControllerDelegate {
+        private let onDismiss: () -> Void
+
+        init(onDismiss: @escaping () -> Void) {
+            self.onDismiss = onDismiss
+        }
+
+        func messageComposeViewController(
+            _ controller: MFMessageComposeViewController,
+            didFinishWith result: MessageComposeResult
+        ) {
+            onDismiss()
+        }
+    }
+}
+
+private struct MailInviteComposeSheet: UIViewControllerRepresentable {
+    @Environment(\.dismiss) private var dismiss
+
+    let draft: InviteDeliveryDraft
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator {
+            dismiss()
+        }
+    }
+
+    func makeUIViewController(context: Context) -> MFMailComposeViewController {
+        let controller = MFMailComposeViewController()
+        controller.setToRecipients([draft.delivery.contact.value])
+        controller.setSubject(draft.mailSubject)
+        controller.setMessageBody(draft.messageBody, isHTML: false)
+        controller.mailComposeDelegate = context.coordinator
+        return controller
+    }
+
+    func updateUIViewController(_ uiViewController: MFMailComposeViewController, context: Context) { }
+}
+
+private extension MailInviteComposeSheet {
+    final class Coordinator: NSObject, MFMailComposeViewControllerDelegate {
+        private let onDismiss: () -> Void
+
+        init(onDismiss: @escaping () -> Void) {
+            self.onDismiss = onDismiss
+        }
+
+        func mailComposeController(
+            _ controller: MFMailComposeViewController,
+            didFinishWith result: MFMailComposeResult,
+            error: Error?
+        ) {
+            onDismiss()
+        }
+    }
+}
+
+private struct InviteLinkShareSheet: UIViewControllerRepresentable {
+    @Environment(\.dismiss) private var dismiss
+
+    let draft: InviteDeliveryDraft
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        let controller = UIActivityViewController(
+            activityItems: [draft.messageBody, draft.delivery.shareURL],
+            applicationActivities: nil
+        )
+        controller.completionWithItemsHandler = { _, _, _, _ in
+            dismiss()
+        }
+        return controller
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) { }
 }
 
 private struct AppleCloudSharingSheet: UIViewControllerRepresentable {
