@@ -1106,8 +1106,8 @@ private struct NotesImportReviewView: View {
             cuisines: item.cuisines,
             tags: item.tags,
             note: item.note,
-            websiteURL: item.websiteURL,
-            instagramURL: item.instagramURL,
+            websiteURL: item.websiteURL ?? matchedPlace.websiteURL,
+            instagramURL: item.instagramURL ?? matchedPlace.instagramURL,
             neighborhoodName: item.selectedNeighborhoodName
         )
     }
