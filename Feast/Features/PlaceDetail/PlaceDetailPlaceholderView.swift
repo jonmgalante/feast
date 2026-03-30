@@ -70,7 +70,7 @@ struct SavedPlaceDetailView: View {
             isPresented: $showingDeleteConfirmation,
             titleVisibility: .visible
         ) {
-            Button("Delete Place", role: .destructive) {
+            Button("Remove from City", role: .destructive) {
                 deletePlace()
             }
             Button("Cancel", role: .cancel) { }
@@ -206,7 +206,7 @@ struct SavedPlaceDetailView: View {
         } header: {
             FeastFormSectionHeader(
                 title: "Place Profile",
-                subtitle: "City and neighborhood context, plus editable notes together"
+                subtitle: "City, neighborhood, and place details"
             )
         }
     }
@@ -216,7 +216,7 @@ struct SavedPlaceDetailView: View {
             FeastFormGroup {
                 FeastFormField(
                     title: "Status",
-                    helper: "How this place should read in your city."
+                    helper: "How this place shows up in this city."
                 ) {
                     Picker("Status", selection: $status) {
                         ForEach(PlaceStatus.allCases) { status in
@@ -232,7 +232,7 @@ struct SavedPlaceDetailView: View {
 
                 FeastFormField(
                     title: "Place Type",
-                    helper: "Keeps the place profile consistent across Feast."
+                    helper: "Helps keep places organized."
                 ) {
                     Picker("Place Type", selection: $placeType) {
                         ForEach(PlaceType.allCases) { placeType in
@@ -246,8 +246,8 @@ struct SavedPlaceDetailView: View {
             }
         } header: {
             FeastFormSectionHeader(
-                title: "Metadata",
-                subtitle: "Update the way the place is categorized"
+                title: "Status And Type",
+                subtitle: "Choose how this place should be organized"
             )
         }
     }
@@ -256,7 +256,7 @@ struct SavedPlaceDetailView: View {
         Section {
             FeastFormGroup {
                 FeastFormField(title: "Cuisines") {
-                    TextField("Italian, sushi, bakery", text: $cuisinesText)
+                    TextField("Italian, Japanese, Seafood", text: $cuisinesText)
                         .textInputAutocapitalization(.words)
                         .feastFieldSurface()
                 }
@@ -265,7 +265,7 @@ struct SavedPlaceDetailView: View {
 
                 FeastFormField(
                     title: "Tags",
-                    helper: "Reuse an existing tag or press Return, comma, or the add button to create one."
+                    helper: "Press Return or comma to add a tag."
                 ) {
                     FeastTagInputView(
                         tags: $tags,
@@ -277,7 +277,7 @@ struct SavedPlaceDetailView: View {
         } header: {
             FeastFormSectionHeader(
                 title: "Cuisines And Tags",
-                subtitle: "Cuisines stay freeform; tags are reusable labels"
+                subtitle: "Add details that make this easier to find later"
             )
         }
     }
@@ -285,9 +285,9 @@ struct SavedPlaceDetailView: View {
     private var notesSection: some View {
         Section {
             FeastFormGroup {
-                FeastFormField(title: "Note", helper: "Anything useful to remember, including when you would skip it.") {
+                FeastFormField(title: "Note", helper: "Anything useful to remember.") {
                     FeastMultilineTextEditor(
-                        placeholder: "Why it matters or what gave you pause",
+                        placeholder: "What to order, who recommended it, or why you'd skip it",
                         text: $note,
                         minHeight: 92
                     )
@@ -295,7 +295,7 @@ struct SavedPlaceDetailView: View {
 
                 FeastFormDivider()
 
-                FeastFormField(title: "Website URL") {
+                FeastFormField(title: "Website") {
                     TextField("https://example.com", text: $websiteURL)
                         .keyboardType(.URL)
                         .textInputAutocapitalization(.never)
@@ -305,7 +305,7 @@ struct SavedPlaceDetailView: View {
 
                 FeastFormDivider()
 
-                FeastFormField(title: "Instagram URL") {
+                FeastFormField(title: "Instagram") {
                     TextField("https://instagram.com/...", text: $instagramURL)
                         .keyboardType(.URL)
                         .textInputAutocapitalization(.never)
@@ -315,8 +315,8 @@ struct SavedPlaceDetailView: View {
             }
         } header: {
             FeastFormSectionHeader(
-                title: "Notes",
-                subtitle: "Keep the place profile useful and easy to scan"
+                title: "Notes And Links",
+                subtitle: "Add quick context you'll want later"
             )
         }
     }
@@ -326,7 +326,7 @@ struct SavedPlaceDetailView: View {
             FeastFormGroup {
                 FeastFormField(
                     title: "Neighborhood",
-                    helper: "Choose Unsorted if the place should stay in the city without a neighborhood for now."
+                    helper: "Choose Unsorted to keep it at the city level for now."
                 ) {
                     Picker("Neighborhood", selection: $selectedNeighborhoodObjectID) {
                         Text("Unsorted").tag(nil as NSManagedObjectID?)
@@ -342,8 +342,8 @@ struct SavedPlaceDetailView: View {
             }
         } header: {
             FeastFormSectionHeader(
-                title: "Neighborhood Assignment",
-                subtitle: "Move the place without changing its city"
+                title: "Neighborhood",
+                subtitle: "Move this place without changing its city"
             )
         }
     }
@@ -388,7 +388,7 @@ struct SavedPlaceDetailView: View {
                 Button(role: .destructive) {
                     showingDeleteConfirmation = true
                 } label: {
-                    Text("Delete Place")
+                    Text("Remove from City")
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
