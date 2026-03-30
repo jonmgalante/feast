@@ -1,0 +1,310 @@
+{
+  "type": "FeatureCollection",
+  "name": "NYCNeighborhoodBoundaries",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "West Village",
+        "borough": "Manhattan"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [-74.0115, 40.7280],
+            [-73.9980, 40.7280],
+            [-73.9980, 40.7395],
+            [-74.0115, 40.7395],
+            [-74.0115, 40.7280]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "SoHo",
+        "borough": "Manhattan"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [-74.0075, 40.7200],
+            [-73.9950, 40.7200],
+            [-73.9950, 40.7280],
+            [-74.0075, 40.7280],
+            [-74.0075, 40.7200]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Tribeca",
+        "borough": "Manhattan"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [-74.0135, 40.7160],
+            [-74.0025, 40.7160],
+            [-74.0025, 40.7235],
+            [-74.0135, 40.7235],
+            [-74.0135, 40.7160]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "FiDi",
+        "borough": "Manhattan"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [-74.0190, 40.7010],
+            [-74.0040, 40.7010],
+            [-74.0040, 40.7135],
+            [-74.0190, 40.7135],
+            [-74.0190, 40.7010]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Lower East Side",
+        "borough": "Manhattan"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [-73.9915, 40.7115],
+            [-73.9715, 40.7115],
+            [-73.9715, 40.7235],
+            [-73.9915, 40.7235],
+            [-73.9915, 40.7115]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "East Village",
+        "borough": "Manhattan"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [-73.9910, 40.7235],
+            [-73.9715, 40.7235],
+            [-73.9715, 40.7348],
+            [-73.9910, 40.7348],
+            [-73.9910, 40.7235]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Chelsea",
+        "borough": "Manhattan"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [-74.0075, 40.7395],
+            [-73.9945, 40.7395],
+            [-73.9945, 40.7540],
+            [-74.0075, 40.7540],
+            [-74.0075, 40.7395]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Upper East Side",
+        "borough": "Manhattan"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [-73.9725, 40.7615],
+            [-73.9440, 40.7615],
+            [-73.9440, 40.7875],
+            [-73.9725, 40.7875],
+            [-73.9725, 40.7615]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Upper West Side",
+        "borough": "Manhattan"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [-73.9895, 40.7710],
+            [-73.9690, 40.7710],
+            [-73.9690, 40.8010],
+            [-73.9895, 40.8010],
+            [-73.9895, 40.7710]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Williamsburg",
+        "borough": "Brooklyn"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [-73.9715, 40.7030],
+            [-73.9485, 40.7030],
+            [-73.9485, 40.7205],
+            [-73.9715, 40.7205],
+            [-73.9715, 40.7030]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Greenpoint",
+        "borough": "Brooklyn"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [-73.9660, 40.7205],
+            [-73.9385, 40.7205],
+            [-73.9385, 40.7420],
+            [-73.9660, 40.7420],
+            [-73.9660, 40.7205]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Bushwick",
+        "borough": "Brooklyn"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [-73.9410, 40.6865],
+            [-73.9030, 40.6865],
+            [-73.9030, 40.7145],
+            [-73.9410, 40.7145],
+            [-73.9410, 40.6865]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Ridgewood",
+        "borough": "Queens"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [-73.9190, 40.6995],
+            [-73.8845, 40.6995],
+            [-73.8845, 40.7210],
+            [-73.9190, 40.7210],
+            [-73.9190, 40.6995]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Long Island City",
+        "borough": "Queens"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [-73.9600, 40.7340],
+            [-73.9220, 40.7340],
+            [-73.9220, 40.7585],
+            [-73.9600, 40.7585],
+            [-73.9600, 40.7340]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Astoria",
+        "borough": "Queens"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [-73.9370, 40.7560],
+            [-73.9010, 40.7560],
+            [-73.9010, 40.7815],
+            [-73.9370, 40.7815],
+            [-73.9370, 40.7560]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Park Slope",
+        "borough": "Brooklyn"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [-73.9870, 40.6610],
+            [-73.9670, 40.6610],
+            [-73.9670, 40.6815],
+            [-73.9870, 40.6815],
+            [-73.9870, 40.6610]
+          ]
+        ]
+      }
+    }
+  ]
+}

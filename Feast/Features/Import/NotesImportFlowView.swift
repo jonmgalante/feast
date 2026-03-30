@@ -1275,6 +1275,8 @@ private struct NotesImportReviewItemEditorSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.applePlacesService) private var applePlacesService
 
+    private static let newNeighborhoodPromptToken = "__feast_new_neighborhood__"
+
     let item: NotesImportReviewItem
     let cityName: String
     let neighborhoodNames: [String]
@@ -1282,6 +1284,7 @@ private struct NotesImportReviewItemEditorSheet: View {
 
     @State private var parsedPlaceName: String
     @State private var selectedNeighborhoodName: String?
+    @State private var committedNeighborhoodSelection: String?
     @State private var matchedPlace: ApplePlaceMatch?
     @State private var suggestedMatches: [ApplePlaceMatch]
     @State private var isSkipped: Bool
@@ -1290,6 +1293,8 @@ private struct NotesImportReviewItemEditorSheet: View {
     @State private var searchState: NotesImportMatchSearchState = .idle
     @State private var validationMessage: String?
     @State private var followsParsedName = true
+    @State private var showingNewNeighborhoodSheet = false
+    @State private var newNeighborhoodName = ""
 
     init(
         item: NotesImportReviewItem,
@@ -1304,10 +1309,29 @@ private struct NotesImportReviewItemEditorSheet: View {
         _parsedPlaceName = State(initialValue: item.parsedPlaceName)
         _selectedNeighborhoodName = State(
             initialValue: NotesImportReviewBuilder.matchedNeighborhoodName(
-                for: item.selectedNeighborhoodName
-                    ?? item.parsedNeighborhoodName,
+                for: item.selectedNeighborhoodName,
                 in: neighborhoodNames
-            ) ?? NotesImportReviewBuilder.canonicalNeighborhoodName(for: item.selectedNeighborhoodName)
+            )
+                ?? NotesImportReviewBuilder.canonicalNeighborhoodName(for: item.selectedNeighborhoodName)
+                ?? NotesImportReviewBuilder.suggestedNeighborhoodSuggestion(
+                    for: item,
+                    matchedPlace: item.matchedPlace,
+                    cityName: cityName,
+                    existingNeighborhoodNames: neighborhoodNames
+                )?.existingMatch
+        )
+        _committedNeighborhoodSelection = State(
+            initialValue: NotesImportReviewBuilder.matchedNeighborhoodName(
+                for: item.selectedNeighborhoodName,
+                in: neighborhoodNames
+            )
+                ?? NotesImportReviewBuilder.canonicalNeighborhoodName(for: item.selectedNeighborhoodName)
+                ?? NotesImportReviewBuilder.suggestedNeighborhoodSuggestion(
+                    for: item,
+                    matchedPlace: item.matchedPlace,
+                    cityName: cityName,
+                    existingNeighborhoodNames: neighborhoodNames
+                )?.existingMatch
         )
         _matchedPlace = State(initialValue: item.matchedPlace)
         _suggestedMatches = State(initialValue: item.suggestedMatches)
@@ -1332,6 +1356,9 @@ private struct NotesImportReviewItemEditorSheet: View {
         .scrollDismissesKeyboard(.interactively)
         .task(id: searchQuery) {
             await search(for: searchQuery)
+        }
+        .onChange(of: selectedNeighborhoodName) { _, newValue in
+            handleNeighborhoodSelectionChange(newValue)
         }
         .onChange(of: parsedPlaceName) { _, newValue in
             validationMessage = nil
@@ -1367,6 +1394,14 @@ private struct NotesImportReviewItemEditorSheet: View {
                     saveChanges()
                 }
                 .fontWeight(.semibold)
+            }
+        }
+        .sheet(isPresented: $showingNewNeighborhoodSheet) {
+            NavigationStack {
+                NeighborhoodNamePromptSheet(
+                    initialName: newNeighborhoodName,
+                    onConfirm: applyManualNeighborhoodName(_:)
+                )
             }
         }
     }
@@ -1492,6 +1527,13 @@ private struct NotesImportReviewItemEditorSheet: View {
                             Text("Create “\(proposedNeighborhoodOption)”").tag(proposedNeighborhoodOption as String?)
                         }
 
+                        if let manualNeighborhoodToCreate {
+                            Text("Create “\(manualNeighborhoodToCreate)”").tag(manualNeighborhoodToCreate as String?)
+                        }
+
+                        Text("New Neighborhood…")
+                            .tag(Self.newNeighborhoodPromptToken as String?)
+
                         ForEach(neighborhoodNames, id: \.self) { neighborhoodName in
                             Text(neighborhoodName).tag(neighborhoodName as String?)
                         }
@@ -1613,20 +1655,43 @@ private struct NotesImportReviewItemEditorSheet: View {
         return components.joined(separator: " • ")
     }
 
-    private var proposedNeighborhoodOption: String? {
-        let proposedNeighborhood = NotesImportReviewBuilder.canonicalNeighborhoodName(
-            for: item.parsedNeighborhoodName
+    private var suggestedNeighborhood: FeastNeighborhoodName.Suggestion? {
+        NotesImportReviewBuilder.suggestedNeighborhoodSuggestion(
+            for: item,
+            matchedPlace: matchedPlace,
+            cityName: cityName,
+            existingNeighborhoodNames: neighborhoodNames
         )
+    }
 
-        guard let proposedNeighborhood, !proposedNeighborhood.isEmpty else {
+    private var proposedNeighborhoodOption: String? {
+        guard
+            let suggestedNeighborhood,
+            suggestedNeighborhood.existingMatch == nil
+        else {
             return nil
         }
 
-        guard matchedNeighborhoodName(for: proposedNeighborhood) == nil else {
+        return suggestedNeighborhood.displayName
+    }
+
+    private var manualNeighborhoodToCreate: String? {
+        guard
+            let selectedNeighborhoodName,
+            matchedNeighborhoodName(for: selectedNeighborhoodName) == nil,
+            let canonicalNeighborhoodName = NotesImportReviewBuilder.canonicalNeighborhoodName(
+                for: selectedNeighborhoodName
+            )
+        else {
             return nil
         }
 
-        return proposedNeighborhood
+        if let proposedNeighborhoodOption,
+           FeastNeighborhoodName.matches(canonicalNeighborhoodName, proposedNeighborhoodOption) {
+            return nil
+        }
+
+        return canonicalNeighborhoodName
     }
 
     private var neighborhoodHelper: String {
@@ -1639,14 +1704,14 @@ private struct NotesImportReviewItemEditorSheet: View {
         }
 
         if let proposedNeighborhoodOption {
-            return "Suggested Neighborhood: \(proposedNeighborhoodOption). Choose it to create that Neighborhood during import, or leave the place Unsorted."
+            return "Suggested Neighborhood: \(proposedNeighborhoodOption). Choose it to create that Neighborhood during import, pick an existing neighborhood, or use New Neighborhood…."
         }
 
-        if let proposedNeighborhood = item.parsedNeighborhoodName {
-            return "Suggested Neighborhood: \(proposedNeighborhood)."
+        if let suggestedNeighborhood, suggestedNeighborhood.existingMatch != nil {
+            return "Suggested Neighborhood: \(suggestedNeighborhood.displayName)."
         }
 
-        return "Leave it Unsorted if you want to organize it later."
+        return "Leave it Unsorted, choose an existing neighborhood, or use New Neighborhood…."
     }
 
     private func matchesList(_ matches: [ApplePlaceMatch]) -> some View {
@@ -1711,6 +1776,34 @@ private struct NotesImportReviewItemEditorSheet: View {
         var previewItem = item
         previewItem.parsedPlaceName = parsedName
         return previewItem
+    }
+
+    private func handleNeighborhoodSelectionChange(_ newValue: String?) {
+        guard newValue == Self.newNeighborhoodPromptToken else {
+            committedNeighborhoodSelection = newValue
+            return
+        }
+
+        if let committedNeighborhoodSelection,
+           matchedNeighborhoodName(for: committedNeighborhoodSelection) == nil {
+            newNeighborhoodName = committedNeighborhoodSelection
+        } else {
+            newNeighborhoodName = ""
+        }
+
+        showingNewNeighborhoodSheet = true
+        selectedNeighborhoodName = committedNeighborhoodSelection
+    }
+
+    private func applyManualNeighborhoodName(_ rawValue: String) {
+        guard let canonicalNeighborhoodName = NotesImportReviewBuilder.canonicalNeighborhoodName(
+            for: rawValue
+        ) else {
+            return
+        }
+
+        selectedNeighborhoodName = matchedNeighborhoodName(for: canonicalNeighborhoodName)
+            ?? canonicalNeighborhoodName
     }
 
     private func saveChanges() {

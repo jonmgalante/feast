@@ -1,7 +1,7 @@
 import Foundation
 
 enum FeastTag {
-    static func collapsed(_ rawValue: String) -> String? {
+    nonisolated static func collapsed(_ rawValue: String) -> String? {
         let collapsed = rawValue
             .components(separatedBy: .whitespacesAndNewlines)
             .filter { !$0.isEmpty }
@@ -10,7 +10,7 @@ enum FeastTag {
         return collapsed.isEmpty ? nil : collapsed
     }
 
-    static func normalizedDisplay(_ rawValue: String) -> String? {
+    nonisolated static func normalizedDisplay(_ rawValue: String) -> String? {
         guard let collapsed = collapsed(rawValue) else {
             return nil
         }
@@ -18,7 +18,7 @@ enum FeastTag {
         return collapsed.capitalized(with: .current)
     }
 
-    static func normalizedKey(for rawValue: String) -> String? {
+    nonisolated static func normalizedKey(for rawValue: String) -> String? {
         guard let collapsed = collapsed(rawValue) else {
             return nil
         }
@@ -29,7 +29,7 @@ enum FeastTag {
         )
     }
 
-    static func normalizedTags(_ values: [String]) -> [String] {
+    nonisolated static func normalizedTags(_ values: [String]) -> [String] {
         var orderedTags: [String] = []
         var seenKeys: Set<String> = []
 
@@ -49,7 +49,7 @@ enum FeastTag {
         return orderedTags
     }
 
-    static func catalog(from tagCollections: [[String]]) -> [String] {
+    nonisolated static func catalog(from tagCollections: [[String]]) -> [String] {
         var countsByKey: [String: Int] = [:]
         var displayByKey: [String: String] = [:]
 
@@ -84,7 +84,7 @@ enum FeastTag {
             .compactMap { displayByKey[$0] }
     }
 
-    static func suggestions(
+    nonisolated static func suggestions(
         matching rawValue: String,
         existingTags: [String],
         selectedTags: [String],
@@ -117,5 +117,150 @@ enum FeastTag {
         }
 
         return Array((prefixMatches + containsMatches).prefix(limit))
+    }
+}
+
+enum FeastNeighborhoodName {
+    struct Suggestion: Equatable {
+        let displayName: String
+        let existingMatch: String?
+    }
+
+    nonisolated private static let coarseAreaKeys: Set<String> = [
+        "bronx",
+        "brooklyn",
+        "manhattan",
+        "new york",
+        "new york ny",
+        "new york city",
+        "nyc",
+        "queens",
+        "staten island",
+        "the bronx",
+        "united states",
+        "united states of america",
+        "us",
+        "usa"
+    ]
+
+    nonisolated static func canonicalDisplayName(for rawValue: String?) -> String? {
+        guard let rawValue else {
+            return nil
+        }
+
+        return FeastTag.collapsed(rawValue)
+    }
+
+    nonisolated static func normalizedKey(for rawValue: String?) -> String? {
+        guard let displayName = canonicalDisplayName(for: rawValue) else {
+            return nil
+        }
+
+        let folded = displayName.folding(
+            options: [.caseInsensitive, .diacriticInsensitive],
+            locale: .current
+        )
+
+        let normalized = String(
+            folded.unicodeScalars.map { scalar in
+                CharacterSet.alphanumerics.contains(scalar) ? Character(scalar) : " "
+            }
+        )
+        .components(separatedBy: .whitespacesAndNewlines)
+        .filter { !$0.isEmpty }
+        .joined(separator: " ")
+
+        return normalized.isEmpty ? nil : normalized
+    }
+
+    nonisolated static func matches(_ lhs: String?, _ rhs: String?) -> Bool {
+        guard
+            let lhsKey = normalizedKey(for: lhs),
+            let rhsKey = normalizedKey(for: rhs)
+        else {
+            return false
+        }
+
+        return lhsKey == rhsKey
+    }
+
+    nonisolated static func matchedExistingName(
+        for proposedNeighborhood: String?,
+        in existingNeighborhoodNames: [String]
+    ) -> String? {
+        guard let proposedNeighborhoodKey = normalizedKey(for: proposedNeighborhood) else {
+            return nil
+        }
+
+        return existingNeighborhoodNames.first { neighborhoodName in
+            normalizedKey(for: neighborhoodName) == proposedNeighborhoodKey
+        }
+    }
+
+    nonisolated static func suggestion(
+        primary rawPrimaryNeighborhood: String?,
+        fallback rawFallbackNeighborhood: String? = nil,
+        existingNeighborhoodNames: [String],
+        rejectedContextNames: [String] = []
+    ) -> Suggestion? {
+        if let primaryNeighborhood = trustworthyNeighborhood(
+            from: rawPrimaryNeighborhood,
+            rejectedContextNames: rejectedContextNames
+        ) {
+            return makeSuggestion(
+                for: primaryNeighborhood,
+                existingNeighborhoodNames: existingNeighborhoodNames
+            )
+        }
+
+        if let fallbackNeighborhood = trustworthyNeighborhood(
+            from: rawFallbackNeighborhood,
+            rejectedContextNames: rejectedContextNames
+        ) {
+            return makeSuggestion(
+                for: fallbackNeighborhood,
+                existingNeighborhoodNames: existingNeighborhoodNames
+            )
+        }
+
+        return nil
+    }
+
+    nonisolated static func trustworthyNeighborhood(
+        from rawValue: String?,
+        rejectedContextNames: [String] = []
+    ) -> String? {
+        guard
+            let displayName = canonicalDisplayName(for: rawValue),
+            let key = normalizedKey(for: displayName)
+        else {
+            return nil
+        }
+
+        if coarseAreaKeys.contains(key) {
+            return nil
+        }
+
+        let rejectedKeys = Set(rejectedContextNames.compactMap { normalizedKey(for: $0) })
+        if rejectedKeys.contains(key) {
+            return nil
+        }
+
+        return displayName
+    }
+
+    nonisolated private static func makeSuggestion(
+        for displayName: String,
+        existingNeighborhoodNames: [String]
+    ) -> Suggestion {
+        let existingMatch = matchedExistingName(
+            for: displayName,
+            in: existingNeighborhoodNames
+        )
+
+        return Suggestion(
+            displayName: existingMatch ?? displayName,
+            existingMatch: existingMatch
+        )
     }
 }

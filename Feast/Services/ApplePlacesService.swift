@@ -1,12 +1,13 @@
 import Foundation
 import MapKit
 import SwiftUI
+import os
 
 struct ApplePlaceCoordinate: Hashable {
     let latitude: Double
     let longitude: Double
 
-    var clLocationCoordinate2D: CLLocationCoordinate2D {
+    nonisolated var clLocationCoordinate2D: CLLocationCoordinate2D {
         CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
     }
 }
@@ -139,6 +140,7 @@ struct ApplePlacesService {
 
 extension ApplePlacesService {
     static let preview = ApplePlacesService(mode: .preview)
+    nonisolated private static let logger = Logger(subsystem: "com.jongalante.Feast", category: "ApplePlaces")
 
     private static let previewMatches: [ApplePlaceMatch] = [
         ApplePlaceMatch(
@@ -249,6 +251,21 @@ extension ApplePlacesService {
         let secondaryText = normalized(mapItem.address?.shortAddress)
             ?? normalized(mapItem.address?.fullAddress)
             ?? ""
+        let cityOrRegion = suggestedCityOrRegion(from: mapItem)
+        let neighborhoodContext = NeighborhoodSuggestionContext(
+            displayName: displayName,
+            cityOrRegion: cityOrRegion,
+            locality: normalized(mapItem.placemark.locality),
+            subAdministrativeArea: normalized(mapItem.placemark.subAdministrativeArea),
+            administrativeArea: normalized(mapItem.placemark.administrativeArea),
+            country: normalized(mapItem.placemark.country),
+            isoCountryCode: normalized(mapItem.placemark.isoCountryCode),
+            postalCode: normalized(mapItem.placemark.postalCode)
+        )
+        let neighborhood = suggestedNeighborhood(
+            from: mapItem,
+            context: neighborhoodContext
+        )
         let urlAutofill = classifiedPlaceURL(from: mapItem.url)
 
         return ApplePlaceMatch(
@@ -257,8 +274,8 @@ extension ApplePlacesService {
             secondaryText: secondaryText,
             coordinate: coordinate(from: mapItem),
             suggestedSectionPath: ApplePlaceSectionPathSuggestion(
-                cityOrRegion: suggestedCityOrRegion(from: mapItem),
-                neighborhood: suggestedNeighborhood(from: mapItem)
+                cityOrRegion: cityOrRegion,
+                neighborhood: neighborhood
             ),
             websiteURL: urlAutofill.websiteURL,
             instagramURL: urlAutofill.instagramURL
@@ -284,8 +301,68 @@ extension ApplePlacesService {
             ?? normalized(mapItem.placemark.administrativeArea)
     }
 
-    nonisolated private static func suggestedNeighborhood(from mapItem: MKMapItem) -> String? {
-        normalized(mapItem.placemark.subLocality)
+    nonisolated private static func suggestedNeighborhood(
+        from mapItem: MKMapItem,
+        context: NeighborhoodSuggestionContext
+    ) -> String? {
+        let coordinateResolutionAttempted = coordinate(from: mapItem) != nil
+        let coordinateResolution = coordinateResolvedNeighborhood(from: mapItem)
+        let candidates = neighborhoodCandidates(
+            from: mapItem,
+            context: context,
+            coordinateResolution: coordinateResolution
+        )
+
+        let selectedCandidate = candidates
+            .lazy
+            .compactMap { candidate -> (source: String, neighborhood: String)? in
+                guard let neighborhood = FeastNeighborhoodName.trustworthyNeighborhood(
+                    from: candidate.value,
+                    rejectedContextNames: context.rejectedContextNames
+                ) else {
+                    return nil
+                }
+
+                return (source: candidate.source, neighborhood: neighborhood)
+            }
+            .first
+
+        #if DEBUG
+        logger.debug(
+            """
+            Add Place neighborhood suggestion \
+            name=\(context.displayName, privacy: .public) \
+            city=\(context.cityOrRegion ?? "nil", privacy: .public) \
+            coordinateResolverAttempted=\(coordinateResolutionAttempted ? "true" : "false", privacy: .public) \
+            coordinateResolverDataset=\(coordinateResolution?.datasetName ?? "nil", privacy: .public) \
+            coordinateResolverMatch=\(coordinateResolution?.displayName ?? "nil", privacy: .public) \
+            subLocality=\(normalized(mapItem.placemark.subLocality) ?? "nil", privacy: .public) \
+            areasOfInterest=\(joinedDebugValues(mapItem.placemark.areasOfInterest), privacy: .public) \
+            shortAddress=\(normalized(mapItem.address?.shortAddress) ?? "nil", privacy: .public) \
+            fullAddress=\(normalized(mapItem.address?.fullAddress) ?? "nil", privacy: .public) \
+            administrativeArea=\(context.administrativeArea ?? "nil", privacy: .public) \
+            subAdministrativeArea=\(context.subAdministrativeArea ?? "nil", privacy: .public) \
+            country=\(context.country ?? "nil", privacy: .public) \
+            isoCountryCode=\(context.isoCountryCode ?? "nil", privacy: .public) \
+            postalCode=\(context.postalCode ?? "nil", privacy: .public) \
+            candidates=\(joinedCandidateDebugValues(candidates), privacy: .public) \
+            chosenSource=\(selectedCandidate?.source ?? "nil", privacy: .public) \
+            chosenNeighborhood=\(selectedCandidate?.neighborhood ?? "nil", privacy: .public)
+            """
+        )
+        #endif
+
+        return selectedCandidate?.neighborhood
+    }
+
+    nonisolated private static func coordinateResolvedNeighborhood(
+        from mapItem: MKMapItem
+    ) -> NeighborhoodBoundaryMatch? {
+        guard let coordinate = coordinate(from: mapItem)?.clLocationCoordinate2D else {
+            return nil
+        }
+
+        return NeighborhoodBoundaryResolver.resolveNeighborhood(at: coordinate)
     }
 
     nonisolated private static func normalized(_ value: String?) -> String? {
@@ -349,11 +426,307 @@ extension ApplePlacesService {
                 .map(String.init)
         )
     }
+
+    nonisolated private static func neighborhoodCandidates(
+        from mapItem: MKMapItem,
+        context: NeighborhoodSuggestionContext,
+        coordinateResolution: NeighborhoodBoundaryMatch?
+    ) -> [NeighborhoodSuggestionCandidate] {
+        var candidates: [NeighborhoodSuggestionCandidate] = []
+        var seenKeys: Set<String> = []
+
+        appendNeighborhoodCandidate(
+            coordinateResolution?.displayName,
+            source: coordinateResolution?.source ?? "coordinateResolver",
+            seenKeys: &seenKeys,
+            to: &candidates
+        )
+        appendNeighborhoodCandidate(
+            normalized(mapItem.placemark.subLocality),
+            source: "placemark.subLocality",
+            seenKeys: &seenKeys,
+            to: &candidates
+        )
+        appendNeighborhoodCandidates(
+            mapItem.placemark.areasOfInterest,
+            source: "placemark.areasOfInterest",
+            seenKeys: &seenKeys,
+            to: &candidates
+        )
+        appendNeighborhoodCandidates(
+            fromAddress: mapItem.address?.shortAddress,
+            source: "address.shortAddress",
+            context: context,
+            seenKeys: &seenKeys,
+            to: &candidates
+        )
+        appendNeighborhoodCandidates(
+            fromAddress: mapItem.address?.fullAddress,
+            source: "address.fullAddress",
+            context: context,
+            seenKeys: &seenKeys,
+            to: &candidates
+        )
+
+        return candidates
+    }
+
+    nonisolated private static func appendNeighborhoodCandidates(
+        _ rawValues: [String]?,
+        source: String,
+        seenKeys: inout Set<String>,
+        to candidates: inout [NeighborhoodSuggestionCandidate]
+    ) {
+        for rawValue in rawValues ?? [] {
+            appendNeighborhoodCandidate(
+                rawValue,
+                source: source,
+                seenKeys: &seenKeys,
+                to: &candidates
+            )
+        }
+    }
+
+    nonisolated private static func appendNeighborhoodCandidates(
+        fromAddress rawAddress: String?,
+        source: String,
+        context: NeighborhoodSuggestionContext,
+        seenKeys: inout Set<String>,
+        to candidates: inout [NeighborhoodSuggestionCandidate]
+    ) {
+        for component in addressComponents(from: rawAddress)
+        where !looksLikeStreetAddress(component)
+            && !isAdministrativeOrCountryComponent(component, context: context)
+        {
+            appendNeighborhoodCandidate(
+                component,
+                source: source,
+                seenKeys: &seenKeys,
+                to: &candidates
+            )
+        }
+    }
+
+    nonisolated private static func appendNeighborhoodCandidate(
+        _ rawValue: String?,
+        source: String,
+        seenKeys: inout Set<String>,
+        to candidates: inout [NeighborhoodSuggestionCandidate]
+    ) {
+        guard
+            let value = normalized(rawValue),
+            let key = FeastNeighborhoodName.normalizedKey(for: value),
+            !seenKeys.contains(key)
+        else {
+            return
+        }
+
+        seenKeys.insert(key)
+        candidates.append(
+            NeighborhoodSuggestionCandidate(
+                source: source,
+                value: value
+            )
+        )
+    }
+
+    nonisolated private static func addressComponents(from rawAddress: String?) -> [String] {
+        guard let rawAddress = normalized(rawAddress) else {
+            return []
+        }
+
+        let separators = CharacterSet(charactersIn: ",\n")
+        return rawAddress
+            .components(separatedBy: separators)
+            .compactMap(normalized)
+    }
+
+    nonisolated private static func isAdministrativeOrCountryComponent(
+        _ value: String,
+        context: NeighborhoodSuggestionContext
+    ) -> Bool {
+        if isPostalCodeOnly(value) {
+            return true
+        }
+
+        if looksLikeAdministrativeCode(value) {
+            return true
+        }
+
+        if
+            let key = FeastNeighborhoodName.normalizedKey(for: value),
+            countryKeys.contains(key)
+        {
+            return true
+        }
+
+        return context.rejectedContextNames.contains { rejectedValue in
+            FeastNeighborhoodName.matches(value, rejectedValue)
+        }
+    }
+
+    nonisolated private static func isPostalCodeOnly(_ value: String) -> Bool {
+        let compactValue = value
+            .components(separatedBy: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters))
+            .joined()
+
+        guard !compactValue.isEmpty else {
+            return false
+        }
+
+        let alphanumerics = compactValue.unicodeScalars.filter {
+            CharacterSet.alphanumerics.contains($0)
+        }
+
+        guard !alphanumerics.isEmpty else {
+            return false
+        }
+
+        return alphanumerics.allSatisfy { CharacterSet.decimalDigits.contains($0) }
+    }
+
+    nonisolated private static func looksLikeAdministrativeCode(_ value: String) -> Bool {
+        let compactValue = value
+            .components(separatedBy: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters))
+            .joined()
+
+        guard compactValue.count == 2 else {
+            return false
+        }
+
+        let letters = compactValue.unicodeScalars.filter {
+            CharacterSet.letters.contains($0)
+        }
+
+        return letters.count == 2
+    }
+
+    nonisolated private static func looksLikeStreetAddress(_ value: String) -> Bool {
+        if value.rangeOfCharacter(from: .decimalDigits) != nil {
+            return true
+        }
+
+        let tokens = value
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+
+        return tokens.contains(where: { streetAddressTokens.contains($0) })
+    }
+
+    nonisolated private static func joinedDebugValues(_ rawValues: [String]?) -> String {
+        let values = (rawValues ?? []).compactMap(normalized)
+        guard !values.isEmpty else {
+            return "nil"
+        }
+
+        return values.joined(separator: " | ")
+    }
+
+    nonisolated private static func joinedCandidateDebugValues(
+        _ candidates: [NeighborhoodSuggestionCandidate]
+    ) -> String {
+        guard !candidates.isEmpty else {
+            return "nil"
+        }
+
+        return candidates.map { "\($0.source):\($0.value)" }.joined(separator: " | ")
+    }
+
+    nonisolated private static let streetAddressTokens: Set<String> = [
+        "ave",
+        "avenue",
+        "blvd",
+        "boulevard",
+        "court",
+        "ct",
+        "drive",
+        "dr",
+        "highway",
+        "hwy",
+        "lane",
+        "ln",
+        "parkway",
+        "pkwy",
+        "road",
+        "rd",
+        "street",
+        "st",
+        "terrace",
+        "ter",
+        "trail",
+        "trl",
+        "way"
+    ]
+
+    nonisolated private static let countryKeys: Set<String> = {
+        let locales = [
+            Locale(identifier: "en_US_POSIX"),
+            Locale.current
+        ]
+        var keys: Set<String> = []
+
+        for regionCode in Locale.isoRegionCodes {
+            if let key = FeastNeighborhoodName.normalizedKey(for: regionCode) {
+                keys.insert(key)
+            }
+
+            for locale in locales {
+                guard
+                    let countryName = locale.localizedString(forRegionCode: regionCode),
+                    let key = FeastNeighborhoodName.normalizedKey(for: countryName)
+                else {
+                    continue
+                }
+
+                keys.insert(key)
+            }
+        }
+
+        keys.formUnion([
+            "united states",
+            "united states of america",
+            "us",
+            "usa"
+        ])
+
+        return keys
+    }()
 }
 
 private struct ClassifiedPlaceURL {
     let websiteURL: String?
     let instagramURL: String?
+}
+
+private struct NeighborhoodSuggestionCandidate {
+    let source: String
+    let value: String
+}
+
+private struct NeighborhoodSuggestionContext {
+    let displayName: String
+    let cityOrRegion: String?
+    let locality: String?
+    let subAdministrativeArea: String?
+    let administrativeArea: String?
+    let country: String?
+    let isoCountryCode: String?
+    let postalCode: String?
+
+    nonisolated var rejectedContextNames: [String] {
+        [
+            displayName,
+            cityOrRegion,
+            locality,
+            subAdministrativeArea,
+            administrativeArea,
+            country,
+            isoCountryCode,
+            postalCode
+        ]
+        .compactMap { $0 }
+    }
 }
 
 private enum ApplePlacesError: LocalizedError {

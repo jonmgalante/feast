@@ -149,25 +149,36 @@ enum NotesImportReviewBuilder {
         for proposedNeighborhood: String?,
         in neighborhoodNames: [String]
     ) -> String? {
-        guard let proposedNeighborhoodKey = normalizedKey(for: proposedNeighborhood) else {
-            return nil
-        }
-
-        return neighborhoodNames.first(where: { neighborhoodName in
-            normalizedKey(for: neighborhoodName) == proposedNeighborhoodKey
-        })
+        FeastNeighborhoodName.matchedExistingName(
+            for: proposedNeighborhood,
+            in: neighborhoodNames
+        )
     }
 
     static func canonicalNeighborhoodName(for rawValue: String?) -> String? {
-        guard let rawValue else {
-            return nil
-        }
-
-        return FeastTag.collapsed(rawValue)
+        FeastNeighborhoodName.canonicalDisplayName(for: rawValue)
     }
 
     static func suggestedNeighborhoodName(for item: NotesImportReviewItem) -> String? {
         canonicalNeighborhoodName(for: item.parsedNeighborhoodName)
+    }
+
+    static func suggestedNeighborhoodSuggestion(
+        for item: NotesImportReviewItem,
+        matchedPlace: ApplePlaceMatch?,
+        cityName: String,
+        existingNeighborhoodNames: [String]
+    ) -> FeastNeighborhoodName.Suggestion? {
+        FeastNeighborhoodName.suggestion(
+            primary: item.parsedNeighborhoodName,
+            fallback: matchedPlace?.suggestedSectionPath.neighborhood,
+            existingNeighborhoodNames: existingNeighborhoodNames,
+            rejectedContextNames: [
+                cityName,
+                matchedPlace?.suggestedSectionPath.cityOrRegion
+            ]
+            .compactMap { $0 }
+        )
     }
 
     static func sessionNeighborhoodNames(
@@ -207,11 +218,7 @@ enum NotesImportReviewBuilder {
     }
 
     static func normalizedKey(for rawValue: String?) -> String? {
-        guard let rawValue else {
-            return nil
-        }
-
-        return FeastTag.normalizedKey(for: rawValue)
+        FeastNeighborhoodName.normalizedKey(for: rawValue)
     }
 }
 

@@ -227,7 +227,10 @@ private struct AddPlaceSaveView: View {
     @State private var note = ""
     @State private var websiteURL = ""
     @State private var instagramURL = ""
-    @State private var selectedNeighborhoodObjectID: NSManagedObjectID?
+    @State private var selectedNeighborhoodSelection: AddPlaceNeighborhoodSelection = .unsorted
+    @State private var committedNeighborhoodSelection: AddPlaceNeighborhoodSelection = .unsorted
+    @State private var showingNewNeighborhoodSheet = false
+    @State private var newNeighborhoodName = ""
     @State private var showingSaveError = false
     @State private var saveErrorMessage = ""
 
@@ -241,8 +244,17 @@ private struct AddPlaceSaveView: View {
         self.onSaveComplete = onSaveComplete
         _websiteURL = State(initialValue: place.websiteURL ?? "")
         _instagramURL = State(initialValue: place.instagramURL ?? "")
-        _selectedNeighborhoodObjectID = State(
-            initialValue: Self.suggestedNeighborhood(in: feastList, for: place)?.objectID
+        _selectedNeighborhoodSelection = State(
+            initialValue: Self.initialNeighborhoodSelection(
+                in: feastList,
+                for: place
+            )
+        )
+        _committedNeighborhoodSelection = State(
+            initialValue: Self.initialNeighborhoodSelection(
+                in: feastList,
+                for: place
+            )
         )
     }
 
@@ -267,6 +279,17 @@ private struct AddPlaceSaveView: View {
                     Text("Save")
                         .fontWeight(.semibold)
                 }
+            }
+        }
+        .onChange(of: selectedNeighborhoodSelection) { _, newSelection in
+            handleNeighborhoodSelectionChange(newSelection)
+        }
+        .sheet(isPresented: $showingNewNeighborhoodSheet) {
+            NavigationStack {
+                NeighborhoodNamePromptSheet(
+                    initialName: newNeighborhoodName,
+                    onConfirm: applyManualNeighborhoodName(_:)
+                )
             }
         }
         .alert("Couldn’t Save Place", isPresented: $showingSaveError) {
@@ -297,19 +320,82 @@ private struct AddPlaceSaveView: View {
     }
 
     private var selectedNeighborhood: ListSection? {
-        allNeighborhoods.first { $0.objectID == selectedNeighborhoodObjectID }
+        switch selectedNeighborhoodSelection {
+        case .unsorted:
+            return nil
+        case .manualEntry:
+            return nil
+        case let .existing(objectID):
+            return allNeighborhoods.first { $0.objectID == objectID }
+        case let .create(neighborhoodName):
+            return allNeighborhoods.first { neighborhood in
+                FeastNeighborhoodName.matches(
+                    neighborhood.displayName,
+                    neighborhoodName
+                )
+            }
+        }
+    }
+
+    private var suggestedNeighborhood: FeastNeighborhoodName.Suggestion? {
+        Self.suggestedNeighborhoodSuggestion(
+            in: feastList,
+            for: place
+        )
+    }
+
+    private var suggestedNeighborhoodToCreate: String? {
+        guard let suggestedNeighborhood, suggestedNeighborhood.existingMatch == nil else {
+            return nil
+        }
+
+        return suggestedNeighborhood.displayName
+    }
+
+    private var manualNeighborhoodToCreate: String? {
+        guard
+            case let .create(neighborhoodName) = selectedNeighborhoodSelection,
+            let canonicalNeighborhoodName = FeastNeighborhoodName.canonicalDisplayName(for: neighborhoodName)
+        else {
+            return nil
+        }
+
+        if let suggestedNeighborhoodToCreate,
+           FeastNeighborhoodName.matches(canonicalNeighborhoodName, suggestedNeighborhoodToCreate) {
+            return nil
+        }
+
+        return canonicalNeighborhoodName
     }
 
     private var neighborhoodSuggestionMessage: String? {
-        if let suggestedNeighborhood = Self.suggestedNeighborhood(in: feastList, for: place) {
+        switch selectedNeighborhoodSelection {
+        case .unsorted, .manualEntry:
+            break
+        case let .existing(objectID):
+            if let selectedNeighborhood = allNeighborhoods.first(where: { $0.objectID == objectID }) {
+                return "This place will save into \(selectedNeighborhood.displayName)."
+            }
+        case let .create(neighborhoodName):
+            if let existingNeighborhoodName = FeastNeighborhoodName.matchedExistingName(
+                for: neighborhoodName,
+                in: allNeighborhoods.map(\.displayName)
+            ) {
+                return "This place will save into \(existingNeighborhoodName)."
+            }
+
+            return "\(neighborhoodName) will be created when you save."
+        }
+
+        if let suggestedNeighborhood, suggestedNeighborhood.existingMatch != nil {
             return "Suggested neighborhood: \(suggestedNeighborhood.displayName)."
         }
 
-        if let neighborhood = Self.normalized(place.suggestedSectionPath.neighborhood) {
-            return "Suggested neighborhood: \(neighborhood). No matching neighborhood exists yet, so you can save this to Unsorted for now."
+        if let suggestedNeighborhoodToCreate {
+            return "Suggested neighborhood: \(suggestedNeighborhoodToCreate). Choose Create “\(suggestedNeighborhoodToCreate)” to add it now, pick an existing neighborhood, or use New Neighborhood…."
         }
 
-        return nil
+        return "Choose Unsorted if you want to organize this place later, pick an existing neighborhood, or use New Neighborhood…."
     }
 
     private var existingTags: [String] {
@@ -481,11 +567,25 @@ private struct AddPlaceSaveView: View {
                         ? FeastTheme.Colors.secondaryText
                         : FeastTheme.Colors.tertiaryText
                 ) {
-                    Picker("Neighborhood", selection: $selectedNeighborhoodObjectID) {
-                        Text("Unsorted").tag(nil as NSManagedObjectID?)
+                    Picker("Neighborhood", selection: $selectedNeighborhoodSelection) {
+                        Text("Unsorted").tag(AddPlaceNeighborhoodSelection.unsorted)
+
+                        if let suggestedNeighborhoodToCreate {
+                            Text("Create “\(suggestedNeighborhoodToCreate)”")
+                                .tag(AddPlaceNeighborhoodSelection.create(suggestedNeighborhoodToCreate))
+                        }
+
+                        if let manualNeighborhoodToCreate {
+                            Text("Create “\(manualNeighborhoodToCreate)”")
+                                .tag(AddPlaceNeighborhoodSelection.create(manualNeighborhoodToCreate))
+                        }
+
+                        Text("New Neighborhood…")
+                            .tag(AddPlaceNeighborhoodSelection.manualEntry)
 
                         ForEach(allNeighborhoods) { neighborhood in
-                            Text(neighborhood.displayName).tag(neighborhood.objectID as NSManagedObjectID?)
+                            Text(neighborhood.displayName)
+                                .tag(AddPlaceNeighborhoodSelection.existing(neighborhood.objectID))
                         }
                     }
                     .labelsHidden()
@@ -503,6 +603,7 @@ private struct AddPlaceSaveView: View {
 
     private func savePlace() {
         do {
+            let selectedNeighborhood = try resolvedNeighborhoodForSave()
             try repository.createSavedPlace(
                 from: FeastRepository.SavedPlaceDraft(
                     applePlaceID: place.applePlaceID,
@@ -537,30 +638,96 @@ private struct AddPlaceSaveView: View {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    private static func suggestedNeighborhood(
+    private func handleNeighborhoodSelectionChange(_ newSelection: AddPlaceNeighborhoodSelection) {
+        guard newSelection == .manualEntry else {
+            committedNeighborhoodSelection = newSelection
+            return
+        }
+
+        if case let .create(existingName) = committedNeighborhoodSelection {
+            newNeighborhoodName = existingName
+        } else {
+            newNeighborhoodName = ""
+        }
+
+        showingNewNeighborhoodSheet = true
+        selectedNeighborhoodSelection = committedNeighborhoodSelection
+    }
+
+    private func applyManualNeighborhoodName(_ rawValue: String) {
+        guard let canonicalNeighborhoodName = FeastNeighborhoodName.canonicalDisplayName(for: rawValue) else {
+            return
+        }
+
+        if let existingNeighborhood = allNeighborhoods.first(where: { neighborhood in
+            FeastNeighborhoodName.matches(
+                neighborhood.displayName,
+                canonicalNeighborhoodName
+            )
+        }) {
+            selectedNeighborhoodSelection = .existing(existingNeighborhood.objectID)
+            return
+        }
+
+        selectedNeighborhoodSelection = .create(canonicalNeighborhoodName)
+    }
+
+    private func resolvedNeighborhoodForSave() throws -> ListSection? {
+        switch selectedNeighborhoodSelection {
+        case .unsorted:
+            return nil
+        case .manualEntry:
+            return nil
+        case let .existing(objectID):
+            return allNeighborhoods.first { $0.objectID == objectID }
+        case let .create(neighborhoodName):
+            if let existingNeighborhood = selectedNeighborhood {
+                return existingNeighborhood
+            }
+
+            return try repository.createListSection(
+                named: neighborhoodName,
+                in: feastList
+            )
+        }
+    }
+
+    private static func initialNeighborhoodSelection(
         in feastList: FeastList,
         for place: ApplePlaceMatch
-    ) -> ListSection? {
-        guard let neighborhood = normalized(place.suggestedSectionPath.neighborhood) else {
-            return nil
+    ) -> AddPlaceNeighborhoodSelection {
+        guard
+            let suggestedNeighborhood = suggestedNeighborhoodSuggestion(
+                in: feastList,
+                for: place
+            ),
+            let existingNeighborhoodName = suggestedNeighborhood.existingMatch,
+            let existingNeighborhood = feastList.neighborhoodSections.first(where: { neighborhood in
+                FeastNeighborhoodName.matches(
+                    neighborhood.displayName,
+                    existingNeighborhoodName
+                )
+            })
+        else {
+            return .unsorted
         }
 
-        return feastList.neighborhoodSections.first(where: {
-            matches($0.displayName, neighborhood)
-        })
+        return .existing(existingNeighborhood.objectID)
     }
 
-    fileprivate static func normalized(_ rawValue: String?) -> String? {
-        guard let trimmed = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else {
-            return nil
-        }
-
-        return trimmed
-    }
-
-    private static func matches(_ lhs: String, _ rhs: String) -> Bool {
-        lhs.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-            == rhs.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+    private static func suggestedNeighborhoodSuggestion(
+        in feastList: FeastList,
+        for place: ApplePlaceMatch
+    ) -> FeastNeighborhoodName.Suggestion? {
+        FeastNeighborhoodName.suggestion(
+            primary: place.suggestedSectionPath.neighborhood,
+            existingNeighborhoodNames: feastList.neighborhoodSections.map(\.displayName),
+            rejectedContextNames: [
+                feastList.displayName,
+                place.suggestedSectionPath.cityOrRegion
+            ]
+            .compactMap { $0 }
+        )
     }
 
     private func errorMessage(for error: Error) -> String {
@@ -595,7 +762,10 @@ private struct SearchResultRow: View {
                         .foregroundStyle(FeastTheme.Colors.secondaryText)
                 }
 
-                if let neighborhood = AddPlaceSaveView.normalized(place.suggestedSectionPath.neighborhood) {
+                if let neighborhood = FeastNeighborhoodName.trustworthyNeighborhood(
+                    from: place.suggestedSectionPath.neighborhood,
+                    rejectedContextNames: [place.suggestedSectionPath.cityOrRegion].compactMap { $0 }
+                ) {
                     Text("Suggested neighborhood: \(neighborhood)")
                         .font(FeastTheme.Typography.rowUtility)
                         .foregroundStyle(FeastTheme.Colors.tertiaryText)
@@ -617,6 +787,71 @@ private enum SearchState {
     case loading
     case loaded
     case failed(String)
+}
+
+private enum AddPlaceNeighborhoodSelection: Hashable {
+    case unsorted
+    case existing(NSManagedObjectID)
+    case create(String)
+    case manualEntry
+}
+
+struct NeighborhoodNamePromptSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var name: String
+
+    let onConfirm: (String) -> Void
+
+    init(initialName: String, onConfirm: @escaping (String) -> Void) {
+        self.onConfirm = onConfirm
+        _name = State(initialValue: initialName)
+    }
+
+    var body: some View {
+        List {
+            Section {
+                FeastFormGroup {
+                    FeastFormField(
+                        title: "Neighborhood Name",
+                        helper: "Use the neighborhood name you want to group places under."
+                    ) {
+                        TextField("Neighborhood name", text: $name)
+                            .textInputAutocapitalization(.words)
+                            .autocorrectionDisabled()
+                            .feastFieldSurface(minHeight: 52)
+                    }
+                }
+            } header: {
+                FeastFormSectionHeader(
+                    title: "New Neighborhood",
+                    subtitle: "Create a neighborhood for this place"
+                )
+            }
+        }
+        .feastScrollableChrome()
+        .listStyle(.insetGrouped)
+        .scrollDismissesKeyboard(.interactively)
+        .navigationTitle("New Neighborhood")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Cancel") {
+                    dismiss()
+                }
+            }
+
+            ToolbarItem(placement: .confirmationAction) {
+                Button {
+                    onConfirm(name)
+                    dismiss()
+                } label: {
+                    Text("Use")
+                        .fontWeight(.semibold)
+                }
+                .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+    }
 }
 
 #Preview {
