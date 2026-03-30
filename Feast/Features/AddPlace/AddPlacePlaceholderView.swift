@@ -212,6 +212,7 @@ struct AddPlaceView: View {
 
 private struct AddPlaceSaveView: View {
     @Environment(\.managedObjectContext) private var viewContext
+    @Environment(\.openURL) private var openURL
     @Environment(\.persistenceController) private var persistenceController
 
     @ObservedObject var feastList: FeastList
@@ -231,8 +232,7 @@ private struct AddPlaceSaveView: View {
     @State private var committedNeighborhoodSelection: AddPlaceNeighborhoodSelection = .unsorted
     @State private var showingNewNeighborhoodSheet = false
     @State private var newNeighborhoodName = ""
-    @State private var showingSaveError = false
-    @State private var saveErrorMessage = ""
+    @State private var alertState: AddPlaceAlertState?
 
     init(
         feastList: FeastList,
@@ -292,10 +292,12 @@ private struct AddPlaceSaveView: View {
                 )
             }
         }
-        .alert("Couldn’t Save Place", isPresented: $showingSaveError) {
-            Button("OK", role: .cancel) { }
-        } message: {
-            Text(saveErrorMessage)
+        .alert(item: $alertState) { alert in
+            Alert(
+                title: Text(alert.title),
+                message: Text(alert.message),
+                dismissButton: .default(Text("OK"))
+            )
         }
     }
 
@@ -374,6 +376,34 @@ private struct AddPlaceSaveView: View {
 
     private var existingTags: [String] {
         FeastTag.catalog(from: savedPlaces.map(\.tags))
+    }
+
+    private var hasWebsiteURL: Bool {
+        normalizedOptional(websiteURL) != nil
+    }
+
+    private var hasInstagramURL: Bool {
+        normalizedOptional(instagramURL) != nil
+    }
+
+    private var instagramSearchURL: URL? {
+        var queryComponents = [place.displayName]
+
+        if let neighborhoodName = selectedNeighborhood?.displayName ?? suggestedNeighborhood?.displayName,
+           !neighborhoodName.isEmpty {
+            queryComponents.append(neighborhoodName)
+        }
+
+        queryComponents.append(feastList.displayName)
+
+        var components = URLComponents(string: "https://www.google.com/search")
+        components?.queryItems = [
+            URLQueryItem(
+                name: "q",
+                value: (["site:instagram.com"] + queryComponents).joined(separator: " ")
+            )
+        ]
+        return components?.url
     }
 
     private var matchSection: some View {
@@ -506,21 +536,62 @@ private struct AddPlaceSaveView: View {
                 FeastFormDivider()
 
                 FeastFormField(title: "Website") {
-                    TextField("https://example.com", text: $websiteURL)
-                        .keyboardType(.URL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .feastFieldSurface()
+                    VStack(alignment: .leading, spacing: FeastTheme.Spacing.small) {
+                        FeastSingleLineTextField(
+                            placeholder: "https://example.com",
+                            text: $websiteURL,
+                            keyboardType: .URL,
+                            textInputAutocapitalization: .never,
+                            autocorrectionDisabled: true
+                        )
+
+                        if hasWebsiteURL {
+                            FeastFieldInlineAction(
+                                title: "Open Website",
+                                systemImage: "globe"
+                            ) {
+                                openExternalURL(
+                                    from: websiteURL,
+                                    failureTitle: "Website Unavailable",
+                                    failureMessage: "Feast couldn't open this website link."
+                                )
+                            }
+                        }
+                    }
                 }
 
                 FeastFormDivider()
 
                 FeastFormField(title: "Instagram") {
-                    TextField("https://instagram.com/...", text: $instagramURL)
-                        .keyboardType(.URL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .feastFieldSurface()
+                    VStack(alignment: .leading, spacing: FeastTheme.Spacing.small) {
+                        FeastSingleLineTextField(
+                            placeholder: "https://instagram.com/...",
+                            text: $instagramURL,
+                            keyboardType: .URL,
+                            textInputAutocapitalization: .never,
+                            autocorrectionDisabled: true
+                        )
+
+                        if hasInstagramURL {
+                            FeastFieldInlineAction(
+                                title: "Open Instagram",
+                                systemImage: "camera"
+                            ) {
+                                openExternalURL(
+                                    from: instagramURL,
+                                    failureTitle: "Instagram Unavailable",
+                                    failureMessage: "Feast couldn't open this Instagram link."
+                                )
+                            }
+                        } else {
+                            FeastFieldInlineAction(
+                                title: "Search Instagram",
+                                systemImage: "magnifyingglass"
+                            ) {
+                                searchInstagram()
+                            }
+                        }
+                    }
                 }
             }
         } header: {
@@ -593,8 +664,10 @@ private struct AddPlaceSaveView: View {
             )
             onSaveComplete()
         } catch {
-            saveErrorMessage = errorMessage(for: error)
-            showingSaveError = true
+            alertState = AddPlaceAlertState(
+                title: "Couldn’t Save Place",
+                message: errorMessage(for: error)
+            )
         }
     }
 
@@ -608,6 +681,17 @@ private struct AddPlaceSaveView: View {
     private func normalizedOptional(_ rawValue: String) -> String? {
         let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func validatedURL(from rawValue: String) -> URL? {
+        guard
+            let normalizedURL = normalizedOptional(rawValue),
+            let url = URL(string: normalizedURL)
+        else {
+            return nil
+        }
+
+        return url
     }
 
     private func handleNeighborhoodSelectionChange(_ newSelection: AddPlaceNeighborhoodSelection) {
@@ -710,6 +794,63 @@ private struct AddPlaceSaveView: View {
 
         return "Feast couldn't save this place. Your edits are still on screen."
     }
+
+    private func openExternalURL(
+        _ url: URL,
+        failureTitle: String,
+        failureMessage: String
+    ) {
+        openURL(url) { accepted in
+            if !accepted {
+                alertState = AddPlaceAlertState(
+                    title: failureTitle,
+                    message: failureMessage
+                )
+            }
+        }
+    }
+
+    private func openExternalURL(
+        from rawValue: String,
+        failureTitle: String,
+        failureMessage: String
+    ) {
+        guard let url = validatedURL(from: rawValue) else {
+            alertState = AddPlaceAlertState(
+                title: failureTitle,
+                message: failureMessage
+            )
+            return
+        }
+
+        openExternalURL(
+            url,
+            failureTitle: failureTitle,
+            failureMessage: failureMessage
+        )
+    }
+
+    private func searchInstagram() {
+        guard let instagramSearchURL else {
+            alertState = AddPlaceAlertState(
+                title: "Instagram Search Unavailable",
+                message: "Feast couldn't open this Instagram search."
+            )
+            return
+        }
+
+        openExternalURL(
+            instagramSearchURL,
+            failureTitle: "Instagram Search Unavailable",
+            failureMessage: "Feast couldn't open this Instagram search."
+        )
+    }
+}
+
+private struct AddPlaceAlertState: Identifiable {
+    let id = UUID()
+    let title: String
+    let message: String
 }
 
 private struct SearchResultRow: View {

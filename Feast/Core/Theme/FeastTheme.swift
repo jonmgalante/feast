@@ -487,6 +487,49 @@ struct FeastMultilineTextEditor: View {
     }
 }
 
+struct FeastSingleLineTextField: View {
+    let placeholder: String
+    @Binding var text: String
+    var keyboardType: UIKeyboardType = .default
+    var textInputAutocapitalization: TextInputAutocapitalization = .sentences
+    var autocorrectionDisabled = false
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            if text.isEmpty {
+                Text(placeholder)
+                    .font(FeastTheme.Typography.supporting)
+                    .foregroundStyle(FeastTheme.InputField.prompt)
+                    .allowsHitTesting(false)
+            }
+
+            TextField("", text: $text)
+                .font(FeastTheme.Typography.supporting)
+                .foregroundStyle(FeastTheme.InputField.text)
+                .tint(FeastTheme.InputField.selection)
+                .keyboardType(keyboardType)
+                .textInputAutocapitalization(textInputAutocapitalization)
+                .autocorrectionDisabled(autocorrectionDisabled)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .feastFieldSurface()
+    }
+}
+
+struct FeastFieldInlineAction: View {
+    let title: String
+    let systemImage: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Label(title, systemImage: systemImage)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .buttonStyle(FeastInlineActionButtonStyle())
+    }
+}
+
 struct FeastFormDivider: View {
     var body: some View {
         Rectangle()

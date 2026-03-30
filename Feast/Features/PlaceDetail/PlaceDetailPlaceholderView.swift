@@ -315,24 +315,26 @@ struct SavedPlaceDetailView: View {
                 FeastFormDivider()
 
                 FeastFormField(title: "Website") {
-                    VStack(alignment: .leading, spacing: FeastTheme.Spacing.xSmall) {
-                        TextField("https://example.com", text: $websiteURL)
-                            .keyboardType(.URL)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            .feastFieldSurface()
+                    VStack(alignment: .leading, spacing: FeastTheme.Spacing.small) {
+                        FeastSingleLineTextField(
+                            placeholder: "https://example.com",
+                            text: $websiteURL,
+                            keyboardType: .URL,
+                            textInputAutocapitalization: .never,
+                            autocorrectionDisabled: true
+                        )
 
                         if hasWebsiteURL {
-                            Button {
+                            FeastFieldInlineAction(
+                                title: "Open Website",
+                                systemImage: "globe"
+                            ) {
                                 openExternalURL(
                                     from: websiteURL,
                                     failureTitle: "Website Unavailable",
                                     failureMessage: "Feast couldn't open this website link."
                                 )
-                            } label: {
-                                Label("Open Website", systemImage: "globe")
                             }
-                            .buttonStyle(FeastInlineActionButtonStyle())
                         }
                     }
                 }
@@ -340,31 +342,33 @@ struct SavedPlaceDetailView: View {
                 FeastFormDivider()
 
                 FeastFormField(title: "Instagram") {
-                    VStack(alignment: .leading, spacing: FeastTheme.Spacing.xSmall) {
-                        TextField("https://instagram.com/...", text: $instagramURL)
-                            .keyboardType(.URL)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            .feastFieldSurface()
+                    VStack(alignment: .leading, spacing: FeastTheme.Spacing.small) {
+                        FeastSingleLineTextField(
+                            placeholder: "https://instagram.com/...",
+                            text: $instagramURL,
+                            keyboardType: .URL,
+                            textInputAutocapitalization: .never,
+                            autocorrectionDisabled: true
+                        )
 
                         if hasInstagramURL {
-                            Button {
+                            FeastFieldInlineAction(
+                                title: "Open Instagram",
+                                systemImage: "camera"
+                            ) {
                                 openExternalURL(
                                     from: instagramURL,
                                     failureTitle: "Instagram Unavailable",
                                     failureMessage: "Feast couldn't open this Instagram link."
                                 )
-                            } label: {
-                                Label("Open Instagram", systemImage: "camera")
                             }
-                            .buttonStyle(FeastInlineActionButtonStyle())
                         } else {
-                            Button {
+                            FeastFieldInlineAction(
+                                title: "Search Instagram",
+                                systemImage: "magnifyingglass"
+                            ) {
                                 searchInstagram()
-                            } label: {
-                                Label("Search Instagram", systemImage: "magnifyingglass")
                             }
-                            .buttonStyle(FeastInlineActionButtonStyle())
                         }
                     }
                 }
