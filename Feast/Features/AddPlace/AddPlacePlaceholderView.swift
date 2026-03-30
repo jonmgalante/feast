@@ -368,34 +368,8 @@ private struct AddPlaceSaveView: View {
         return canonicalNeighborhoodName
     }
 
-    private var neighborhoodSuggestionMessage: String? {
-        switch selectedNeighborhoodSelection {
-        case .unsorted, .manualEntry:
-            break
-        case let .existing(objectID):
-            if let selectedNeighborhood = allNeighborhoods.first(where: { $0.objectID == objectID }) {
-                return "This place will save into \(selectedNeighborhood.displayName)."
-            }
-        case let .create(neighborhoodName):
-            if let existingNeighborhoodName = FeastNeighborhoodName.matchedExistingName(
-                for: neighborhoodName,
-                in: allNeighborhoods.map(\.displayName)
-            ) {
-                return "This place will save into \(existingNeighborhoodName)."
-            }
-
-            return "\(neighborhoodName) will be created when you save."
-        }
-
-        if let suggestedNeighborhood, suggestedNeighborhood.existingMatch != nil {
-            return "Suggested neighborhood: \(suggestedNeighborhood.displayName)."
-        }
-
-        if let suggestedNeighborhoodToCreate {
-            return "Suggested neighborhood: \(suggestedNeighborhoodToCreate). Choose Create “\(suggestedNeighborhoodToCreate)” to add it now, pick an existing neighborhood, or use New Neighborhood…."
-        }
-
-        return "Choose Unsorted if you want to organize this place later, pick an existing neighborhood, or use New Neighborhood…."
+    private var neighborhoodHelperText: String {
+        "Choose Unsorted to keep it at the city level for now."
     }
 
     private var existingTags: [String] {
@@ -442,7 +416,7 @@ private struct AddPlaceSaveView: View {
         } header: {
             FeastFormSectionHeader(
                 title: "Apple Maps Match",
-                subtitle: "This is the exact place Feast will save"
+                subtitle: "This is the exact place you're saving"
             )
         }
     }
@@ -452,7 +426,7 @@ private struct AddPlaceSaveView: View {
             FeastFormGroup {
                 FeastFormField(
                     title: "Status",
-                    helper: "Choose how the place should read in your city."
+                    helper: "How this place shows up in this city."
                 ) {
                     Picker("Status", selection: $status) {
                         ForEach(PlaceStatus.allCases) { status in
@@ -468,7 +442,7 @@ private struct AddPlaceSaveView: View {
 
                 FeastFormField(
                     title: "Place Type",
-                    helper: "This helps Feast describe the place consistently."
+                    helper: "Helps keep places organized."
                 ) {
                     Picker("Place Type", selection: $placeType) {
                         ForEach(PlaceType.allCases) { placeType in
@@ -482,8 +456,8 @@ private struct AddPlaceSaveView: View {
             }
         } header: {
             FeastFormSectionHeader(
-                title: "Metadata",
-                subtitle: "The quick descriptors used across Feast"
+                title: "Status And Type",
+                subtitle: "Choose how this place should be organized"
             )
         }
     }
@@ -492,7 +466,7 @@ private struct AddPlaceSaveView: View {
         Section {
             FeastFormGroup {
                 FeastFormField(title: "Cuisines") {
-                    TextField("Italian, sushi, bakery", text: $cuisinesText)
+                    TextField("Italian, Japanese, Seafood", text: $cuisinesText)
                         .textInputAutocapitalization(.words)
                         .feastFieldSurface()
                 }
@@ -501,7 +475,7 @@ private struct AddPlaceSaveView: View {
 
                 FeastFormField(
                     title: "Tags",
-                    helper: "Reuse an existing tag or press Return, comma, or the add button to create one."
+                    helper: "Press Return or comma to add a tag."
                 ) {
                     FeastTagInputView(
                         tags: $tags,
@@ -513,7 +487,7 @@ private struct AddPlaceSaveView: View {
         } header: {
             FeastFormSectionHeader(
                 title: "Cuisines And Tags",
-                subtitle: "Cuisines stay freeform; tags are reusable labels"
+                subtitle: "Add details that make this easier to find later"
             )
         }
     }
@@ -521,9 +495,9 @@ private struct AddPlaceSaveView: View {
     private var notesSection: some View {
         Section {
             FeastFormGroup {
-                FeastFormField(title: "Note", helper: "Anything useful to remember, including reasons you might skip it later.") {
+                FeastFormField(title: "Note", helper: "Anything useful to remember.") {
                     FeastMultilineTextEditor(
-                        placeholder: "What stood out or gave you pause?",
+                        placeholder: "What to order, who recommended it, or why you'd skip it",
                         text: $note,
                         minHeight: 92
                     )
@@ -531,7 +505,7 @@ private struct AddPlaceSaveView: View {
 
                 FeastFormDivider()
 
-                FeastFormField(title: "Website URL") {
+                FeastFormField(title: "Website") {
                     TextField("https://example.com", text: $websiteURL)
                         .keyboardType(.URL)
                         .textInputAutocapitalization(.never)
@@ -541,7 +515,7 @@ private struct AddPlaceSaveView: View {
 
                 FeastFormDivider()
 
-                FeastFormField(title: "Instagram URL") {
+                FeastFormField(title: "Instagram") {
                     TextField("https://instagram.com/...", text: $instagramURL)
                         .keyboardType(.URL)
                         .textInputAutocapitalization(.never)
@@ -551,8 +525,8 @@ private struct AddPlaceSaveView: View {
             }
         } header: {
             FeastFormSectionHeader(
-                title: "Notes",
-                subtitle: "Keep the save useful and easy to revisit later"
+                title: "Notes And Links",
+                subtitle: "Add quick context you'll want later"
             )
         }
     }
@@ -562,10 +536,8 @@ private struct AddPlaceSaveView: View {
             FeastFormGroup {
                 FeastFormField(
                     title: "Neighborhood",
-                    helper: neighborhoodSuggestionMessage ?? "Choose Unsorted if you want to organize this place later.",
-                    helperColor: neighborhoodSuggestionMessage == nil
-                        ? FeastTheme.Colors.secondaryText
-                        : FeastTheme.Colors.tertiaryText
+                    helper: neighborhoodHelperText,
+                    helperColor: FeastTheme.Colors.secondaryText
                 ) {
                     Picker("Neighborhood", selection: $selectedNeighborhoodSelection) {
                         Text("Unsorted").tag(AddPlaceNeighborhoodSelection.unsorted)
@@ -595,8 +567,8 @@ private struct AddPlaceSaveView: View {
             }
         } header: {
             FeastFormSectionHeader(
-                title: "Neighborhood Assignment",
-                subtitle: "Save it into a neighborhood within \(feastList.displayName)"
+                title: "Neighborhood",
+                subtitle: "Choose where to save this place in \(feastList.displayName)"
             )
         }
     }
