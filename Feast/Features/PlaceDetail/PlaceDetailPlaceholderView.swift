@@ -25,6 +25,7 @@ struct SavedPlaceDetailView: View {
     @State private var websiteURL: String
     @State private var instagramURL: String
     @State private var selectedNeighborhoodObjectID: NSManagedObjectID?
+    @State private var lastLoadedUpdatedAt: Date
 
     init(savedPlace: SavedPlace) {
         self.savedPlace = savedPlace
@@ -36,6 +37,7 @@ struct SavedPlaceDetailView: View {
         _websiteURL = State(initialValue: savedPlace.websiteURL ?? "")
         _instagramURL = State(initialValue: savedPlace.instagramURL ?? "")
         _selectedNeighborhoodObjectID = State(initialValue: savedPlace.listSection?.objectID)
+        _lastLoadedUpdatedAt = State(initialValue: savedPlace.updatedAtValue)
     }
 
     var body: some View {
@@ -64,6 +66,9 @@ struct SavedPlaceDetailView: View {
         }
         .task(id: savedPlace.applePlaceIDValue) {
             await resolvePlace()
+        }
+        .onAppear {
+            reloadFormStateIfNeeded()
         }
         .confirmationDialog(
             "Delete this place?",
@@ -566,6 +571,22 @@ struct SavedPlaceDetailView: View {
             failureTitle: failureTitle,
             failureMessage: failureMessage
         )
+    }
+
+    private func reloadFormStateIfNeeded() {
+        guard savedPlace.updatedAtValue != lastLoadedUpdatedAt else {
+            return
+        }
+
+        status = savedPlace.placeStatus
+        placeType = savedPlace.placeTypeValue
+        cuisinesText = savedPlace.cuisines.joined(separator: ", ")
+        tags = savedPlace.tags
+        note = savedPlace.note ?? ""
+        websiteURL = savedPlace.websiteURL ?? ""
+        instagramURL = savedPlace.instagramURL ?? ""
+        selectedNeighborhoodObjectID = savedPlace.listSection?.objectID
+        lastLoadedUpdatedAt = savedPlace.updatedAtValue
     }
 
     private func searchInstagram() {
