@@ -135,12 +135,31 @@ struct SavedPlaceDetailView: View {
         FeastTag.catalog(from: savedPlaces.map(\.tags))
     }
 
-    private var websiteURLValue: URL? {
-        validatedURL(from: websiteURL)
+    private var hasWebsiteURL: Bool {
+        normalizedOptional(websiteURL) != nil
     }
 
-    private var instagramURLValue: URL? {
-        validatedURL(from: instagramURL)
+    private var hasInstagramURL: Bool {
+        normalizedOptional(instagramURL) != nil
+    }
+
+    private var instagramSearchURL: URL? {
+        var queryComponents = [headerTitle]
+
+        if let neighborhoodName = selectedNeighborhood?.displayName, !neighborhoodName.isEmpty {
+            queryComponents.append(neighborhoodName)
+        }
+
+        queryComponents.append(savedPlace.displayCityName)
+
+        var components = URLComponents(string: "https://www.google.com/search")
+        components?.queryItems = [
+            URLQueryItem(
+                name: "q",
+                value: (["site:instagram.com"] + queryComponents).joined(separator: " ")
+            )
+        ]
+        return components?.url
     }
 
     private var headerSection: some View {
@@ -296,21 +315,58 @@ struct SavedPlaceDetailView: View {
                 FeastFormDivider()
 
                 FeastFormField(title: "Website") {
-                    TextField("https://example.com", text: $websiteURL)
-                        .keyboardType(.URL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .feastFieldSurface()
+                    VStack(alignment: .leading, spacing: FeastTheme.Spacing.xSmall) {
+                        TextField("https://example.com", text: $websiteURL)
+                            .keyboardType(.URL)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .feastFieldSurface()
+
+                        if hasWebsiteURL {
+                            Button {
+                                openExternalURL(
+                                    from: websiteURL,
+                                    failureTitle: "Website Unavailable",
+                                    failureMessage: "Feast couldn't open this website link."
+                                )
+                            } label: {
+                                Label("Open Website", systemImage: "globe")
+                            }
+                            .buttonStyle(FeastInlineActionButtonStyle())
+                        }
+                    }
                 }
 
                 FeastFormDivider()
 
                 FeastFormField(title: "Instagram") {
-                    TextField("https://instagram.com/...", text: $instagramURL)
-                        .keyboardType(.URL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .feastFieldSurface()
+                    VStack(alignment: .leading, spacing: FeastTheme.Spacing.xSmall) {
+                        TextField("https://instagram.com/...", text: $instagramURL)
+                            .keyboardType(.URL)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .feastFieldSurface()
+
+                        if hasInstagramURL {
+                            Button {
+                                openExternalURL(
+                                    from: instagramURL,
+                                    failureTitle: "Instagram Unavailable",
+                                    failureMessage: "Feast couldn't open this Instagram link."
+                                )
+                            } label: {
+                                Label("Open Instagram", systemImage: "camera")
+                            }
+                            .buttonStyle(FeastInlineActionButtonStyle())
+                        } else {
+                            Button {
+                                searchInstagram()
+                            } label: {
+                                Label("Search Instagram", systemImage: "magnifyingglass")
+                            }
+                            .buttonStyle(FeastInlineActionButtonStyle())
+                        }
+                    }
                 }
             }
         } header: {
@@ -351,40 +407,6 @@ struct SavedPlaceDetailView: View {
     private var actionsSection: some View {
         Section {
             FeastFormGroup {
-                if let websiteURLValue {
-                    Button {
-                        openExternalURL(
-                            websiteURLValue,
-                            failureTitle: "Website Unavailable",
-                            failureMessage: "Feast couldn't open this website."
-                        )
-                    } label: {
-                        Label("Open Website", systemImage: "globe")
-                    }
-                    .buttonStyle(FeastInlineActionButtonStyle())
-                }
-
-                if websiteURLValue != nil, instagramURLValue != nil {
-                    FeastFormDivider()
-                }
-
-                if let instagramURLValue {
-                    Button {
-                        openExternalURL(
-                            instagramURLValue,
-                            failureTitle: "Instagram Unavailable",
-                            failureMessage: "Feast couldn't open this Instagram link."
-                        )
-                    } label: {
-                        Label("Open Instagram", systemImage: "camera")
-                    }
-                    .buttonStyle(FeastInlineActionButtonStyle())
-                }
-
-                if websiteURLValue != nil || instagramURLValue != nil {
-                    FeastFormDivider()
-                }
-
                 Button(role: .destructive) {
                     showingDeleteConfirmation = true
                 } label: {
@@ -520,6 +542,42 @@ struct SavedPlaceDetailView: View {
                 )
             }
         }
+    }
+
+    private func openExternalURL(
+        from rawValue: String,
+        failureTitle: String,
+        failureMessage: String
+    ) {
+        guard let url = validatedURL(from: rawValue) else {
+            detailAlert = DetailAlertState(
+                title: failureTitle,
+                message: failureMessage
+            )
+            return
+        }
+
+        openExternalURL(
+            url,
+            failureTitle: failureTitle,
+            failureMessage: failureMessage
+        )
+    }
+
+    private func searchInstagram() {
+        guard let instagramSearchURL else {
+            detailAlert = DetailAlertState(
+                title: "Instagram Search Unavailable",
+                message: "Feast couldn't open this Instagram search."
+            )
+            return
+        }
+
+        openExternalURL(
+            instagramSearchURL,
+            failureTitle: "Instagram Search Unavailable",
+            failureMessage: "Feast couldn't open this Instagram search."
+        )
     }
 
     private func errorMessage(for error: Error) -> String {
