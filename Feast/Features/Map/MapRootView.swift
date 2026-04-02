@@ -151,6 +151,43 @@ struct MapRootView: View {
         savedPlaceFilters.hasActiveFilters
     }
 
+    private var activeFilterBadgeCount: Int {
+        activeFilterChipLabels.count
+    }
+
+    private var activeFilterChipLabels: [String] {
+        var labels: [String] = []
+
+        if let trimmedQuery = trimmedSavedPlaceQueryText {
+            labels.append("Search: \(compactFilterChipText(trimmedQuery))")
+        }
+
+        if !savedPlaceFilters.selectedStatuses.isEmpty {
+            let statuses = savedPlaceFilters.selectedStatuses
+                .map(\.rawValue)
+                .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+
+            if statuses.count == 1, let status = statuses.first {
+                labels.append("Status: \(status)")
+            } else {
+                labels.append("\(statuses.count) statuses")
+            }
+        }
+
+        if !savedPlaceFilters.selectedTags.isEmpty {
+            let tags = savedPlaceFilters.selectedTags
+                .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+
+            if tags.count == 1, let tag = tags.first {
+                labels.append("Tag: \(compactFilterChipText(tag))")
+            } else {
+                labels.append("\(tags.count) tags")
+            }
+        }
+
+        return labels
+    }
+
     private var markerResolutionKey: String {
         let listKey = selectedFeastList.map(uriString(for:)) ?? "none"
         let placeKeys = selectedCitySavedPlaces.map { place in
@@ -163,75 +200,104 @@ struct MapRootView: View {
     }
 
     private var mapHeaderOverlay: some View {
-        HStack(alignment: .top, spacing: FeastTheme.Spacing.medium) {
-            VStack(alignment: .leading, spacing: FeastTheme.Spacing.small) {
-                Text("City")
-                    .font(FeastTheme.Typography.sectionLabel)
-                    .tracking(0.8)
-                    .foregroundStyle(FeastTheme.Colors.secondaryText)
+        VStack(alignment: .leading, spacing: FeastTheme.Spacing.small) {
+            HStack(alignment: .top, spacing: FeastTheme.Spacing.medium) {
+                VStack(alignment: .leading, spacing: FeastTheme.Spacing.small) {
+                    Text("City")
+                        .font(FeastTheme.Typography.sectionLabel)
+                        .tracking(0.8)
+                        .foregroundStyle(FeastTheme.Colors.secondaryText)
 
-                Menu {
-                    ForEach(feastLists) { feastList in
-                        Button(feastList.displayName) {
-                            selectedFeastListURI = uriString(for: feastList)
+                    Menu {
+                        ForEach(feastLists) { feastList in
+                            Button(feastList.displayName) {
+                                selectedFeastListURI = uriString(for: feastList)
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: FeastTheme.Spacing.small) {
+                            Image(systemName: "mappin.circle.fill")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(FeastTheme.Colors.accentSelection)
+
+                            Text(selectedFeastList?.displayName ?? "Select City")
+                                .font(FeastTheme.Typography.listTitle)
+                                .foregroundStyle(FeastTheme.Colors.primaryText)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.82)
+
+                            Image(systemName: "chevron.down")
+                                .font(FeastTheme.Typography.caption.weight(.semibold))
+                                .foregroundStyle(FeastTheme.Colors.secondaryText)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .buttonStyle(.plain)
+
+                    Text(citySummaryText)
+                        .font(FeastTheme.Typography.rowMetadata)
+                        .foregroundStyle(citySummaryColor)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                }
+
+                Spacer(minLength: 0)
+
+                VStack(alignment: .trailing, spacing: FeastTheme.Spacing.small) {
+                    Button {
+                        showingExploreSearch = true
+                    } label: {
+                        Label("Search", systemImage: "magnifyingglass")
+                    }
+                    .buttonStyle(FeastQuietChipButtonStyle())
+                    .disabled(selectedFeastList == nil)
+                    .accessibilityLabel("Search Apple Maps")
+
+                    Button {
+                        presentSavedPlaceFilters()
+                    } label: {
+                        HStack(spacing: FeastTheme.Spacing.xSmall) {
+                            Image(
+                                systemName: hasActiveSavedPlaceFilters
+                                    ? "line.3.horizontal.decrease.circle.fill"
+                                    : "line.3.horizontal.decrease.circle"
+                            )
+
+                            Text("Filters")
+
+                            if activeFilterBadgeCount > 0 {
+                                MapSavedPlaceFilterBadge(count: activeFilterBadgeCount)
+                            }
                         }
                     }
-                } label: {
-                    HStack(spacing: FeastTheme.Spacing.small) {
-                        Image(systemName: "mappin.circle.fill")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(FeastTheme.Colors.accentSelection)
-
-                        Text(selectedFeastList?.displayName ?? "Select City")
-                            .font(FeastTheme.Typography.listTitle)
-                            .foregroundStyle(FeastTheme.Colors.primaryText)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.82)
-
-                        Image(systemName: "chevron.down")
-                            .font(FeastTheme.Typography.caption.weight(.semibold))
-                            .foregroundStyle(FeastTheme.Colors.secondaryText)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .buttonStyle(.plain)
-
-                Text(citySummaryText)
-                    .font(FeastTheme.Typography.rowMetadata)
-                    .foregroundStyle(citySummaryColor)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.leading)
-            }
-
-            Spacer(minLength: 0)
-
-            VStack(alignment: .trailing, spacing: FeastTheme.Spacing.small) {
-                Button {
-                    showingExploreSearch = true
-                } label: {
-                    Label("Search", systemImage: "magnifyingglass")
-                }
-                .buttonStyle(FeastQuietChipButtonStyle())
-                .disabled(selectedFeastList == nil)
-                .accessibilityLabel("Search Apple Maps")
-
-                Button {
-                    presentSavedPlaceFilters()
-                } label: {
-                    Label(
-                        "Filters",
-                        systemImage: hasActiveSavedPlaceFilters
-                            ? "line.3.horizontal.decrease.circle.fill"
-                            : "line.3.horizontal.decrease.circle"
+                    .buttonStyle(FeastQuietChipButtonStyle())
+                    .disabled(selectedFeastList == nil)
+                    .accessibilityLabel("Filters")
+                    .accessibilityValue(
+                        hasActiveSavedPlaceFilters
+                            ? "\(activeFilterBadgeCount) active"
+                            : "No active filters"
                     )
                 }
-                .buttonStyle(FeastQuietChipButtonStyle())
-                .disabled(selectedFeastList == nil)
+            }
+
+            if hasActiveSavedPlaceFilters {
+                activeFilterChipsRow
             }
         }
         .padding(.horizontal, FeastTheme.Spacing.large)
         .padding(.vertical, FeastTheme.Spacing.medium)
         .feastMapOverlayCard(cornerRadius: FeastTheme.CornerRadius.medium)
+    }
+
+    private var activeFilterChipsRow: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: FeastTheme.Spacing.xSmall) {
+                ForEach(Array(activeFilterChipLabels.enumerated()), id: \.offset) { _, label in
+                    MapSavedPlaceActiveChip(title: label)
+                }
+            }
+        }
     }
 
     private var mapContent: some View {
@@ -279,7 +345,7 @@ struct MapRootView: View {
                     } description: {
                         Text(noMatchingResultsText)
                     } actions: {
-                        Button("Clear All") {
+                        Button("Clear Filters") {
                             clearSavedPlaceFilters()
                         }
                         .buttonStyle(FeastQuietChipButtonStyle())
@@ -382,6 +448,20 @@ struct MapRootView: View {
 
     private var noMatchingResultsText: String {
         "Try a different search, status, or tag for \(selectedFeastList?.displayName ?? "this city")."
+    }
+
+    private var trimmedSavedPlaceQueryText: String? {
+        let trimmed = savedPlaceFilters.queryText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func compactFilterChipText(_ text: String, limit: Int = 24) -> String {
+        guard text.count > limit else {
+            return text
+        }
+
+        let endIndex = text.index(text.startIndex, offsetBy: max(limit - 3, 0))
+        return "\(text[..<endIndex])..."
     }
 
     @MainActor
@@ -823,6 +903,43 @@ private struct MapSavedPlaceFilterRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+}
+
+private struct MapSavedPlaceActiveChip: View {
+    let title: String
+
+    var body: some View {
+        Text(title)
+            .font(FeastTheme.Typography.rowUtility.weight(.semibold))
+            .foregroundStyle(FeastTheme.Colors.secondaryAction)
+            .lineLimit(1)
+            .padding(.horizontal, FeastTheme.Spacing.medium)
+            .padding(.vertical, 8)
+            .background {
+                Capsule(style: .continuous)
+                    .fill(FeastTheme.Colors.surfaceBackground.opacity(0.92))
+            }
+            .overlay {
+                Capsule(style: .continuous)
+                    .stroke(FeastTheme.Colors.dividerBorder.opacity(0.9), lineWidth: 1)
+            }
+    }
+}
+
+private struct MapSavedPlaceFilterBadge: View {
+    let count: Int
+
+    var body: some View {
+        Text("\(count)")
+            .font(FeastTheme.Typography.caption.weight(.semibold))
+            .foregroundStyle(FeastTheme.Colors.primaryActionLabel)
+            .frame(minWidth: 18, minHeight: 18)
+            .padding(.horizontal, 4)
+            .background {
+                Capsule(style: .continuous)
+                    .fill(FeastTheme.Colors.primaryActionFill)
+            }
     }
 }
 
