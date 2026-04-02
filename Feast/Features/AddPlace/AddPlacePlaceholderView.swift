@@ -902,7 +902,7 @@ private enum SearchState {
     case failed(String)
 }
 
-private enum AddPlaceNeighborhoodSelection: Hashable {
+enum AddPlaceNeighborhoodSelection: Hashable {
     case unsorted
     case existing(NSManagedObjectID)
     case create(String)

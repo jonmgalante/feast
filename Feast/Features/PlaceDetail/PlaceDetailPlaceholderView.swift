@@ -24,10 +24,14 @@ struct SavedPlaceDetailView: View {
     @State private var note: String
     @State private var websiteURL: String
     @State private var instagramURL: String
-    @State private var selectedNeighborhoodObjectID: NSManagedObjectID?
+    @State private var selectedNeighborhoodSelection: AddPlaceNeighborhoodSelection
+    @State private var committedNeighborhoodSelection: AddPlaceNeighborhoodSelection
+    @State private var showingNewNeighborhoodSheet = false
+    @State private var newNeighborhoodName = ""
     @State private var lastLoadedUpdatedAt: Date
 
     init(savedPlace: SavedPlace) {
+        let initialNeighborhoodSelection = Self.initialNeighborhoodSelection(for: savedPlace)
         self.savedPlace = savedPlace
         _status = State(initialValue: savedPlace.placeStatus)
         _placeType = State(initialValue: savedPlace.placeTypeValue)
@@ -36,7 +40,8 @@ struct SavedPlaceDetailView: View {
         _note = State(initialValue: savedPlace.note ?? "")
         _websiteURL = State(initialValue: savedPlace.websiteURL ?? "")
         _instagramURL = State(initialValue: savedPlace.instagramURL ?? "")
-        _selectedNeighborhoodObjectID = State(initialValue: savedPlace.listSection?.objectID)
+        _selectedNeighborhoodSelection = State(initialValue: initialNeighborhoodSelection)
+        _committedNeighborhoodSelection = State(initialValue: initialNeighborhoodSelection)
         _lastLoadedUpdatedAt = State(initialValue: savedPlace.updatedAtValue)
     }
 
@@ -69,6 +74,17 @@ struct SavedPlaceDetailView: View {
         }
         .onAppear {
             reloadFormStateIfNeeded()
+        }
+        .onChange(of: selectedNeighborhoodSelection) { _, newSelection in
+            handleNeighborhoodSelectionChange(newSelection)
+        }
+        .sheet(isPresented: $showingNewNeighborhoodSheet) {
+            NavigationStack {
+                NeighborhoodNamePromptSheet(
+                    initialName: newNeighborhoodName,
+                    onConfirm: applyManualNeighborhoodName(_:)
+                )
+            }
         }
         .confirmationDialog(
             "Delete this place?",
@@ -111,6 +127,18 @@ struct SavedPlaceDetailView: View {
         resolvedPlace?.displayName ?? savedPlace.displayName
     }
 
+    private var selectedNeighborhoodName: String? {
+        if let selectedNeighborhood {
+            return selectedNeighborhood.displayName
+        }
+
+        guard case let .create(neighborhoodName) = selectedNeighborhoodSelection else {
+            return nil
+        }
+
+        return FeastNeighborhoodName.canonicalDisplayName(for: neighborhoodName)
+    }
+
     private var headerSubtitle: String? {
         if let resolvedPlace, !resolvedPlace.secondaryText.isEmpty {
             return resolvedPlace.secondaryText
@@ -120,7 +148,7 @@ struct SavedPlaceDetailView: View {
     }
 
     private var neighborhoodContextText: String {
-        let neighborhoodName = selectedNeighborhood?.displayName ?? "Unsorted"
+        let neighborhoodName = selectedNeighborhoodName ?? "Unsorted"
         return "\(savedPlace.displayCityName) • \(neighborhoodName)"
     }
 
@@ -133,7 +161,32 @@ struct SavedPlaceDetailView: View {
     }
 
     private var selectedNeighborhood: ListSection? {
-        allNeighborhoods.first { $0.objectID == selectedNeighborhoodObjectID }
+        switch selectedNeighborhoodSelection {
+        case .unsorted:
+            return nil
+        case .manualEntry:
+            return nil
+        case let .existing(objectID):
+            return allNeighborhoods.first { $0.objectID == objectID }
+        case let .create(neighborhoodName):
+            return allNeighborhoods.first { neighborhood in
+                FeastNeighborhoodName.matches(
+                    neighborhood.displayName,
+                    neighborhoodName
+                )
+            }
+        }
+    }
+
+    private var manualNeighborhoodToCreate: String? {
+        guard
+            case let .create(neighborhoodName) = selectedNeighborhoodSelection,
+            let canonicalNeighborhoodName = FeastNeighborhoodName.canonicalDisplayName(for: neighborhoodName)
+        else {
+            return nil
+        }
+
+        return canonicalNeighborhoodName
     }
 
     private var existingTags: [String] {
@@ -151,7 +204,7 @@ struct SavedPlaceDetailView: View {
     private var instagramSearchURL: URL? {
         var queryComponents = [headerTitle]
 
-        if let neighborhoodName = selectedNeighborhood?.displayName, !neighborhoodName.isEmpty {
+        if let neighborhoodName = selectedNeighborhoodName, !neighborhoodName.isEmpty {
             queryComponents.append(neighborhoodName)
         }
 
@@ -393,11 +446,20 @@ struct SavedPlaceDetailView: View {
                     title: "Neighborhood",
                     helper: "Choose Unsorted to keep it at the city level for now."
                 ) {
-                    Picker("Neighborhood", selection: $selectedNeighborhoodObjectID) {
-                        Text("Unsorted").tag(nil as NSManagedObjectID?)
+                    Picker("Neighborhood", selection: $selectedNeighborhoodSelection) {
+                        Text("Unsorted").tag(AddPlaceNeighborhoodSelection.unsorted)
+
+                        if let manualNeighborhoodToCreate {
+                            Text("Create “\(manualNeighborhoodToCreate)”")
+                                .tag(AddPlaceNeighborhoodSelection.create(manualNeighborhoodToCreate))
+                        }
+
+                        Text("New Neighborhood…")
+                            .tag(AddPlaceNeighborhoodSelection.manualEntry)
 
                         ForEach(allNeighborhoods) { neighborhood in
-                            Text(neighborhood.displayName).tag(neighborhood.objectID as NSManagedObjectID?)
+                            Text(neighborhood.displayName)
+                                .tag(AddPlaceNeighborhoodSelection.existing(neighborhood.objectID))
                         }
                     }
                     .labelsHidden()
@@ -481,6 +543,7 @@ struct SavedPlaceDetailView: View {
 
     private func saveChanges() {
         do {
+            let selectedNeighborhood = try resolvedNeighborhoodForSave()
             try repository.update(
                 savedPlace,
                 with: FeastRepository.SavedPlaceMetadata(
@@ -538,6 +601,65 @@ struct SavedPlaceDetailView: View {
         return url
     }
 
+    private func handleNeighborhoodSelectionChange(_ newSelection: AddPlaceNeighborhoodSelection) {
+        guard newSelection == .manualEntry else {
+            committedNeighborhoodSelection = newSelection
+            return
+        }
+
+        if case let .create(existingName) = committedNeighborhoodSelection {
+            newNeighborhoodName = existingName
+        } else {
+            newNeighborhoodName = ""
+        }
+
+        showingNewNeighborhoodSheet = true
+        selectedNeighborhoodSelection = committedNeighborhoodSelection
+    }
+
+    private func applyManualNeighborhoodName(_ rawValue: String) {
+        guard let canonicalNeighborhoodName = FeastNeighborhoodName.canonicalDisplayName(for: rawValue) else {
+            return
+        }
+
+        if let existingNeighborhood = allNeighborhoods.first(where: { neighborhood in
+            FeastNeighborhoodName.matches(
+                neighborhood.displayName,
+                canonicalNeighborhoodName
+            )
+        }) {
+            selectedNeighborhoodSelection = .existing(existingNeighborhood.objectID)
+            return
+        }
+
+        selectedNeighborhoodSelection = .create(canonicalNeighborhoodName)
+    }
+
+    private func resolvedNeighborhoodForSave() throws -> ListSection? {
+        switch selectedNeighborhoodSelection {
+        case .unsorted:
+            return nil
+        case .manualEntry:
+            return nil
+        case let .existing(objectID):
+            return allNeighborhoods.first { $0.objectID == objectID }
+        case let .create(neighborhoodName):
+            if let existingNeighborhood = selectedNeighborhood {
+                return existingNeighborhood
+            }
+
+            guard let feastList = savedPlace.feastList else {
+                assertionFailure("Attempted to create a neighborhood for a place without a city.")
+                return nil
+            }
+
+            return try repository.createListSection(
+                named: neighborhoodName,
+                in: feastList
+            )
+        }
+    }
+
     private func openExternalURL(
         _ url: URL,
         failureTitle: String,
@@ -578,6 +700,8 @@ struct SavedPlaceDetailView: View {
             return
         }
 
+        let initialNeighborhoodSelection = Self.initialNeighborhoodSelection(for: savedPlace)
+
         status = savedPlace.placeStatus
         placeType = savedPlace.placeTypeValue
         cuisinesText = savedPlace.cuisines.joined(separator: ", ")
@@ -585,8 +709,19 @@ struct SavedPlaceDetailView: View {
         note = savedPlace.note ?? ""
         websiteURL = savedPlace.websiteURL ?? ""
         instagramURL = savedPlace.instagramURL ?? ""
-        selectedNeighborhoodObjectID = savedPlace.listSection?.objectID
+        selectedNeighborhoodSelection = initialNeighborhoodSelection
+        committedNeighborhoodSelection = initialNeighborhoodSelection
         lastLoadedUpdatedAt = savedPlace.updatedAtValue
+    }
+
+    private static func initialNeighborhoodSelection(
+        for savedPlace: SavedPlace
+    ) -> AddPlaceNeighborhoodSelection {
+        guard let neighborhood = savedPlace.listSection else {
+            return .unsorted
+        }
+
+        return .existing(neighborhood.objectID)
     }
 
     private func searchInstagram() {
