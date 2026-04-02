@@ -6,12 +6,23 @@ struct AddPlaceView: View {
     @Environment(\.applePlacesService) private var applePlacesService
 
     @ObservedObject var feastList: FeastList
+    let onSelectPlace: ((ApplePlaceMatch) -> Void)?
 
     @State private var searchQuery = ""
     @State private var searchResults: [ApplePlaceMatch] = []
     @State private var selectedPlace: ApplePlaceMatch?
     @State private var searchState: SearchState = .idle
     @FocusState private var isSearchFieldFocused: Bool
+
+    init(
+        feastList: FeastList,
+        initialSearchQuery: String = "",
+        onSelectPlace: ((ApplePlaceMatch) -> Void)? = nil
+    ) {
+        self.feastList = feastList
+        self.onSelectPlace = onSelectPlace
+        _searchQuery = State(initialValue: initialSearchQuery)
+    }
 
     var body: some View {
         List {
@@ -147,7 +158,11 @@ struct AddPlaceView: View {
                 Section {
                     ForEach(searchResults) { place in
                         Button {
-                            selectedPlace = place
+                            if let onSelectPlace {
+                                onSelectPlace(place)
+                            } else {
+                                selectedPlace = place
+                            }
                         } label: {
                             SearchResultRow(place: place)
                         }

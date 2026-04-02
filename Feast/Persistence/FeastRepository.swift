@@ -41,6 +41,11 @@ final class FeastRepository {
     }
 
     struct SavedPlaceMetadata {
+        struct SavedPlaceLocation {
+            let applePlaceID: String
+            let displayNameSnapshot: String
+        }
+
         let status: PlaceStatus
         let placeType: PlaceType
         let cuisines: [String]
@@ -49,6 +54,7 @@ final class FeastRepository {
         let websiteURL: String?
         let instagramURL: String?
         let listSection: ListSection?
+        let location: SavedPlaceLocation?
     }
 
     struct ImportedSavedPlaceDraft {
@@ -341,6 +347,11 @@ final class FeastRepository {
 
         if let listSection = metadata.listSection, listSection.feastList != savedPlace.feastList {
             assertionFailure("Attempted to save a place into a neighborhood that belongs to a different city.")
+        }
+
+        if let location = metadata.location {
+            savedPlace.applePlaceID = location.applePlaceID
+            savedPlace.displayNameSnapshot = location.displayNameSnapshot
         }
 
         savedPlace.placeStatus = metadata.status

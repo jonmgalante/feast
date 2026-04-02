@@ -12,9 +12,11 @@ struct SavedPlaceDetailView: View {
     @FetchRequest(fetchRequest: Self.savedPlacesFetchRequest) private var savedPlaces: FetchedResults<SavedPlace>
 
     @State private var resolvedPlace: ApplePlaceMatch?
+    @State private var selectedReplacementPlace: ApplePlaceMatch?
     @State private var isResolvingPlace = false
     @State private var isOpeningInMaps = false
     @State private var showingDeleteConfirmation = false
+    @State private var showingLocationPicker = false
     @State private var detailAlert: DetailAlertState?
 
     @State private var status: PlaceStatus
@@ -86,6 +88,20 @@ struct SavedPlaceDetailView: View {
                 )
             }
         }
+        .sheet(isPresented: $showingLocationPicker) {
+            if let feastList = savedPlace.feastList {
+                NavigationStack {
+                    AddPlaceView(
+                        feastList: feastList,
+                        initialSearchQuery: displayedPlace?.displayName ?? savedPlace.displayName,
+                        onSelectPlace: { place in
+                            selectedReplacementPlace = place
+                            showingLocationPicker = false
+                        }
+                    )
+                }
+            }
+        }
         .confirmationDialog(
             "Delete this place?",
             isPresented: $showingDeleteConfirmation,
@@ -124,7 +140,7 @@ struct SavedPlaceDetailView: View {
     }()
 
     private var headerTitle: String {
-        resolvedPlace?.displayName ?? savedPlace.displayName
+        displayedPlace?.displayName ?? savedPlace.displayName
     }
 
     private var selectedNeighborhoodName: String? {
@@ -140,11 +156,15 @@ struct SavedPlaceDetailView: View {
     }
 
     private var headerSubtitle: String? {
-        if let resolvedPlace, !resolvedPlace.secondaryText.isEmpty {
-            return resolvedPlace.secondaryText
+        if let displayedPlace, !displayedPlace.secondaryText.isEmpty {
+            return displayedPlace.secondaryText
         }
 
         return nil
+    }
+
+    private var displayedPlace: ApplePlaceMatch? {
+        selectedReplacementPlace ?? resolvedPlace
     }
 
     private var neighborhoodContextText: String {
@@ -254,7 +274,7 @@ struct SavedPlaceDetailView: View {
                             .font(FeastTheme.Typography.rowMetadata)
                             .foregroundStyle(FeastTheme.Colors.secondaryText)
 
-                        if resolvedPlace == nil {
+                        if displayedPlace == nil {
                             Text("Using saved snapshot")
                                 .font(FeastTheme.Typography.rowUtility)
                                 .foregroundStyle(FeastTheme.Colors.tertiaryText)
@@ -285,6 +305,17 @@ struct SavedPlaceDetailView: View {
                     }
                     .buttonStyle(FeastInlineActionButtonStyle())
                     .disabled(isOpeningInMaps)
+                }
+
+                if savedPlace.feastList != nil {
+                    FeastFormDivider()
+
+                    Button {
+                        showingLocationPicker = true
+                    } label: {
+                        Label("Pick Different Location", systemImage: "mappin.circle")
+                    }
+                    .buttonStyle(FeastInlineActionButtonStyle())
                 }
             }
         } header: {
@@ -561,7 +592,13 @@ struct SavedPlaceDetailView: View {
                     note: normalizedOptional(note),
                     websiteURL: normalizedOptional(websiteURL),
                     instagramURL: normalizedOptional(instagramURL),
-                    listSection: selectedNeighborhood
+                    listSection: selectedNeighborhood,
+                    location: selectedReplacementPlace.map { place in
+                        FeastRepository.SavedPlaceMetadata.SavedPlaceLocation(
+                            applePlaceID: place.applePlaceID,
+                            displayNameSnapshot: place.displayName
+                        )
+                    }
                 )
             )
             dismiss()
@@ -718,6 +755,7 @@ struct SavedPlaceDetailView: View {
         instagramURL = savedPlace.instagramURL ?? ""
         selectedNeighborhoodSelection = initialNeighborhoodSelection
         committedNeighborhoodSelection = initialNeighborhoodSelection
+        selectedReplacementPlace = nil
         lastLoadedUpdatedAt = savedPlace.updatedAtValue
     }
 
