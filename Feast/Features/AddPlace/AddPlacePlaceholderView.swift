@@ -386,7 +386,7 @@ private struct AddPlaceSaveView: View {
         normalizedOptional(instagramURL) != nil
     }
 
-    private var instagramSearchURL: URL? {
+    private var instagramSearchQueryComponents: [String] {
         var queryComponents = [place.displayName]
 
         if let neighborhoodName = selectedNeighborhood?.displayName ?? suggestedNeighborhood?.displayName,
@@ -395,12 +395,19 @@ private struct AddPlaceSaveView: View {
         }
 
         queryComponents.append(feastList.displayName)
+        return queryComponents
+    }
 
+    private var instagramSearchQuery: String {
+        instagramSearchQueryComponents.joined(separator: " ")
+    }
+
+    private var instagramSearchURL: URL? {
         var components = URLComponents(string: "https://www.google.com/search")
         components?.queryItems = [
             URLQueryItem(
                 name: "q",
-                value: (["site:instagram.com"] + queryComponents).joined(separator: " ")
+                value: (["site:instagram.com"] + instagramSearchQueryComponents).joined(separator: " ")
             )
         ]
         return components?.url
@@ -839,11 +846,17 @@ private struct AddPlaceSaveView: View {
             return
         }
 
-        openExternalURL(
-            instagramSearchURL,
-            failureTitle: "Instagram Search Unavailable",
-            failureMessage: "Feast couldn't open this Instagram search."
-        )
+        InstagramSearchLauncher.openSearch(
+            query: instagramSearchQuery,
+            fallbackURL: instagramSearchURL
+        ) { accepted in
+            if !accepted {
+                alertState = AddPlaceAlertState(
+                    title: "Instagram Search Unavailable",
+                    message: "Feast couldn't open this Instagram search."
+                )
+            }
+        }
     }
 }
 
