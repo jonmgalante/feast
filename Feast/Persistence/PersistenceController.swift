@@ -131,6 +131,10 @@ struct PrivateShareInvitationDelivery {
 }
 
 final class PersistenceController {
+#if DEBUG
+    private static let initializeCloudKitSchemaLaunchArgument = "-feastInitializeCloudKitSchema"
+#endif
+
     struct CloudKitSyncConfiguration {
         static let infoPlistKey = "FeastCloudKitContainerIdentifier"
 
@@ -378,6 +382,10 @@ final class PersistenceController {
         sharedCloudKitStore = loadedStores.sharedCloudKit
 
         Self.configureViewContext(container.viewContext)
+
+#if DEBUG
+        initializeCloudKitSchemaIfRequested()
+#endif
     }
 
     static let shared = PersistenceController(
@@ -703,6 +711,61 @@ final class PersistenceController {
         viewContext.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
         viewContext.undoManager = nil
     }
+
+#if DEBUG
+    private func initializeCloudKitSchemaIfRequested() {
+        let isSchemaInitializationRequested = ProcessInfo.processInfo.arguments.contains(
+            Self.initializeCloudKitSchemaLaunchArgument
+        )
+        Self.logger.debug(
+            "CloudKit schema initialization launch argument detected: \(isSchemaInitializationRequested, privacy: .public)"
+        )
+
+        guard isSchemaInitializationRequested else {
+            return
+        }
+
+        guard case let .cloudKit(containerIdentifier) = storeMode else {
+            Self.logger.debug(
+                """
+                CloudKit schema initialization requested, but CloudKit-backed stores are unavailable.
+                storeMode: \(self.debugStoreModeDescription, privacy: .public)
+                """
+            )
+            return
+        }
+
+        Self.logger.log(
+            "Starting CloudKit schema initialization for container \(containerIdentifier, privacy: .public)."
+        )
+
+        do {
+            try container.initializeCloudKitSchema(options: [])
+            Self.logger.log(
+                "CloudKit schema initialization succeeded for container \(containerIdentifier, privacy: .public)."
+            )
+        } catch {
+            let diagnostics = Self.formatNSError(error as NSError, indent: "  ").joined(separator: "\n")
+            Self.logger.error(
+                """
+                CloudKit schema initialization failed for container \(containerIdentifier, privacy: .public).
+                \(diagnostics, privacy: .public)
+                """
+            )
+        }
+    }
+
+    private var debugStoreModeDescription: String {
+        switch storeMode {
+        case .localOnly:
+            return "localOnly"
+        case let .cloudKit(containerIdentifier):
+            return "cloudKit(\(containerIdentifier))"
+        case let .localFallback(containerIdentifier):
+            return "localFallback(\(containerIdentifier))"
+        }
+    }
+#endif
 
     func assignToDefaultStore(_ object: NSManagedObject) {
         guard
