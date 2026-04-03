@@ -40,7 +40,7 @@ struct FeaturePlaceholderScreen<Content: View>: View {
                     .background(FeastTheme.Colors.accentSelection.opacity(0.18))
                     .clipShape(RoundedRectangle(cornerRadius: FeastTheme.CornerRadius.medium, style: .continuous))
 
-                Text("Feast v1 shell")
+                Text("Feast shell")
                     .font(FeastTheme.Typography.eyebrow)
                     .foregroundStyle(FeastTheme.Colors.tertiaryText)
             }

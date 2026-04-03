@@ -248,8 +248,8 @@ extension ApplePlacesService {
         }
 
         let displayName = normalized(mapItem.name) ?? "Unnamed Place"
-        let secondaryText = normalized(mapItem.address?.shortAddress)
-            ?? normalized(mapItem.address?.fullAddress)
+        let secondaryText = shortAddress(from: mapItem)
+            ?? fullAddress(from: mapItem)
             ?? ""
         let cityOrRegion = suggestedCityOrRegion(from: mapItem)
         let neighborhoodContext = NeighborhoodSuggestionContext(
@@ -282,8 +282,43 @@ extension ApplePlacesService {
         )
     }
 
+    nonisolated private static func resolvedLocation(from mapItem: MKMapItem) -> CLLocation? {
+        if #available(iOS 26.0, *) {
+            return mapItem.location
+        }
+
+        return mapItem.placemark.location
+    }
+
+    nonisolated private static func shortAddress(from mapItem: MKMapItem) -> String? {
+        if #available(iOS 26.0, *) {
+            return normalized(mapItem.address?.shortAddress)
+        }
+
+        return legacyShortAddress(from: mapItem.placemark)
+    }
+
+    nonisolated private static func fullAddress(from mapItem: MKMapItem) -> String? {
+        if #available(iOS 26.0, *) {
+            return normalized(mapItem.address?.fullAddress)
+        }
+
+        return legacyFullAddress(from: mapItem.placemark)
+    }
+
+    nonisolated private static func addressRepresentationCityName(from mapItem: MKMapItem) -> String? {
+        if #available(iOS 26.0, *) {
+            return normalized(mapItem.addressRepresentations?.cityName)
+        }
+
+        return legacyCityName(from: mapItem.placemark)
+    }
+
     nonisolated private static func coordinate(from mapItem: MKMapItem) -> ApplePlaceCoordinate? {
-        let coordinate = mapItem.location.coordinate
+        guard let coordinate = resolvedLocation(from: mapItem)?.coordinate else {
+            return nil
+        }
+
         guard CLLocationCoordinate2DIsValid(coordinate) else {
             return nil
         }
@@ -296,7 +331,7 @@ extension ApplePlacesService {
 
     nonisolated private static func suggestedCityOrRegion(from mapItem: MKMapItem) -> String? {
         normalized(mapItem.placemark.locality)
-            ?? normalized(mapItem.addressRepresentations?.cityName)
+            ?? addressRepresentationCityName(from: mapItem)
             ?? normalized(mapItem.placemark.subAdministrativeArea)
             ?? normalized(mapItem.placemark.administrativeArea)
     }
@@ -338,8 +373,8 @@ extension ApplePlacesService {
             coordinateResolverMatch=\(coordinateResolution?.displayName ?? "nil", privacy: .public) \
             subLocality=\(normalized(mapItem.placemark.subLocality) ?? "nil", privacy: .public) \
             areasOfInterest=\(joinedDebugValues(mapItem.placemark.areasOfInterest), privacy: .public) \
-            shortAddress=\(normalized(mapItem.address?.shortAddress) ?? "nil", privacy: .public) \
-            fullAddress=\(normalized(mapItem.address?.fullAddress) ?? "nil", privacy: .public) \
+            shortAddress=\(shortAddress(from: mapItem) ?? "nil", privacy: .public) \
+            fullAddress=\(fullAddress(from: mapItem) ?? "nil", privacy: .public) \
             administrativeArea=\(context.administrativeArea ?? "nil", privacy: .public) \
             subAdministrativeArea=\(context.subAdministrativeArea ?? "nil", privacy: .public) \
             country=\(context.country ?? "nil", privacy: .public) \
@@ -454,14 +489,14 @@ extension ApplePlacesService {
             to: &candidates
         )
         appendNeighborhoodCandidates(
-            fromAddress: mapItem.address?.shortAddress,
+            fromAddress: shortAddress(from: mapItem),
             source: "address.shortAddress",
             context: context,
             seenKeys: &seenKeys,
             to: &candidates
         )
         appendNeighborhoodCandidates(
-            fromAddress: mapItem.address?.fullAddress,
+            fromAddress: fullAddress(from: mapItem),
             source: "address.fullAddress",
             context: context,
             seenKeys: &seenKeys,
@@ -612,6 +647,87 @@ extension ApplePlacesService {
             .filter { !$0.isEmpty }
 
         return tokens.contains(where: { streetAddressTokens.contains($0) })
+    }
+
+    nonisolated private static func legacyShortAddress(from placemark: MKPlacemark) -> String? {
+        joinedAddressComponents(
+            [
+                streetAddressLine(from: placemark),
+                normalized(placemark.subLocality),
+                normalized(placemark.locality) ?? normalized(placemark.subAdministrativeArea),
+                regionLine(from: placemark)
+            ],
+            separator: ", "
+        )
+    }
+
+    nonisolated private static func legacyFullAddress(from placemark: MKPlacemark) -> String? {
+        joinedAddressComponents(
+            [
+                streetAddressLine(from: placemark),
+                normalized(placemark.subLocality),
+                normalized(placemark.locality) ?? normalized(placemark.subAdministrativeArea),
+                regionLine(from: placemark),
+                normalized(placemark.country) ?? normalized(placemark.isoCountryCode)
+            ],
+            separator: ", "
+        )
+    }
+
+    nonisolated private static func legacyCityName(from placemark: MKPlacemark) -> String? {
+        normalized(placemark.locality)
+            ?? normalized(placemark.subAdministrativeArea)
+            ?? normalized(placemark.administrativeArea)
+    }
+
+    nonisolated private static func streetAddressLine(from placemark: MKPlacemark) -> String? {
+        joinedAddressComponents(
+            [
+                normalized(placemark.subThoroughfare),
+                normalized(placemark.thoroughfare)
+            ],
+            separator: " "
+        )
+    }
+
+    nonisolated private static func regionLine(from placemark: MKPlacemark) -> String? {
+        joinedAddressComponents(
+            [
+                normalized(placemark.administrativeArea),
+                normalized(placemark.postalCode)
+            ],
+            separator: " "
+        )
+    }
+
+    nonisolated private static func joinedAddressComponents(
+        _ rawComponents: [String?],
+        separator: String
+    ) -> String? {
+        var components: [String] = []
+        var seenKeys: Set<String> = []
+
+        for rawComponent in rawComponents {
+            guard let component = normalized(rawComponent) else {
+                continue
+            }
+
+            let key = component
+                .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !key.isEmpty, !seenKeys.contains(key) else {
+                continue
+            }
+
+            seenKeys.insert(key)
+            components.append(component)
+        }
+
+        guard !components.isEmpty else {
+            return nil
+        }
+
+        return components.joined(separator: separator)
     }
 
     nonisolated private static func joinedDebugValues(_ rawValues: [String]?) -> String {

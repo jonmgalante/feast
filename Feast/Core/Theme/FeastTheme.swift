@@ -116,7 +116,15 @@ enum FeastTheme {
             .font: UIFont.systemFont(ofSize: 17, weight: .regular)
         ]
 
-        let prominentButtonAppearance = UIBarButtonItemAppearance(style: .prominent)
+        let prominentButtonAppearance = UIBarButtonItemAppearance(
+            style: {
+                if #available(iOS 26.0, *) {
+                    return .prominent
+                }
+
+                return .done
+            }()
+        )
         prominentButtonAppearance.normal.titleTextAttributes = [
             .foregroundColor: primaryText,
             .font: UIFont.systemFont(ofSize: 17, weight: .semibold)

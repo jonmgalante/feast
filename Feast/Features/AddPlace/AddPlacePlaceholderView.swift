@@ -98,9 +98,6 @@ struct AddPlaceView: View {
                     }
                     .feastFieldSurface(minHeight: 52)
 
-                    Text("Only Apple Maps matches can be saved in Feast v1.")
-                        .font(FeastTheme.Typography.formHelper)
-                        .foregroundStyle(FeastTheme.Colors.tertiaryText)
                 }
             }
         }

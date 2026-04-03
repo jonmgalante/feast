@@ -59,7 +59,7 @@ struct FeastListSharingSheet: View {
                 } header: {
                     FeastFormSectionHeader(
                         title: "Sharing",
-                        subtitle: "Cities stay private and invite-only in Feast v1"
+                        subtitle: "Cities stay private and invite-only in Feast"
                     )
                 }
 
