@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct SavedPlaceListRow: View {
-    let place: SavedPlace
+    @ObservedObject var place: SavedPlace
     var isNested = false
     var showsLocationContext = false
 

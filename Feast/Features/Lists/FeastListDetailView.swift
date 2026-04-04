@@ -1,9 +1,12 @@
+import CoreData
 import SwiftUI
 
 struct FeastListDetailView: View {
     @Environment(\.managedObjectContext) private var viewContext
     @Environment(\.persistenceController) private var persistenceController
     @ObservedObject var feastList: FeastList
+    @FetchRequest private var neighborhoodSections: FetchedResults<ListSection>
+    @FetchRequest private var savedPlaces: FetchedResults<SavedPlace>
     @State private var neighborhoodEditor: NeighborhoodEditorState?
     @State private var neighborhoodPendingDeletion: ListSection?
     @State private var showingAddPlaceSheet = false
@@ -13,6 +16,18 @@ struct FeastListDetailView: View {
     @State private var listSharingPresentation: PreparedFeastListShare?
     @State private var listPreparingShare = false
     @State private var alertState: FeastListDetailAlertState?
+
+    init(feastList: FeastList) {
+        self.feastList = feastList
+        _neighborhoodSections = FetchRequest(
+            fetchRequest: Self.neighborhoodSectionsFetchRequest(for: feastList),
+            animation: .default
+        )
+        _savedPlaces = FetchRequest(
+            fetchRequest: Self.savedPlacesFetchRequest(for: feastList),
+            animation: .default
+        )
+    }
 
     var body: some View {
         content
@@ -97,10 +112,10 @@ struct FeastListDetailView: View {
             if isShowingSearchResults {
                 searchResultsSection
             } else {
-                if feastList.sortedSavedPlaces.isEmpty && feastList.neighborhoodSections.isEmpty {
+                if citySavedPlaces.isEmpty && neighborhoodSections.isEmpty {
                     emptyStateSection
                 } else {
-                    ForEach(feastList.neighborhoodSections) { section in
+                    ForEach(neighborhoodSections) { section in
                         neighborhoodSection(section)
                     }
                     unsortedSection
@@ -128,9 +143,54 @@ struct FeastListDetailView: View {
         activePersistenceController.sharingState(for: feastList)
     }
 
+    private static func neighborhoodSectionsFetchRequest(
+        for feastList: FeastList
+    ) -> NSFetchRequest<ListSection> {
+        let request = ListSection.fetchRequest()
+        request.sortDescriptors = [
+            NSSortDescriptor(key: "name", ascending: true),
+            NSSortDescriptor(key: "createdAt", ascending: true)
+        ]
+        request.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
+            NSPredicate(format: "feastList == %@", feastList),
+            NSPredicate(format: "parent == nil")
+        ])
+        return request
+    }
+
+    private static func savedPlacesFetchRequest(
+        for feastList: FeastList
+    ) -> NSFetchRequest<SavedPlace> {
+        let request = SavedPlace.fetchRequest()
+        request.sortDescriptors = [
+            NSSortDescriptor(key: "updatedAt", ascending: false),
+            NSSortDescriptor(key: "displayNameSnapshot", ascending: true)
+        ]
+        request.predicate = NSPredicate(format: "feastList == %@", feastList)
+        return request
+    }
+
+    private var citySavedPlaces: [SavedPlace] {
+        Array(savedPlaces)
+    }
+
+    private var unsortedSavedPlaces: [SavedPlace] {
+        citySavedPlaces.filter { $0.listSection == nil }
+    }
+
+    private var savedPlacesByNeighborhoodID: [NSManagedObjectID: [SavedPlace]] {
+        citySavedPlaces.reduce(into: [NSManagedObjectID: [SavedPlace]]()) { groupedPlaces, place in
+            guard let neighborhoodID = place.listSection?.objectID else {
+                return
+            }
+
+            groupedPlaces[neighborhoodID, default: []].append(place)
+        }
+    }
+
     private var filteredSavedPlaces: [SavedPlace] {
         SavedPlaceSearchEngine.filteredPlaces(
-            from: feastList.sortedSavedPlaces,
+            from: citySavedPlaces,
             query: searchText,
             filters: searchFilters,
             fixedFeastList: feastList
@@ -143,7 +203,7 @@ struct FeastListDetailView: View {
 
     private var availableCuisines: [String] {
         SavedPlaceSearchEngine.availableCuisines(
-            from: feastList.sortedSavedPlaces,
+            from: citySavedPlaces,
             fixedFeastList: feastList
         )
     }
@@ -217,9 +277,9 @@ struct FeastListDetailView: View {
 
     @ViewBuilder
     private var unsortedSection: some View {
-        if !feastList.unsortedSavedPlaces.isEmpty {
+        if !unsortedSavedPlaces.isEmpty {
             Section {
-                ForEach(feastList.unsortedSavedPlaces) { place in
+                ForEach(unsortedSavedPlaces) { place in
                     SavedPlaceListRow(place: place)
                 }
             } header: {
@@ -266,10 +326,12 @@ struct FeastListDetailView: View {
 
     @ViewBuilder
     private func neighborhoodContent(_ neighborhood: ListSection) -> some View {
-        if neighborhood.sortedSavedPlaces.isEmpty {
+        let places = savedPlacesByNeighborhoodID[neighborhood.objectID] ?? []
+
+        if places.isEmpty {
             EmptyNeighborhoodRow()
         } else {
-            ForEach(neighborhood.sortedSavedPlaces) { place in
+            ForEach(places) { place in
                 SavedPlaceListRow(place: place)
             }
         }
