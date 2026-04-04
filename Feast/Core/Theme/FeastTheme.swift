@@ -191,7 +191,7 @@ struct FeastProminentButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(FeastTheme.Typography.body.weight(.semibold))
-            .foregroundStyle(FeastTheme.Colors.primaryActionLabel)
+            .foregroundStyle(foregroundColor)
             .multilineTextAlignment(.center)
             .lineLimit(2)
             .minimumScaleFactor(0.88)
@@ -211,7 +211,7 @@ struct FeastProminentButtonStyle: ButtonStyle {
                     style: .continuous
                 )
                 .stroke(
-                    FeastTheme.Colors.primaryActionLabel.opacity(0.06),
+                    foregroundColor.opacity(0.06),
                     lineWidth: 1
                 )
             }
@@ -219,10 +219,14 @@ struct FeastProminentButtonStyle: ButtonStyle {
             .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 
+    private var foregroundColor: Color {
+        FeastTheme.Colors.surfaceBackground
+    }
+
     private func fillColor(isPressed: Bool) -> Color {
         let baseOpacity = isEnabled ? 1.0 : 0.45
         let pressedOpacity = isPressed ? 0.88 : 1.0
-        return FeastTheme.Colors.primaryActionFill.opacity(baseOpacity * pressedOpacity)
+        return FeastTheme.Palette.blueSlate.opacity(baseOpacity * pressedOpacity)
     }
 }
 
