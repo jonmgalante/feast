@@ -1864,6 +1864,17 @@ private struct NotesImportSuccessView: View {
         .feastScrollableChrome()
         .navigationTitle("Import Complete")
         .navigationBarTitleDisplayMode(.inline)
+        .navigationBarBackButtonHidden(true)
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button {
+                    onDone()
+                } label: {
+                    FeastToolbarSymbol(systemName: "xmark")
+                }
+                .accessibilityLabel("Close")
+            }
+        }
     }
 
     private var summarySection: some View {
@@ -1934,21 +1945,13 @@ private struct NotesImportSuccessView: View {
                 .fill(FeastTheme.Colors.dividerBorder.opacity(0.65))
                 .frame(height: 1)
 
-            VStack(spacing: FeastTheme.Spacing.small) {
-                Button("View City") {
-                    onViewImportedCity(success.cityURIString)
-                }
-                .buttonStyle(FeastProminentButtonStyle())
-
-                Button {
-                    onDone()
-                } label: {
-                    Text("Done")
-                        .frame(maxWidth: .infinity, alignment: .center)
-                }
-                .buttonStyle(FeastInlineActionButtonStyle())
-                .padding(.top, FeastTheme.Spacing.xSmall)
+            Button {
+                onViewImportedCity(success.cityURIString)
+            } label: {
+                Text("View City")
+                    .frame(maxWidth: .infinity, alignment: .center)
             }
+            .buttonStyle(FeastProminentButtonStyle())
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
