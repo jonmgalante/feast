@@ -50,10 +50,10 @@ struct SavedPlaceDetailView: View {
     var body: some View {
         List {
             headerSection
+            neighborhoodAssignmentSection
             metadataSection
             categoriesSection
             notesSection
-            neighborhoodAssignmentSection
             actionsSection
         }
         .feastScrollableChrome()

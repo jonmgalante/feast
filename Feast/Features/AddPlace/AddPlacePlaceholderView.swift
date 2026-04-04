@@ -273,10 +273,10 @@ private struct AddPlaceSaveView: View {
     var body: some View {
         List {
             matchSection
+            neighborhoodAssignmentSection
             metadataSection
             categoriesSection
             notesSection
-            neighborhoodAssignmentSection
         }
         .feastScrollableChrome()
         .listStyle(.insetGrouped)
