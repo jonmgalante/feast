@@ -249,7 +249,7 @@ private struct NotesPasteImportView: View {
                     Text("Review Import")
                         .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(FeastProminentButtonStyle())
+                .buttonStyle(FeastProminentButtonStyle(size: .compactBottomBar))
                 .disabled(!canReview)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1951,7 +1951,7 @@ private struct NotesImportSuccessView: View {
                 Text("View City")
                     .frame(maxWidth: .infinity, alignment: .center)
             }
-            .buttonStyle(FeastProminentButtonStyle())
+            .buttonStyle(FeastProminentButtonStyle(size: .compactBottomBar))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }

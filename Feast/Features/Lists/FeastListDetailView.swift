@@ -227,7 +227,7 @@ struct FeastListDetailView: View {
                 .font(FeastTheme.Typography.rowTitle)
                 .frame(maxWidth: .infinity)
         }
-        .buttonStyle(FeastProminentButtonStyle())
+        .buttonStyle(FeastProminentButtonStyle(size: .compactBottomBar))
         .feastBottomBarChrome()
     }
 

@@ -186,7 +186,35 @@ enum FeastTheme {
 }
 
 struct FeastProminentButtonStyle: ButtonStyle {
+    enum Size {
+        case regular
+        case compactBottomBar
+
+        var minHeight: CGFloat {
+            switch self {
+            case .regular:
+                return 50
+            case .compactBottomBar:
+                return 46
+            }
+        }
+
+        var verticalPadding: CGFloat {
+            switch self {
+            case .regular:
+                return FeastTheme.Spacing.small
+            case .compactBottomBar:
+                return FeastTheme.Spacing.xSmall
+            }
+        }
+    }
+
     @Environment(\.isEnabled) private var isEnabled
+    private let size: Size
+
+    init(size: Size = .regular) {
+        self.size = size
+    }
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
@@ -195,9 +223,9 @@ struct FeastProminentButtonStyle: ButtonStyle {
             .multilineTextAlignment(.center)
             .lineLimit(2)
             .minimumScaleFactor(0.88)
-            .frame(minHeight: 50)
+            .frame(minHeight: size.minHeight)
             .padding(.horizontal, FeastTheme.Spacing.large)
-            .padding(.vertical, FeastTheme.Spacing.small)
+            .padding(.vertical, size.verticalPadding)
             .background {
                 RoundedRectangle(
                     cornerRadius: 14,
