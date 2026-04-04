@@ -546,6 +546,7 @@ struct SavedPlaceDetailView: View {
 
         do {
             resolvedPlace = try await applePlacesService.resolve(placeID: applePlaceID)
+            applySuggestedNeighborhoodIfNeeded()
         } catch {
             resolvedPlace = nil
         }
@@ -757,6 +758,30 @@ struct SavedPlaceDetailView: View {
         committedNeighborhoodSelection = initialNeighborhoodSelection
         selectedReplacementPlace = nil
         lastLoadedUpdatedAt = savedPlace.updatedAtValue
+    }
+
+    private func applySuggestedNeighborhoodIfNeeded() {
+        guard
+            savedPlace.listSection == nil,
+            selectedReplacementPlace == nil,
+            selectedNeighborhoodSelection == .unsorted,
+            committedNeighborhoodSelection == .unsorted,
+            let feastList = savedPlace.feastList,
+            let resolvedPlace
+        else {
+            return
+        }
+
+        let suggestedSelection = PlaceNeighborhoodSuggestionSupport.initialNeighborhoodSelection(
+            in: feastList,
+            for: resolvedPlace
+        )
+        guard suggestedSelection != .unsorted else {
+            return
+        }
+
+        selectedNeighborhoodSelection = suggestedSelection
+        committedNeighborhoodSelection = suggestedSelection
     }
 
     private static func initialNeighborhoodSelection(

@@ -257,13 +257,13 @@ private struct AddPlaceSaveView: View {
         _websiteURL = State(initialValue: place.websiteURL ?? "")
         _instagramURL = State(initialValue: place.instagramURL ?? "")
         _selectedNeighborhoodSelection = State(
-            initialValue: Self.initialNeighborhoodSelection(
+            initialValue: PlaceNeighborhoodSuggestionSupport.initialNeighborhoodSelection(
                 in: feastList,
                 for: place
             )
         )
         _committedNeighborhoodSelection = State(
-            initialValue: Self.initialNeighborhoodSelection(
+            initialValue: PlaceNeighborhoodSuggestionSupport.initialNeighborhoodSelection(
                 in: feastList,
                 for: place
             )
@@ -352,7 +352,7 @@ private struct AddPlaceSaveView: View {
     }
 
     private var suggestedNeighborhood: FeastNeighborhoodName.Suggestion? {
-        Self.suggestedNeighborhoodSuggestion(
+        PlaceNeighborhoodSuggestionSupport.suggestedNeighborhoodSuggestion(
             in: feastList,
             for: place
         )
@@ -767,44 +767,6 @@ private struct AddPlaceSaveView: View {
         }
     }
 
-    private static func initialNeighborhoodSelection(
-        in feastList: FeastList,
-        for place: ApplePlaceMatch
-    ) -> AddPlaceNeighborhoodSelection {
-        guard
-            let suggestedNeighborhood = suggestedNeighborhoodSuggestion(
-                in: feastList,
-                for: place
-            ),
-            let existingNeighborhoodName = suggestedNeighborhood.existingMatch,
-            let existingNeighborhood = feastList.neighborhoodSections.first(where: { neighborhood in
-                FeastNeighborhoodName.matches(
-                    neighborhood.displayName,
-                    existingNeighborhoodName
-                )
-            })
-        else {
-            return .unsorted
-        }
-
-        return .existing(existingNeighborhood.objectID)
-    }
-
-    private static func suggestedNeighborhoodSuggestion(
-        in feastList: FeastList,
-        for place: ApplePlaceMatch
-    ) -> FeastNeighborhoodName.Suggestion? {
-        FeastNeighborhoodName.suggestion(
-            primary: place.suggestedSectionPath.neighborhood,
-            existingNeighborhoodNames: feastList.neighborhoodSections.map(\.displayName),
-            rejectedContextNames: [
-                feastList.displayName,
-                place.suggestedSectionPath.cityOrRegion
-            ]
-            .compactMap { $0 }
-        )
-    }
-
     private func errorMessage(for error: Error) -> String {
         let message = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
         if !message.isEmpty {
@@ -925,6 +887,46 @@ private enum SearchState {
     case loading
     case loaded
     case failed(String)
+}
+
+enum PlaceNeighborhoodSuggestionSupport {
+    static func initialNeighborhoodSelection(
+        in feastList: FeastList,
+        for place: ApplePlaceMatch
+    ) -> AddPlaceNeighborhoodSelection {
+        guard
+            let suggestedNeighborhood = suggestedNeighborhoodSuggestion(
+                in: feastList,
+                for: place
+            ),
+            let existingNeighborhoodName = suggestedNeighborhood.existingMatch,
+            let existingNeighborhood = feastList.neighborhoodSections.first(where: { neighborhood in
+                FeastNeighborhoodName.matches(
+                    neighborhood.displayName,
+                    existingNeighborhoodName
+                )
+            })
+        else {
+            return .unsorted
+        }
+
+        return .existing(existingNeighborhood.objectID)
+    }
+
+    static func suggestedNeighborhoodSuggestion(
+        in feastList: FeastList,
+        for place: ApplePlaceMatch
+    ) -> FeastNeighborhoodName.Suggestion? {
+        FeastNeighborhoodName.suggestion(
+            primary: place.suggestedSectionPath.neighborhood,
+            existingNeighborhoodNames: feastList.neighborhoodSections.map(\.displayName),
+            rejectedContextNames: [
+                feastList.displayName,
+                place.suggestedSectionPath.cityOrRegion
+            ]
+            .compactMap { $0 }
+        )
+    }
 }
 
 enum AddPlaceNeighborhoodSelection: Hashable {
