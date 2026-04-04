@@ -140,7 +140,11 @@ enum FeastTheme {
 
         navigationAppearance.buttonAppearance = plainButtonAppearance
         navigationAppearance.backButtonAppearance = plainButtonAppearance
-        navigationAppearance.prominentButtonAppearance = prominentButtonAppearance
+        if #available(iOS 26.0, *) {
+            navigationAppearance.prominentButtonAppearance = prominentButtonAppearance
+        } else {
+            navigationAppearance.doneButtonAppearance = prominentButtonAppearance
+        }
 
         let navigationBarAppearance = UINavigationBar.appearance()
         navigationBarAppearance.standardAppearance = navigationAppearance
