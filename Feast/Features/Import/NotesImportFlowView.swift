@@ -1858,7 +1858,7 @@ private struct NotesImportSuccessView: View {
                 .frame(minHeight: proxy.size.height, alignment: .top)
                 .padding(.horizontal, FeastTheme.Spacing.large)
                 .padding(.top, FeastTheme.Spacing.large)
-                .padding(.bottom, FeastTheme.Spacing.xxLarge)
+                .padding(.bottom, successFooterBottomPadding(safeAreaInset: proxy.safeAreaInsets.bottom))
             }
         }
         .feastScrollableChrome()
@@ -1875,6 +1875,10 @@ private struct NotesImportSuccessView: View {
                 .accessibilityLabel("Close")
             }
         }
+    }
+
+    private func successFooterBottomPadding(safeAreaInset: CGFloat) -> CGFloat {
+        FeastTheme.Spacing.xxLarge + max(FeastTheme.Spacing.small, safeAreaInset * 0.25)
     }
 
     private var summarySection: some View {
