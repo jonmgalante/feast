@@ -770,8 +770,20 @@ private struct MapSavedPlaceFilterSheet: View {
         .listStyle(.insetGrouped)
         .navigationTitle("Filters")
         .navigationBarTitleDisplayMode(.inline)
-        .safeAreaInset(edge: .bottom) {
-            footerActions
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button("Clear All") {
+                    filters.reset()
+                }
+                .disabled(!filters.hasActiveFilters)
+            }
+
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Done") {
+                    onApply()
+                    dismiss()
+                }
+            }
         }
     }
 
@@ -855,27 +867,6 @@ private struct MapSavedPlaceFilterSheet: View {
         }
     }
 
-    private var footerActions: some View {
-        HStack(spacing: FeastTheme.Spacing.medium) {
-            Button("Clear All") {
-                filters.reset()
-            }
-            .buttonStyle(FeastQuietChipButtonStyle())
-            .disabled(!filters.hasActiveFilters)
-
-            Spacer(minLength: 0)
-
-            Button {
-                onApply()
-                dismiss()
-            } label: {
-                Text("Done")
-                    .frame(minWidth: 96)
-            }
-            .buttonStyle(FeastProminentButtonStyle())
-        }
-        .feastBottomBarChrome()
-    }
 }
 
 private struct MapSavedPlaceFilterRow: View {
