@@ -94,6 +94,7 @@ struct SavedPlaceDetailView: View {
                     AddPlaceView(
                         feastList: feastList,
                         initialSearchQuery: displayedPlace?.displayName ?? savedPlace.displayName,
+                        excludingSavedPlace: savedPlace,
                         onSelectPlace: { place in
                             selectedReplacementPlace = place
                             showingLocationPicker = false
@@ -582,6 +583,7 @@ struct SavedPlaceDetailView: View {
 
     private func saveChanges() {
         do {
+            try validateUniqueReplacementLocation()
             let selectedNeighborhood = try resolvedNeighborhoodForSave()
             try repository.update(
                 savedPlace,
@@ -608,6 +610,27 @@ struct SavedPlaceDetailView: View {
                 title: "Couldn't Save Changes",
                 message: errorMessage(for: error)
             )
+        }
+    }
+
+    private func validateUniqueReplacementLocation() throws {
+        guard
+            let replacementPlace = selectedReplacementPlace,
+            let feastList = savedPlace.feastList
+        else {
+            return
+        }
+
+        if replacementPlace.applePlaceID == savedPlace.applePlaceIDValue {
+            return
+        }
+
+        if try repository.hasSavedPlace(
+            withApplePlaceID: replacementPlace.applePlaceID,
+            in: feastList,
+            excluding: savedPlace
+        ) {
+            throw FeastRepository.SavedPlaceError.duplicateLocationInCity
         }
     }
 

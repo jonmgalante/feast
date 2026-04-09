@@ -26,6 +26,17 @@ final class FeastRepository {
         }
     }
 
+    enum SavedPlaceError: LocalizedError {
+        case duplicateLocationInCity
+
+        var errorDescription: String? {
+            switch self {
+            case .duplicateLocationInCity:
+                return "This exact Apple Maps place is already saved in this city."
+            }
+        }
+    }
+
     struct SavedPlaceDraft {
         let applePlaceID: String
         let displayNameSnapshot: String
@@ -123,6 +134,35 @@ final class FeastRepository {
             NSSortDescriptor(key: "displayNameSnapshot", ascending: true)
         ]
         return try context.fetch(request)
+    }
+
+    func hasSavedPlace(
+        withApplePlaceID applePlaceID: String,
+        in feastList: FeastList,
+        excluding excludedSavedPlace: SavedPlace? = nil
+    ) throws -> Bool {
+        guard
+            !feastList.isDeleted,
+            feastList.managedObjectContext === context,
+            let normalizedApplePlaceID = normalizedOptional(applePlaceID)
+        else {
+            return false
+        }
+
+        let request = SavedPlace.fetchRequest()
+        request.fetchLimit = 1
+
+        var predicates: [NSPredicate] = [
+            NSPredicate(format: "feastList == %@", feastList),
+            NSPredicate(format: "applePlaceID == %@", normalizedApplePlaceID)
+        ]
+
+        if let excludedSavedPlace {
+            predicates.append(NSPredicate(format: "SELF != %@", excludedSavedPlace))
+        }
+
+        request.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: predicates)
+        return try !context.fetch(request).isEmpty
     }
 
     func fetchPreviewFeastList(named name: String) -> FeastList {
@@ -238,6 +278,11 @@ final class FeastRepository {
             assertionFailure("Attempted to save a place into a neighborhood that belongs to a different city.")
         }
 
+        try validateUniqueSavedPlace(
+            withApplePlaceID: draft.applePlaceID,
+            in: draft.feastList
+        )
+
         let savedPlace = makeSavedPlace(
             applePlaceID: draft.applePlaceID,
             displayName: draft.displayNameSnapshot,
@@ -347,6 +392,20 @@ final class FeastRepository {
 
         if let listSection = metadata.listSection, listSection.feastList != savedPlace.feastList {
             assertionFailure("Attempted to save a place into a neighborhood that belongs to a different city.")
+        }
+
+        let currentApplePlaceID = normalizedOptional(savedPlace.applePlaceIDValue)
+        if
+            let location = metadata.location,
+            let feastList = savedPlace.feastList,
+            let candidateApplePlaceID = normalizedOptional(location.applePlaceID),
+            candidateApplePlaceID != currentApplePlaceID
+        {
+            try validateUniqueSavedPlace(
+                withApplePlaceID: candidateApplePlaceID,
+                in: feastList,
+                excluding: savedPlace
+            )
         }
 
         if let location = metadata.location {
@@ -629,6 +688,20 @@ final class FeastRepository {
         }
 
         return normalizedValues
+    }
+
+    private func validateUniqueSavedPlace(
+        withApplePlaceID applePlaceID: String,
+        in feastList: FeastList,
+        excluding excludedSavedPlace: SavedPlace? = nil
+    ) throws {
+        if try hasSavedPlace(
+            withApplePlaceID: applePlaceID,
+            in: feastList,
+            excluding: excludedSavedPlace
+        ) {
+            throw SavedPlaceError.duplicateLocationInCity
+        }
     }
 
     private func saveIfNeeded() throws {

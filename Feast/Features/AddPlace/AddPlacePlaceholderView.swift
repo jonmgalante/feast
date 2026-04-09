@@ -3,13 +3,17 @@ import SwiftUI
 
 struct AddPlaceView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.managedObjectContext) private var viewContext
     @Environment(\.applePlacesService) private var applePlacesService
+    @Environment(\.persistenceController) private var persistenceController
 
     @ObservedObject var feastList: FeastList
+    let excludedSavedPlace: SavedPlace?
     let onSelectPlace: ((ApplePlaceMatch) -> Void)?
 
     @State private var searchQuery = ""
     @State private var searchResults: [ApplePlaceMatch] = []
+    @State private var savedSearchResultIDs: Set<String> = []
     @State private var selectedPlace: ApplePlaceMatch?
     @State private var searchState: SearchState = .idle
     @FocusState private var isSearchFieldFocused: Bool
@@ -17,9 +21,11 @@ struct AddPlaceView: View {
     init(
         feastList: FeastList,
         initialSearchQuery: String = "",
+        excludingSavedPlace: SavedPlace? = nil,
         onSelectPlace: ((ApplePlaceMatch) -> Void)? = nil
     ) {
         self.feastList = feastList
+        self.excludedSavedPlace = excludingSavedPlace
         self.onSelectPlace = onSelectPlace
         _searchQuery = State(initialValue: initialSearchQuery)
     }
@@ -61,6 +67,21 @@ struct AddPlaceView: View {
                 onSaveComplete: { dismiss() }
             )
         }
+    }
+
+    private var repository: FeastRepository {
+        FeastRepository(
+            context: viewContext,
+            persistenceController: persistenceController
+        )
+    }
+
+    private var visibleSearchResults: [ApplePlaceMatch] {
+        guard let excludedApplePlaceID = excludedSavedPlace?.applePlaceIDValue else {
+            return searchResults
+        }
+
+        return searchResults.filter { $0.applePlaceID != excludedApplePlaceID }
     }
 
     private var searchSection: some View {
@@ -136,7 +157,7 @@ struct AddPlaceView: View {
                 )
             }
         case .loaded:
-            if searchResults.isEmpty {
+            if visibleSearchResults.isEmpty {
                 Section {
                     FeastFormGroup {
                         ContentUnavailableView(
@@ -153,22 +174,31 @@ struct AddPlaceView: View {
                 }
             } else {
                 Section {
-                    ForEach(searchResults) { place in
+                    ForEach(visibleSearchResults) { place in
+                        let isSaved = savedSearchResultIDs.contains(place.applePlaceID)
                         Button {
+                            guard !isSaved else {
+                                return
+                            }
+
                             if let onSelectPlace {
                                 onSelectPlace(place)
                             } else {
                                 selectedPlace = place
                             }
                         } label: {
-                            SearchResultRow(place: place)
+                            SearchResultRow(
+                                place: place,
+                                isSaved: isSaved
+                            )
                         }
                         .buttonStyle(.plain)
+                        .disabled(isSaved)
                     }
                 } header: {
                     FeastFormSectionHeader(
                         title: "Apple Maps Matches",
-                        subtitle: "\(searchResults.count) \(searchResults.count == 1 ? "result" : "results")"
+                        subtitle: "\(visibleSearchResults.count) \(visibleSearchResults.count == 1 ? "result" : "results")"
                     )
                 }
                 .feastSectionSurface()
@@ -197,6 +227,7 @@ struct AddPlaceView: View {
 
         guard trimmedQuery.count >= 2 else {
             searchResults = []
+            savedSearchResultIDs = []
             searchState = .idle
             return
         }
@@ -212,13 +243,39 @@ struct AddPlaceView: View {
             }
 
             searchResults = matches
+            updateSavedSearchResultIDs(for: matches)
             searchState = .loaded
         } catch is CancellationError {
             return
         } catch {
             searchResults = []
+            savedSearchResultIDs = []
             searchState = .failed(error.localizedDescription)
         }
+    }
+
+    private func updateSavedSearchResultIDs(for matches: [ApplePlaceMatch]) {
+        var savedIDs: Set<String> = []
+
+        for match in matches {
+            if match.applePlaceID == excludedSavedPlace?.applePlaceIDValue {
+                continue
+            }
+
+            guard
+                (try? repository.hasSavedPlace(
+                    withApplePlaceID: match.applePlaceID,
+                    in: feastList,
+                    excluding: excludedSavedPlace
+                )) == true
+            else {
+                continue
+            }
+
+            savedIDs.insert(match.applePlaceID)
+        }
+
+        savedSearchResultIDs = savedIDs
     }
 }
 
@@ -665,6 +722,7 @@ private struct AddPlaceSaveView: View {
 
     private func savePlace() {
         do {
+            try validateUniqueLocation()
             let selectedNeighborhood = try resolvedNeighborhoodForSave()
             try repository.createSavedPlace(
                 from: FeastRepository.SavedPlaceDraft(
@@ -687,6 +745,15 @@ private struct AddPlaceSaveView: View {
                 title: "Couldn’t Save Place",
                 message: errorMessage(for: error)
             )
+        }
+    }
+
+    private func validateUniqueLocation() throws {
+        if try repository.hasSavedPlace(
+            withApplePlaceID: place.applePlaceID,
+            in: feastList
+        ) {
+            throw FeastRepository.SavedPlaceError.duplicateLocationInCity
         }
     }
 
@@ -842,6 +909,7 @@ private struct AddPlaceAlertState: Identifiable {
 
 private struct SearchResultRow: View {
     let place: ApplePlaceMatch
+    let isSaved: Bool
 
     var body: some View {
         HStack(alignment: .top, spacing: FeastTheme.Spacing.small) {
@@ -874,11 +942,18 @@ private struct SearchResultRow: View {
 
             Spacer(minLength: 0)
 
-            Image(systemName: "chevron.right")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(FeastTheme.Colors.secondaryText)
+            if isSaved {
+                Text("Saved")
+                    .font(FeastTheme.Typography.rowUtility.weight(.semibold))
+                    .foregroundStyle(FeastTheme.Colors.secondaryText)
+            } else {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(FeastTheme.Colors.secondaryText)
+            }
         }
         .padding(.vertical, FeastTheme.Spacing.small)
+        .opacity(isSaved ? 0.6 : 1)
     }
 }
 
