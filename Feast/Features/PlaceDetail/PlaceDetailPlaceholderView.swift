@@ -17,6 +17,7 @@ struct SavedPlaceDetailView: View {
     @State private var isOpeningInMaps = false
     @State private var showingDeleteConfirmation = false
     @State private var showingLocationPicker = false
+    @State private var hasAlternativeLocations: Bool?
     @State private var detailAlert: DetailAlertState?
 
     @State private var status: PlaceStatus
@@ -73,6 +74,9 @@ struct SavedPlaceDetailView: View {
         }
         .task(id: savedPlace.applePlaceIDValue) {
             await resolvePlace()
+        }
+        .task(id: alternativeLocationCheckKey) {
+            await refreshAlternativeLocationAvailability()
         }
         .onAppear {
             reloadFormStateIfNeeded()
@@ -166,6 +170,24 @@ struct SavedPlaceDetailView: View {
 
     private var displayedPlace: ApplePlaceMatch? {
         selectedReplacementPlace ?? resolvedPlace
+    }
+
+    private var replacementLocationSearchQuery: String {
+        resolvedPlace?.displayName ?? savedPlace.displayName
+    }
+
+    private var alternativeLocationCheckKey: String {
+        let cityKey = savedPlace.feastList?.objectID.uriRepresentation().absoluteString ?? "nil"
+        let placeKey = savedPlace.applePlaceIDValue ?? "nil"
+        return "\(cityKey)|\(placeKey)|\(replacementLocationSearchQuery)"
+    }
+
+    private var shouldShowPickDifferentLocation: Bool {
+        guard savedPlace.feastList != nil else {
+            return false
+        }
+
+        return hasAlternativeLocations == true
     }
 
     private var neighborhoodContextText: String {
@@ -308,7 +330,7 @@ struct SavedPlaceDetailView: View {
                     .disabled(isOpeningInMaps)
                 }
 
-                if savedPlace.feastList != nil {
+                if shouldShowPickDifferentLocation {
                     FeastFormDivider()
 
                     Button {
@@ -578,6 +600,51 @@ struct SavedPlaceDetailView: View {
                 title: "Apple Maps Unavailable",
                 message: error.localizedDescription
             )
+        }
+    }
+
+    @MainActor
+    private func refreshAlternativeLocationAvailability() async {
+        guard
+            let feastList = savedPlace.feastList,
+            savedPlace.applePlaceIDValue != nil,
+            let query = AddPlaceSearchSupport.normalizedSearchQuery(
+                from: replacementLocationSearchQuery
+            )
+        else {
+            hasAlternativeLocations = nil
+            return
+        }
+
+        hasAlternativeLocations = nil
+
+        do {
+            let matches = try await AddPlaceSearchSupport.searchMatches(
+                for: query,
+                using: applePlacesService
+            )
+
+            if Task.isCancelled {
+                return
+            }
+
+            let savedResultIDs = AddPlaceSearchSupport.savedSearchResultIDs(
+                for: matches,
+                in: feastList,
+                excluding: savedPlace,
+                repository: repository
+            )
+            let validAlternatives = AddPlaceSearchSupport.visibleMatches(
+                from: matches,
+                excluding: savedPlace
+            )
+            .filter { !savedResultIDs.contains($0.applePlaceID) }
+
+            hasAlternativeLocations = !validAlternatives.isEmpty
+        } catch is CancellationError {
+            return
+        } catch {
+            hasAlternativeLocations = nil
         }
     }
 

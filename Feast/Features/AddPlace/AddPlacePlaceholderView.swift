@@ -77,11 +77,10 @@ struct AddPlaceView: View {
     }
 
     private var visibleSearchResults: [ApplePlaceMatch] {
-        guard let excludedApplePlaceID = excludedSavedPlace?.applePlaceIDValue else {
-            return searchResults
-        }
-
-        return searchResults.filter { $0.applePlaceID != excludedApplePlaceID }
+        AddPlaceSearchSupport.visibleMatches(
+            from: searchResults,
+            excluding: excludedSavedPlace
+        )
     }
 
     private var searchSection: some View {
@@ -223,9 +222,7 @@ struct AddPlaceView: View {
 
     @MainActor
     private func search(for rawQuery: String) async {
-        let trimmedQuery = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        guard trimmedQuery.count >= 2 else {
+        guard let query = AddPlaceSearchSupport.normalizedSearchQuery(from: rawQuery) else {
             searchResults = []
             savedSearchResultIDs = []
             searchState = .idle
@@ -236,14 +233,22 @@ struct AddPlaceView: View {
 
         do {
             try await Task.sleep(nanoseconds: 300_000_000)
-            let matches = try await applePlacesService.search(query: trimmedQuery)
+            let matches = try await AddPlaceSearchSupport.searchMatches(
+                for: query,
+                using: applePlacesService
+            )
 
             if Task.isCancelled {
                 return
             }
 
             searchResults = matches
-            updateSavedSearchResultIDs(for: matches)
+            savedSearchResultIDs = AddPlaceSearchSupport.savedSearchResultIDs(
+                for: matches,
+                in: feastList,
+                excluding: excludedSavedPlace,
+                repository: repository
+            )
             searchState = .loaded
         } catch is CancellationError {
             return
@@ -254,29 +259,6 @@ struct AddPlaceView: View {
         }
     }
 
-    private func updateSavedSearchResultIDs(for matches: [ApplePlaceMatch]) {
-        var savedIDs: Set<String> = []
-
-        for match in matches {
-            if match.applePlaceID == excludedSavedPlace?.applePlaceIDValue {
-                continue
-            }
-
-            guard
-                (try? repository.hasSavedPlace(
-                    withApplePlaceID: match.applePlaceID,
-                    in: feastList,
-                    excluding: excludedSavedPlace
-                )) == true
-            else {
-                continue
-            }
-
-            savedIDs.insert(match.applePlaceID)
-        }
-
-        savedSearchResultIDs = savedIDs
-    }
 }
 
 private struct AddPlaceSaveView: View {
@@ -962,6 +944,65 @@ private enum SearchState {
     case loading
     case loaded
     case failed(String)
+}
+
+enum AddPlaceSearchSupport {
+    static func normalizedSearchQuery(from rawQuery: String) -> String? {
+        let trimmedQuery = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmedQuery.count >= 2 else {
+            return nil
+        }
+
+        return trimmedQuery
+    }
+
+    @MainActor
+    static func searchMatches(
+        for query: String,
+        using applePlacesService: ApplePlacesService
+    ) async throws -> [ApplePlaceMatch] {
+        try await applePlacesService.search(query: query)
+    }
+
+    static func visibleMatches(
+        from matches: [ApplePlaceMatch],
+        excluding excludedSavedPlace: SavedPlace?
+    ) -> [ApplePlaceMatch] {
+        guard let excludedApplePlaceID = excludedSavedPlace?.applePlaceIDValue else {
+            return matches
+        }
+
+        return matches.filter { $0.applePlaceID != excludedApplePlaceID }
+    }
+
+    static func savedSearchResultIDs(
+        for matches: [ApplePlaceMatch],
+        in feastList: FeastList,
+        excluding excludedSavedPlace: SavedPlace?,
+        repository: FeastRepository
+    ) -> Set<String> {
+        var savedIDs: Set<String> = []
+
+        for match in matches {
+            if match.applePlaceID == excludedSavedPlace?.applePlaceIDValue {
+                continue
+            }
+
+            guard
+                (try? repository.hasSavedPlace(
+                    withApplePlaceID: match.applePlaceID,
+                    in: feastList,
+                    excluding: excludedSavedPlace
+                )) == true
+            else {
+                continue
+            }
+
+            savedIDs.insert(match.applePlaceID)
+        }
+
+        return savedIDs
+    }
 }
 
 enum PlaceNeighborhoodSuggestionSupport {
