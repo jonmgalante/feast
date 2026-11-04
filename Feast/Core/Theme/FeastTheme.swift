@@ -18,7 +18,7 @@ enum FeastTheme {
         static let surfaceBackground = Palette.warmStoneSurface
 
         static let primaryText = Palette.charcoal
-        static let secondaryText = Palette.sageGray
+        static let secondaryText = Color(hex: 0x536253)
         static let tertiaryText = Palette.blueSlate
 
         static let primaryActionFill = Palette.saffron
@@ -27,6 +27,34 @@ enum FeastTheme {
         static let accentSelection = Palette.saffron
         static let dividerBorder = Palette.sageGray.opacity(0.28)
         static let mapPinTint = Palette.saffron
+    }
+
+    /// Shared Feast surfaces and text for screens that follow system appearance.
+    /// Existing fixed-stone screens keep their established Colors unchanged.
+    enum AdaptiveColors {
+        private static func adaptive(_ light: Color, dark: UIColor) -> Color {
+            Color(uiColor: UIColor { $0.userInterfaceStyle == .dark ? dark : UIColor(light) })
+        }
+        static let groupedBackground = adaptive(Colors.groupedBackground, dark: .systemGroupedBackground)
+        static let surfaceBackground = adaptive(Colors.surfaceBackground, dark: .secondarySystemGroupedBackground)
+        static let primaryText = adaptive(Colors.primaryText, dark: UIColor(Palette.warmStoneSurface))
+        static let secondaryText = adaptive(Colors.secondaryText, dark: UIColor(Palette.stone).withAlphaComponent(0.75))
+        static let utilityAction = adaptive(Colors.secondaryAction, dark: UIColor(Palette.stone))
+        static let dividerBorder = adaptive(Colors.dividerBorder, dark: UIColor(Palette.sageGray).withAlphaComponent(0.5))
+    }
+
+    enum TabBar {
+        // SwiftUI selection and UIKit appearance must resolve the same app tint.
+        static let selectedColor = UIColor { $0.userInterfaceStyle == .dark ? .white : UIColor(Colors.primaryText) }
+        static let selectedTint = Color(uiColor: selectedColor)
+    }
+
+    enum StatusBadges {
+        static func colors(for status: PlaceStatus, dark: Bool) -> (fill: Color, text: Color) {
+            let palette = StatusBadgePalette.colors(for: status)
+            return (Color(hex: dark ? palette.darkFill : palette.lightFill),
+                    Color(hex: dark ? palette.darkText : palette.lightText))
+        }
     }
 
     enum Chrome {
@@ -84,7 +112,7 @@ enum FeastTheme {
 
     static func applyAppearance() {
         let primaryText = UIColor(Palette.charcoal)
-        let secondaryText = UIColor(Palette.sageGray)
+        let secondaryText = UIColor(Colors.secondaryText)
         let secondaryAction = UIColor(Palette.blueSlate)
         let navigationBackground = UIColor(Palette.stone).withAlphaComponent(0.92)
         let tabBarBackground = UIColor(Palette.stone).withAlphaComponent(0.95)
@@ -152,6 +180,10 @@ enum FeastTheme {
         navigationBarAppearance.compactAppearance = navigationAppearance
         navigationBarAppearance.tintColor = secondaryAction
 
+        // Native tab labels/icons need contrast on the system's dark tab surface.
+        // Preserve Feast's existing light colors and native typography.
+        let selectedTabColor = TabBar.selectedColor
+        let unselectedTabColor = UIColor { $0.userInterfaceStyle == .dark ? .lightGray : secondaryText }
         let tabBarAppearance = UITabBarAppearance()
         tabBarAppearance.configureWithDefaultBackground()
         tabBarAppearance.backgroundEffect = UIBlurEffect(style: .systemThinMaterial)
@@ -163,14 +195,14 @@ enum FeastTheme {
             tabBarAppearance.inlineLayoutAppearance,
             tabBarAppearance.compactInlineLayoutAppearance
         ] {
-            itemAppearance.normal.iconColor = secondaryText
+            itemAppearance.normal.iconColor = unselectedTabColor
             itemAppearance.normal.titleTextAttributes = [
-                .foregroundColor: secondaryText,
+                .foregroundColor: unselectedTabColor,
                 .font: UIFont.systemFont(ofSize: 10, weight: .medium)
             ]
-            itemAppearance.selected.iconColor = primaryText
+            itemAppearance.selected.iconColor = selectedTabColor
             itemAppearance.selected.titleTextAttributes = [
-                .foregroundColor: primaryText,
+                .foregroundColor: selectedTabColor,
                 .font: UIFont.systemFont(ofSize: 10, weight: .semibold)
             ]
         }
@@ -178,10 +210,13 @@ enum FeastTheme {
         let tabBarProxy = UITabBar.appearance()
         tabBarProxy.standardAppearance = tabBarAppearance
         tabBarProxy.scrollEdgeAppearance = tabBarAppearance
-        tabBarProxy.tintColor = primaryText
-        tabBarProxy.unselectedItemTintColor = secondaryText
+        tabBarProxy.tintColor = selectedTabColor
+        tabBarProxy.unselectedItemTintColor = unselectedTabColor
 
         UISearchBar.appearance().tintColor = secondaryAction
+        // Search chrome sits on Feast's fixed light stone surfaces in either appearance.
+        UISearchTextField.appearance().textColor = primaryText
+        UISearchTextField.appearance().tintColor = secondaryAction
     }
 }
 
@@ -260,19 +295,22 @@ struct FeastProminentButtonStyle: ButtonStyle {
 
 struct FeastInlineActionButtonStyle: ButtonStyle {
     @Environment(\.isEnabled) private var isEnabled
+    var adaptive = false
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(FeastTheme.Typography.supporting.weight(.semibold))
             .foregroundStyle(foregroundColor(isPressed: configuration.isPressed))
             .multilineTextAlignment(.leading)
-            .lineLimit(2)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
     }
 
     private func foregroundColor(isPressed: Bool) -> Color {
         let baseOpacity = isEnabled ? 1.0 : 0.45
         let pressedOpacity = isPressed ? 0.72 : 1.0
-        return FeastTheme.Colors.secondaryAction.opacity(baseOpacity * pressedOpacity)
+        return (adaptive ? FeastTheme.AdaptiveColors.utilityAction : FeastTheme.Colors.secondaryAction).opacity(baseOpacity * pressedOpacity)
     }
 }
 
@@ -284,10 +322,11 @@ struct FeastQuietChipButtonStyle: ButtonStyle {
             .font(FeastTheme.Typography.rowUtility)
             .foregroundStyle(foregroundColor(isPressed: configuration.isPressed))
             .multilineTextAlignment(.center)
-            .lineLimit(2)
-            .minimumScaleFactor(0.9)
+            .fixedSize(horizontal: false, vertical: true)
             .padding(.horizontal, FeastTheme.Spacing.medium)
             .padding(.vertical, 10)
+            .frame(minHeight: 44)
+            .contentShape(Capsule())
             .background {
                 Capsule(style: .continuous)
                     .fill(FeastTheme.Colors.surfaceBackground.opacity(backgroundOpacity(isPressed: configuration.isPressed)))
@@ -511,6 +550,7 @@ struct FeastMultilineTextEditor: View {
                 .font(FeastTheme.Typography.supporting)
                 .foregroundStyle(FeastTheme.InputField.text)
                 .tint(FeastTheme.InputField.selection)
+                .scrollDismissesKeyboard(.interactively)
                 .scrollContentBackground(.hidden)
                 .frame(
                     minWidth: nil,
@@ -586,6 +626,9 @@ struct FeastFormDivider: View {
 private struct FeastScrollableChromeModifier: ViewModifier {
     func body(content: Content) -> some View {
         content
+            .scrollDismissesKeyboard(.interactively)
+            .foregroundStyle(FeastTheme.Colors.primaryText)
+            .toolbarColorScheme(.light, for: .navigationBar)
             .scrollContentBackground(.hidden)
             .background(FeastTheme.Colors.groupedBackground.ignoresSafeArea())
             .listRowSeparatorTint(FeastTheme.Colors.dividerBorder)

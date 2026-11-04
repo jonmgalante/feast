@@ -13,8 +13,11 @@ struct FeastPreviewContainer<Content: View>: View {
         FeastTheme.applyAppearance()
     }
 
+    @StateObject private var browse = SavedPlaceBrowseState()
+
     var body: some View {
         content
+            .environmentObject(browse)
             .environment(\.managedObjectContext, services.persistenceController.viewContext)
             .environment(\.persistenceController, services.persistenceController)
             .environment(\.applePlacesService, services.applePlacesService)

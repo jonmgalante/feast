@@ -1,4 +1,5 @@
 import CloudKit
+import CoreData
 import SwiftUI
 import UIKit
 import os
@@ -60,6 +61,13 @@ struct FeastApp: App {
     private let services: AppServices
 
     init() {
+#if targetEnvironment(simulator) && FEAST_OWNER_VALIDATION
+        if AskOwnerEnrollment.pilotRequested {Task {await AskOwnerEnrollment.researchPilotIfRequested()}}
+        else {AskOwnerEnrollment.runIfRequested();Task {await AskOwnerEnrollment.renewIfRequested();await AskOwnerEnrollment.readBudgetIfRequested()}}
+#endif
+#if DEBUG && targetEnvironment(simulator)
+        AskHostedSimulator.rememberApprovedConfiguration()
+#endif
         let services = AppServices.live
         self.services = services
         FeastTheme.applyAppearance()

@@ -12,40 +12,11 @@ struct ApplePlaceCoordinate: Hashable {
     }
 }
 
-struct ApplePlaceMatch: Identifiable, Hashable {
-    let applePlaceID: String
-    let displayName: String
-    let secondaryText: String
-    let coordinate: ApplePlaceCoordinate?
-    let suggestedSectionPath: ApplePlaceSectionPathSuggestion
-    let websiteURL: String?
-    let instagramURL: String?
-
-    var id: String { applePlaceID }
-}
-
-struct ApplePlaceSectionPathSuggestion: Hashable {
-    let cityOrRegion: String?
-    let neighborhood: String?
-
-    var displayText: String? {
-        let components = [cityOrRegion, neighborhood].compactMap { value in
-            let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            return trimmed.isEmpty ? nil : trimmed
-        }
-
-        guard !components.isEmpty else {
-            return nil
-        }
-
-        return components.joined(separator: " • ")
-    }
-}
-
 struct ApplePlacesService {
     private enum Mode {
         case live
         case preview
+        case liveSearchDemo
     }
 
     private let mode: Mode
@@ -61,7 +32,7 @@ struct ApplePlacesService {
     @MainActor
     func search(query: String) async throws -> [ApplePlaceMatch] {
         switch mode {
-        case .live:
+        case .live, .liveSearchDemo:
             let request = MKLocalSearch.Request(naturalLanguageQuery: query)
             request.resultTypes = .pointOfInterest
 
@@ -113,7 +84,11 @@ struct ApplePlacesService {
     @MainActor
     func resolve(placeID: String) async throws -> ApplePlaceMatch? {
         switch mode {
-        case .live:
+        case .live, .liveSearchDemo:
+            if case .liveSearchDemo = mode,
+               let fixture = Self.previewMatches.first(where: { $0.applePlaceID == placeID }) {
+                return fixture
+            }
             guard let mapItem = try await Self.resolvedMapItem(for: placeID) else {
                 return nil
             }
@@ -126,7 +101,9 @@ struct ApplePlacesService {
     @MainActor
     func openInMaps(placeID: String) async throws -> Bool {
         switch mode {
-        case .live:
+        case .live, .liveSearchDemo:
+            if case .liveSearchDemo = mode,
+               Self.previewMatches.contains(where: { $0.applePlaceID == placeID }) { return false }
             guard let mapItem = try await Self.resolvedMapItem(for: placeID) else {
                 return false
             }
@@ -140,70 +117,15 @@ struct ApplePlacesService {
 
 extension ApplePlacesService {
     static let preview = ApplePlacesService(mode: .preview)
+#if DEBUG
+    // Discovery uses real Maps; seeded synthetic identifiers still resolve locally.
+    static let liveSearchDemo = ApplePlacesService(mode: .liveSearchDemo)
+#endif
     nonisolated private static let logger = Logger(subsystem: "com.jongalante.Feast", category: "ApplePlaces")
 
-    private static let previewMatches: [ApplePlaceMatch] = [
-        ApplePlaceMatch(
-            applePlaceID: "applemaps-rolo-s-ridgewood",
-            displayName: "Rolo's",
-            secondaryText: "Ridgewood, Queens, NY",
-            coordinate: ApplePlaceCoordinate(latitude: 40.7068, longitude: -73.9215),
-            suggestedSectionPath: ApplePlaceSectionPathSuggestion(
-                cityOrRegion: "NYC",
-                neighborhood: "Ridgewood"
-            ),
-            websiteURL: nil,
-            instagramURL: nil
-        ),
-        ApplePlaceMatch(
-            applePlaceID: "applemaps-dhamaka-les",
-            displayName: "Dhamaka",
-            secondaryText: "Lower East Side, New York, NY",
-            coordinate: ApplePlaceCoordinate(latitude: 40.7180, longitude: -73.9897),
-            suggestedSectionPath: ApplePlaceSectionPathSuggestion(
-                cityOrRegion: "NYC",
-                neighborhood: "Lower East Side"
-            ),
-            websiteURL: nil,
-            instagramURL: nil
-        ),
-        ApplePlaceMatch(
-            applePlaceID: "applemaps-librae-bakery",
-            displayName: "Librae Bakery",
-            secondaryText: "East Williamsburg, Brooklyn, NY",
-            coordinate: ApplePlaceCoordinate(latitude: 40.7147, longitude: -73.9377),
-            suggestedSectionPath: ApplePlaceSectionPathSuggestion(
-                cityOrRegion: "NYC",
-                neighborhood: "East Williamsburg"
-            ),
-            websiteURL: nil,
-            instagramURL: nil
-        ),
-        ApplePlaceMatch(
-            applePlaceID: "applemaps-st-john-soho",
-            displayName: "St. JOHN",
-            secondaryText: "Soho, London",
-            coordinate: ApplePlaceCoordinate(latitude: 51.5146, longitude: -0.1357),
-            suggestedSectionPath: ApplePlaceSectionPathSuggestion(
-                cityOrRegion: "London",
-                neighborhood: "Soho"
-            ),
-            websiteURL: nil,
-            instagramURL: nil
-        ),
-        ApplePlaceMatch(
-            applePlaceID: "applemaps-middle-child-clubhouse",
-            displayName: "Middle Child Clubhouse",
-            secondaryText: "Fishtown, Philadelphia, PA",
-            coordinate: ApplePlaceCoordinate(latitude: 39.9692, longitude: -75.1336),
-            suggestedSectionPath: ApplePlaceSectionPathSuggestion(
-                cityOrRegion: "Philadelphia",
-                neighborhood: "Fishtown"
-            ),
-            websiteURL: nil,
-            instagramURL: nil
-        )
-    ]
+#if !FEAST_TESTS
+    static let previewMatches: [ApplePlaceMatch] = []
+#endif
 
     @MainActor
     private static func startSearch(request: MKLocalSearch.Request) async throws -> MKLocalSearch.Response {
@@ -248,8 +170,8 @@ extension ApplePlacesService {
         }
 
         let displayName = normalized(mapItem.name) ?? "Unnamed Place"
-        let secondaryText = shortAddress(from: mapItem)
-            ?? fullAddress(from: mapItem)
+        let secondaryText = fullAddress(from: mapItem)
+            ?? shortAddress(from: mapItem)
             ?? ""
         let cityOrRegion = suggestedCityOrRegion(from: mapItem)
         let neighborhoodContext = NeighborhoodSuggestionContext(
@@ -278,7 +200,12 @@ extension ApplePlacesService {
                 neighborhood: neighborhood
             ),
             websiteURL: urlAutofill.websiteURL,
-            instagramURL: urlAutofill.instagramURL
+            instagramURL: urlAutofill.instagramURL,
+            localityIdentity: normalized(mapItem.placemark.locality).flatMap { locality in
+                guard let area = normalized(mapItem.placemark.administrativeArea), let country = normalized(mapItem.placemark.isoCountryCode) else { return nil }
+                return ApplePlaceLocalityIdentity(locality: locality, administrativeArea: area, countryCode: country)
+            },
+            suggestedPlaceType: mapItem.pointOfInterestCategory == .cafe ? .cafe : mapItem.pointOfInterestCategory == .bakery ? .bakery : mapItem.pointOfInterestCategory == .restaurant ? .restaurant : nil
         )
     }
 
@@ -860,7 +787,7 @@ private enum ApplePlacesError: LocalizedError {
 }
 
 private struct ApplePlacesServiceKey: EnvironmentKey {
-    static let defaultValue: ApplePlacesService = .preview
+    static let defaultValue = ApplePlacesService()
 }
 
 extension EnvironmentValues {

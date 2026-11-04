@@ -1,0 +1,78 @@
+import Foundation
+import Security
+import CryptoKit
+import Darwin
+
+// Trusted, fixed-purpose bridge: no arbitrary command, URL, script or token export.
+let service="com.jongalante.Feast.cloudflare-deployment",account="feast-workers"
+let repository="/tmp/feast-evidence-limit-worktree"
+let packet="/tmp/feast-evidence-limit-reviewed"
+let pins:[String:String] = @@REVIEWED_PINS@@
+func verifiedFiles() -> Bool {
+    pins.allSatisfy { path,hash in
+        guard let data=try? Data(contentsOf:URL(fileURLWithPath:repository+"/"+path)) else {return false}
+        return SHA256.hash(data:data).map {String(format:"%02x",$0)}.joined()==hash
+    }
+}
+func identity() -> [String:Any] {
+    [kSecClass as String:kSecClassGenericPassword,kSecAttrService as String:service,kSecAttrAccount as String:account,kSecAttrSynchronizable as String:false]
+}
+func storeStatus(_ state:String,_ status:OSStatus? = nil) {
+    var value:[String:Any] = ["state":state,"checkedAt":ISO8601DateFormatter().string(from:Date())]
+    if let status {value["osStatus"]=status}
+    if let data=try? JSONSerialization.data(withJSONObject:value,options:.sortedKeys) {
+        try? data.write(to:URL(fileURLWithPath:"/tmp/feast-deployment-access-reviewed/store-status.json"),options:.atomic)
+    }
+}
+func stop(_ text:String) -> Never { print("STOP: "+text);exit(1) }
+var limit=rlimit(rlim_cur:0,rlim_max:0);guard setrlimit(RLIMIT_CORE,&limit)==0 else {stop("core-dump protection unavailable; no credential access.")}
+let args=Array(CommandLine.arguments.dropFirst())
+guard verifiedFiles() else {stop("reviewed updater files changed; no credential access.")}
+if args == ["--self-test"] {print("PASS reviewed file pins; no Keychain/network access.");exit(0)}
+if args == ["--store"] {
+    guard isatty(STDIN_FILENO)==1,isatty(STDERR_FILENO)==1 else {stop("hidden entry requires Terminal.")}
+    var query=identity();query[kSecReturnAttributes as String]=true
+    let status=SecItemCopyMatching(query as CFDictionary,nil)
+    guard status==errSecItemNotFound else {stop("credential already exists or Keychain unavailable; no overwrite.")}
+    storeStatus("awaiting-hidden-entry")
+    guard let raw=getpass("Approved 30-day Feast deployment token (hidden): ") else {stop("entry cancelled.")}
+    let length=strlen(raw)
+    defer {for i in 0..<length {raw[i]=0}}
+    guard (20...200).contains(length) else {stop("invalid token format.")}
+    var data=Data(bytes:raw,count:length)
+    defer {data.resetBytes(in:0..<data.count)}
+    guard data.allSatisfy({(48...57).contains($0)||(65...90).contains($0)||(97...122).contains($0)||$0==45||$0==95}) else {stop("invalid token format.")}
+    var item=identity();item[kSecValueData as String]=data;item[kSecAttrAccessible as String]=kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+    let stored=SecItemAdd(item as CFDictionary,nil)
+    guard stored==errSecSuccess else {storeStatus("storage-failed",stored);stop("Keychain storage failed (OSStatus \(stored)); no deployment attempted.")}
+    for i in 0..<length {raw[i]=0};data.resetBytes(in:0..<data.count)
+    storeStatus("stored",stored)
+    print("Feast deployment token stored in Mac Keychain. No deployment or model call made.");exit(0)
+}
+let renewing=args == ["--renew-owner"]
+let inspecting=args.count==2 && args[0]=="--inspect"
+let deployingOwner=args.count==4 && args[0]=="--deploy-owner"
+if renewing || inspecting || deployingOwner || (args.count==4 && args[0]=="--deploy") {
+    let receipt=renewing ? "/tmp/feast-owner-renewal-reviewed/renewal-receipt.json" : (inspecting ? args[1] : args[3])
+    guard (renewing || inspecting || (UUID(uuidString:args[1]) != nil && UUID(uuidString:args[2]) != nil)),
+          (renewing || receipt.range(of:"^/tmp/feast-production-only-[A-Za-z0-9_-]+\\.json$",options:.regularExpression) != nil),!FileManager.default.fileExists(atPath:receipt) else {stop("full UUIDs and fresh reviewed receipt path required; no credential access.")}
+    var query=identity();query[kSecReturnData as String]=true;query[kSecMatchLimit as String]=kSecMatchLimitOne
+    var value:CFTypeRef?;let status=SecItemCopyMatching(query as CFDictionary,&value)
+    guard status==errSecSuccess,var data=value as? Data else {stop("Keychain access unavailable (OSStatus \(status)); no deployment attempted.")}
+    value=nil;defer {data.resetBytes(in:0..<data.count)}
+    guard (20...200).contains(data.count),data.allSatisfy({(48...57).contains($0)||(65...90).contains($0)||(97...122).contains($0)||$0==45||$0==95}) else {stop("stored credential format invalid.")}
+    let pipe=Pipe(),process=Process()
+    process.executableURL=URL(fileURLWithPath:"/usr/bin/python3")
+    process.currentDirectoryURL=URL(fileURLWithPath:repository)
+    process.environment=["PATH":"/usr/bin:/bin:/usr/sbin:/sbin","LANG":"en_US.UTF-8","LC_ALL":"en_US.UTF-8"]
+    let common=["-I","-B",repository+"/Backend/feast-production/tools/update-production-code.py",packet,"--receipt",receipt,"--token-stdin"]
+    process.arguments=renewing ? ["-I","-B",repository+"/Backend/feast-production/tools/renew-owner-access.py"] : common + (inspecting ? ["--inspect-current"] : ["--expected-production",args[1].lowercased(),"--expected-owner",args[2].lowercased(),deployingOwner ? "--update-owner" : "--update-production"])
+    process.standardInput=pipe
+    do {
+        try process.run()
+        try pipe.fileHandleForWriting.write(contentsOf:data)
+        try pipe.fileHandleForWriting.close()
+        process.waitUntilExit();let status=process.terminationStatus;data.resetBytes(in:0..<data.count);exit(status)
+    } catch {stop("deployment bridge stopped; inspect receipt before any retry.")}
+}
+stop("supported actions: --self-test, --store, or reviewed --deploy full-production-UUID full-owner-UUID fresh-receipt.")

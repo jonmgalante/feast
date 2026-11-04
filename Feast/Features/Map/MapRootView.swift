@@ -3,7 +3,10 @@ import MapKit
 import SwiftUI
 
 struct MapRootView: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @EnvironmentObject private var browse: SavedPlaceBrowseState
     @Environment(\.managedObjectContext) private var viewContext
+    @Environment(\.persistenceController) private var persistenceController
     @Environment(\.applePlacesService) private var applePlacesService
 
     @FetchRequest(fetchRequest: Self.feastListsFetchRequest, animation: .default)
@@ -12,16 +15,23 @@ struct MapRootView: View {
     @FetchRequest(fetchRequest: Self.savedPlacesFetchRequest, animation: .default)
     private var savedPlaces: FetchedResults<SavedPlace>
 
-    @SceneStorage("map.selectedFeastListURI") private var selectedFeastListURI = ""
+    @State private var discoveryCityURI: String?
+    @State private var presentedMarker: SavedPlaceMapMarker?
+    @State private var displayedScope: String?
+    @State private var fittedScopes: Set<String> = []
+    @StateObject private var nearby = NearbyLocationService()
+    @State private var nearbyScope: String?
     @State private var cameraPosition: MapCameraPosition = .automatic
+    @State private var markerLookup = MapPlaceLookup()
+    @State private var markerGeneration = UUID()
+    @State private var markerRetry = 0
     @State private var markerItems: [SavedPlaceMapMarker] = []
     @State private var selectedMarker: SavedPlaceMapMarker?
     @State private var isResolvingMarkers = false
     @State private var unresolvedPlaceCount = 0
     @State private var showingExploreSearch = false
     @State private var showingSavedPlaceFilters = false
-    @State private var savedPlaceFilters = MapSavedPlaceFilters()
-    @State private var draftSavedPlaceFilters = MapSavedPlaceFilters()
+    private var savedPlaceFilters: SavedPlaceSearchFilters { browse.filters }
 
     private static let feastListsFetchRequest: NSFetchRequest<FeastList> = {
         let request = FeastList.fetchRequest()
@@ -43,12 +53,31 @@ struct MapRootView: View {
 
     var body: some View {
         content
+            .toolbar {
+                if unresolvedPlaceCount > 0 && !isResolvingMarkers && !filteredMarkerItems.isEmpty {
+                    Button("Retry Missing Pins") { markerRetry += 1 }
+                }
+            }
+            .onDisappear { nearby.cancel() }
+            .onChange(of: browse.selectedTab) { _, tab in if tab != 1 { nearby.cancel() } }
+            .onChange(of: browse.scopeKey) { _, _ in nearby.cancel() }
+            .onChange(of: nearby.resultID) { _, _ in
+                guard let fix = nearby.location, nearbyScope == browse.scopeKey, browse.selectedTab == 1 else { return }
+                let region = MKCoordinateRegion(center: fix.coordinate, latitudinalMeters: 2_000, longitudinalMeters: 2_000)
+                guard browse.rememberNearbyViewport(SavedMapViewport(latitude: region.center.latitude, longitude: region.center.longitude,
+                    latitudeDelta: region.span.latitudeDelta, longitudeDelta: region.span.longitudeDelta), requestedScope: nearbyScope ?? "") else { return }
+                cameraPosition = .region(region)
+            }
+            .alert("Location Unavailable", isPresented: Binding(get: { nearby.errorMessage != nil }, set: { if !$0 { nearby.errorMessage = nil } })) {
+                Button("OK") { nearby.errorMessage = nil }
+            } message: { Text(nearby.errorMessage ?? "") }
+            .onChange(of: feastLists.map(\.objectURIString)) { _, values in browse.validateCities(Set(values)) }
             .navigationTitle("Map")
             .navigationBarTitleDisplayMode(.inline)
-            .task(id: markerResolutionKey) {
+            .task(id: markerResolutionKey + "|\(markerRetry)") {
                 await resolveMarkers()
             }
-            .navigationDestination(item: $selectedMarker) { marker in
+            .navigationDestination(item: $presentedMarker) { marker in
                 if let savedPlace = savedPlace(for: marker.savedPlaceObjectID) {
                     SavedPlaceDetailView(savedPlace: savedPlace)
                 } else {
@@ -59,28 +88,26 @@ struct MapRootView: View {
                     )
                 }
             }
+            .onChange(of: selectedMarker) { _, marker in
+                if let marker { presentedMarker = marker }
+            }
+            .onChange(of: presentedMarker) { _, marker in
+                if marker == nil { selectedMarker = nil }
+            }
             .sheet(isPresented: $showingExploreSearch) {
                 NavigationStack {
-                    if let selectedFeastList {
-                        AddPlaceView(feastList: selectedFeastList)
-                    } else {
-                        ContentUnavailableView(
-                            "No City Selected",
-                            systemImage: "magnifyingglass",
-                            description: Text("Choose a city before searching Apple Maps.")
-                        )
-                        .navigationTitle("Search")
-                        .navigationBarTitleDisplayMode(.inline)
-                    }
+                    AddPlaceView(feastList: feastLists.first(where: { $0.objectURIString == discoveryCityURI }))
                 }
             }
             .sheet(isPresented: $showingSavedPlaceFilters) {
                 NavigationStack {
-                    MapSavedPlaceFilterSheet(
-                        filters: $draftSavedPlaceFilters,
+                    SavedPlaceFilterSheet(
+                        filters: $browse.filters,
+                        availableLists: Array(feastLists),
+                        availableCuisines: SavedPlaceSearchEngine.availableCuisines(from: Array(savedPlaces), filters: .init()),
+                        fixedFeastList: nil,
                         availableTags: availableTags,
-                        cityName: selectedFeastList?.displayName ?? "This city",
-                        onApply: applyDraftSavedPlaceFilters
+                        showsQuery: true
                     )
                 }
                 .presentationDetents([.medium, .large])
@@ -90,11 +117,14 @@ struct MapRootView: View {
     private var content: some View {
         Group {
             if feastLists.isEmpty {
-                ContentUnavailableView(
-                    "No Cities Yet",
-                    systemImage: "map",
-                    description: Text("Create a city to start mapping saved places.")
-                )
+                ContentUnavailableView {
+                    Label("No Cities Yet", systemImage: "map")
+                } description: {
+                    Text("Add your first city in Cities, then save places to see them here.")
+                } actions: {
+                    Button("Go to Cities") { browse.selectedTab = 0 }
+                        .buttonStyle(FeastQuietChipButtonStyle())
+                }
             } else {
                 mapScreen
                 .background(FeastTheme.Colors.appBackground)
@@ -107,39 +137,54 @@ struct MapRootView: View {
             mapContent
 
             VStack(spacing: 0) {
-                mapHeaderOverlay
+                if dynamicTypeSize.isAccessibilitySize {
+                    ScrollView { mapHeaderOverlay }
+                        .frame(maxHeight: 260)
+                } else {
+                    mapHeaderOverlay
+                }
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, FeastTheme.Spacing.large)
             .padding(.top, FeastTheme.Spacing.small)
         }
+            .overlay(alignment: .bottomTrailing) {
+                Button {
+                    nearbyScope = browse.scopeKey
+                    nearby.request()
+                } label: {
+                    HStack {
+                        if nearby.isRequesting { ProgressView() }
+                        if dynamicTypeSize.isAccessibilitySize {
+                            Image(systemName: "location")
+                        } else {
+                            Label(nearby.isRequesting ? "Locating…" : "Nearby", systemImage: "location")
+                        }
+                    }
+                }
+                .buttonStyle(FeastQuietChipButtonStyle())
+                .disabled(nearby.isRequesting)
+                .accessibilityLabel(nearby.isRequesting ? "Finding your location" : "Nearby saved places")
+                .accessibilityHint("Centers the map on your location, keeping the selected city and filters")
+                .padding(16)
+            }
     }
 
     private var selectedFeastList: FeastList? {
-        if let matchedList = feastLists.first(where: { uriString(for: $0) == selectedFeastListURI }) {
-            return matchedList
-        }
-
-        return feastLists.first
+        feastLists.first { $0.objectURIString == browse.filters.selectedListURIString }
     }
 
     private var selectedCitySavedPlaces: [SavedPlace] {
-        guard let selectedFeastList else {
-            return []
-        }
-
+        guard let selectedFeastList else { return Array(savedPlaces) }
         return savedPlaces.filter { $0.feastList == selectedFeastList }
     }
 
     private var filteredCitySavedPlaces: [SavedPlace] {
-        MapSavedPlaceFilterEngine.filteredPlaces(
-            from: selectedCitySavedPlaces,
-            filters: savedPlaceFilters
-        )
+        SavedPlaceSearchEngine.filteredPlaces(from: Array(savedPlaces), query: browse.filters.queryText, filters: browse.filters)
     }
 
     private var filteredMarkerItems: [SavedPlaceMapMarker] {
-        let filteredPlaceIDs = Set(filteredCitySavedPlaces.map(\.objectID))
+        let filteredPlaceIDs = SavedPlaceSearchEngine.mappedPlaceIDs(from: Array(savedPlaces), filters: browse.filters, resolvedIDs: Set(markerItems.map(\.savedPlaceObjectID)))
         return markerItems.filter { filteredPlaceIDs.contains($0.savedPlaceObjectID) }
     }
 
@@ -148,48 +193,11 @@ struct MapRootView: View {
     }
 
     private var hasActiveSavedPlaceFilters: Bool {
-        savedPlaceFilters.hasActiveFilters
-    }
-
-    private var activeFilterBadgeCount: Int {
-        activeFilterChipLabels.count
-    }
-
-    private var activeFilterChipLabels: [String] {
-        var labels: [String] = []
-
-        if let trimmedQuery = trimmedSavedPlaceQueryText {
-            labels.append("Search: \(compactFilterChipText(trimmedQuery))")
-        }
-
-        if !savedPlaceFilters.selectedStatuses.isEmpty {
-            let statuses = savedPlaceFilters.selectedStatuses
-                .map(\.rawValue)
-                .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
-
-            if statuses.count == 1, let status = statuses.first {
-                labels.append("Status: \(status)")
-            } else {
-                labels.append("\(statuses.count) statuses")
-            }
-        }
-
-        if !savedPlaceFilters.selectedTags.isEmpty {
-            let tags = savedPlaceFilters.selectedTags
-                .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
-
-            if tags.count == 1, let tag = tags.first {
-                labels.append("Tag: \(compactFilterChipText(tag))")
-            } else {
-                labels.append("\(tags.count) tags")
-            }
-        }
-
-        return labels
+        savedPlaceFilters.hasCriteria
     }
 
     private var markerResolutionKey: String {
-        let listKey = selectedFeastList.map(uriString(for:)) ?? "none"
+        let listKey = browse.scopeKey
         let placeKeys = selectedCitySavedPlaces.map { place in
             let objectKey = place.objectID.uriRepresentation().absoluteString
             let updateKey = place.updatedAtValue.timeIntervalSinceReferenceDate
@@ -199,9 +207,15 @@ struct MapRootView: View {
         return ([listKey] + placeKeys).joined(separator: "|")
     }
 
+    private var headerLayout: AnyLayout {
+        dynamicTypeSize.isAccessibilitySize
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
+            : AnyLayout(HStackLayout(alignment: .top, spacing: 12))
+    }
+
     private var mapHeaderOverlay: some View {
         VStack(alignment: .leading, spacing: FeastTheme.Spacing.small) {
-            HStack(alignment: .top, spacing: FeastTheme.Spacing.medium) {
+            headerLayout {
                 VStack(alignment: .leading, spacing: FeastTheme.Spacing.small) {
                     Text("City")
                         .font(FeastTheme.Typography.sectionLabel)
@@ -209,9 +223,10 @@ struct MapRootView: View {
                         .foregroundStyle(FeastTheme.Colors.secondaryText)
 
                     Menu {
+                        Button("All Cities") { browse.filters.selectedListURIString = nil }
                         ForEach(feastLists) { feastList in
                             Button(feastList.displayName) {
-                                selectedFeastListURI = uriString(for: feastList)
+                                browse.filters.selectedListURIString = uriString(for: feastList)
                             }
                         }
                     } label: {
@@ -220,11 +235,10 @@ struct MapRootView: View {
                                 .font(.system(size: 14, weight: .semibold))
                                 .foregroundStyle(FeastTheme.Colors.accentSelection)
 
-                            Text(selectedFeastList?.displayName ?? "Select City")
+                            Text(selectedFeastList?.displayName ?? "All Cities")
                                 .font(FeastTheme.Typography.listTitle)
                                 .foregroundStyle(FeastTheme.Colors.primaryText)
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.82)
+                                .fixedSize(horizontal: false, vertical: true)
 
                             Image(systemName: "chevron.down")
                                 .font(FeastTheme.Typography.caption.weight(.semibold))
@@ -233,24 +247,24 @@ struct MapRootView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .buttonStyle(.plain)
+                    .frame(minHeight: 44)
 
                     Text(citySummaryText)
                         .font(FeastTheme.Typography.rowMetadata)
                         .foregroundStyle(citySummaryColor)
-                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                         .multilineTextAlignment(.leading)
                 }
 
-                Spacer(minLength: 0)
+                if !dynamicTypeSize.isAccessibilitySize { Spacer(minLength: 0) }
 
                 VStack(alignment: .trailing, spacing: FeastTheme.Spacing.small) {
                     Button {
-                        showingExploreSearch = true
+                        presentDiscovery()
                     } label: {
                         Label("Search", systemImage: "magnifyingglass")
                     }
                     .buttonStyle(FeastQuietChipButtonStyle())
-                    .disabled(selectedFeastList == nil)
                     .accessibilityLabel("Search Apple Maps")
 
                     Button {
@@ -265,49 +279,45 @@ struct MapRootView: View {
 
                             Text("Filters")
 
-                            if activeFilterBadgeCount > 0 {
-                                MapSavedPlaceFilterBadge(count: activeFilterBadgeCount)
-                            }
                         }
                     }
                     .buttonStyle(FeastQuietChipButtonStyle())
-                    .disabled(selectedFeastList == nil)
                     .accessibilityLabel("Filters")
                     .accessibilityValue(
                         hasActiveSavedPlaceFilters
-                            ? "\(activeFilterBadgeCount) active"
+                            ? "Active filters"
                             : "No active filters"
                     )
                 }
             }
 
-            if hasActiveSavedPlaceFilters {
-                activeFilterChipsRow
-            }
         }
         .padding(.horizontal, FeastTheme.Spacing.large)
         .padding(.vertical, FeastTheme.Spacing.medium)
         .feastMapOverlayCard(cornerRadius: FeastTheme.CornerRadius.medium)
     }
 
-    private var activeFilterChipsRow: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: FeastTheme.Spacing.xSmall) {
-                ForEach(Array(activeFilterChipLabels.enumerated()), id: \.offset) { _, label in
-                    MapSavedPlaceActiveChip(title: label)
-                }
-            }
-        }
-    }
-
     private var mapContent: some View {
         ZStack {
             Map(position: $cameraPosition, selection: $selectedMarker) {
+                if let fix = nearby.location {
+                    Annotation("Your location", coordinate: fix.coordinate) {
+                        Image(systemName: "location.circle.fill")
+                            .font(.title).foregroundStyle(.white, .blue)
+                            .accessibilityLabel("Your last requested location")
+                    }
+                }
                 ForEach(filteredMarkerItems) { marker in
                     Marker(marker.markerLabel, coordinate: marker.coordinate.clLocationCoordinate2D)
                         .tint(FeastTheme.Colors.mapPinTint)
                         .tag(marker)
                 }
+            }
+            .onMapCameraChange(frequency: .onEnd) { camera in
+                guard cameraPosition.positionedByUser else { return }
+                let region = camera.region
+                browse.viewports[browse.scopeKey] = SavedMapViewport(latitude: region.center.latitude, longitude: region.center.longitude,
+                    latitudeDelta: region.span.latitudeDelta, longitudeDelta: region.span.longitudeDelta)
             }
             .mapStyle(.standard(elevation: .flat))
             .ignoresSafeArea(edges: .bottom)
@@ -338,41 +348,26 @@ struct MapRootView: View {
                 .allowsHitTesting(false)
             }
 
-            if filteredMarkerItems.isEmpty && !isResolvingMarkers {
-                if shouldShowNoMatchingResults {
-                    ContentUnavailableView {
-                        Label("No Matching Places", systemImage: "line.3.horizontal.decrease.circle")
-                    } description: {
-                        Text(noMatchingResultsText)
-                    } actions: {
-                        Button("Clear Filters") {
-                            clearSavedPlaceFilters()
-                        }
-                        .buttonStyle(FeastQuietChipButtonStyle())
-                    }
+            if case let .savedContent(reason) = emptyPresentation {
+                SavedPlaceEmptyState(reason: reason, scopeName: selectedFeastList?.displayName ?? "All Cities", addPlace: presentDiscovery)
+                    .fixedSize(horizontal: false, vertical: true)
                     .padding(FeastTheme.Spacing.large)
                     .feastMapOverlayCard(cornerRadius: FeastTheme.CornerRadius.medium)
                     .padding(.horizontal, FeastTheme.Spacing.large)
-                } else {
-                    ContentUnavailableView {
-                        Label("No Places in This City Yet", systemImage: "mappin.and.ellipse")
-                    } description: {
-                        Text(emptyStateText)
-                    } actions: {
-                        if selectedFeastList != nil {
-                            Button("Search Apple Maps") {
-                                showingExploreSearch = true
-                            }
-                            .buttonStyle(FeastProminentButtonStyle())
-                        }
-                    }
-                    .padding(FeastTheme.Spacing.large)
-                    .feastMapOverlayCard(cornerRadius: FeastTheme.CornerRadius.medium)
-                    .padding(.horizontal, FeastTheme.Spacing.large)
+            } else if emptyPresentation == .locationsUnavailable {
+                ContentUnavailableView {
+                    Label("Locations Couldn't Be Loaded", systemImage: "mappin.slash")
+                } description: {
+                    Text("Your places are still saved. Try loading their map locations again.")
+                } actions: {
+                    Button("Retry") { markerRetry += 1 }.buttonStyle(FeastQuietChipButtonStyle())
                 }
+                .padding(FeastTheme.Spacing.large)
+                .feastMapOverlayCard(cornerRadius: FeastTheme.CornerRadius.medium)
+                .padding(.horizontal, FeastTheme.Spacing.large)
             }
 
-            if isResolvingMarkers {
+            if isResolvingMarkers && emptyReason == .hasMatches {
                 HStack(spacing: FeastTheme.Spacing.small) {
                     ProgressView()
                     Text("Loading places")
@@ -396,11 +391,11 @@ struct MapRootView: View {
         let mappedCount = filteredMarkerItems.count
 
         if savedCount == 0 {
-            return "Search Apple Maps and save places into this city to start building the map."
+            return "Search Apple Maps and save places to start building the map."
         }
 
         if shouldShowNoMatchingResults {
-            return "No saved places match these filters."
+            return emptyReason == .queryHasNoMatches ? "No saved places match this search." : "Filters are hiding matching places."
         }
 
         if hasActiveSavedPlaceFilters {
@@ -414,7 +409,7 @@ struct MapRootView: View {
                 return "Matching saved places will appear here once Apple Maps can resolve them."
             }
 
-            return "\(mappedCount) matching saved places on the map"
+            return "\(mappedCount) matching saved \(mappedCount == 1 ? "place" : "places") in \(selectedFeastList?.displayName ?? "All Cities")"
         }
 
         if unresolvedPlaceCount > 0 {
@@ -425,29 +420,19 @@ struct MapRootView: View {
             return "Saved places in this city will appear here once Apple Maps can resolve them."
         }
 
-        return "\(mappedCount) saved places on the map"
+        return "\(mappedCount) saved \(mappedCount == 1 ? "place" : "places") in \(selectedFeastList?.displayName ?? "All Cities")"
     }
 
-    private var emptyStateText: String {
-        if selectedCitySavedPlaces.isEmpty {
-            return "Search Apple Maps and save places into \(selectedFeastList?.displayName ?? "this city") to see them on the map."
-        }
+    private var emptyPresentation: SavedMapEmptyPresentation {
+        .evaluate(reason: emptyReason, resolving: isResolvingMarkers, pinCount: filteredMarkerItems.count)
+    }
 
-        if hasActiveSavedPlaceFilters {
-            return "Feast could not resolve any matching saved places for this city in Apple Maps right now."
-        }
-
-        return "Feast could not resolve any saved places for this city in Apple Maps right now."
+    private var emptyReason: SavedPlaceEmptyReason {
+        SavedPlaceEmptyReason.evaluate(places: Array(savedPlaces), filters: savedPlaceFilters)
     }
 
     private var shouldShowNoMatchingResults: Bool {
-        hasActiveSavedPlaceFilters
-            && !selectedCitySavedPlaces.isEmpty
-            && filteredCitySavedPlaces.isEmpty
-    }
-
-    private var noMatchingResultsText: String {
-        "Try a different search, status, or tag for \(selectedFeastList?.displayName ?? "this city")."
+        emptyReason == .queryHasNoMatches || emptyReason == .filtersHideMatches
     }
 
     private var trimmedSavedPlaceQueryText: String? {
@@ -466,48 +451,58 @@ struct MapRootView: View {
 
     @MainActor
     private func resolveMarkers() async {
-        if selectedFeastList == nil, let firstList = feastLists.first {
-            selectedFeastListURI = uriString(for: firstList)
+        guard !Task.isCancelled else { return }
+        let scope = browse.scopeKey
+        if displayedScope != scope {
+            displayedScope = scope
+            if let viewport = browse.viewports[scope] {
+                cameraPosition = .region(MKCoordinateRegion(center: CLLocationCoordinate2D(latitude: viewport.latitude, longitude: viewport.longitude),
+                    span: MKCoordinateSpan(latitudeDelta: viewport.latitudeDelta, longitudeDelta: viewport.longitudeDelta)))
+            } else { cameraPosition = .automatic }
         }
 
+        let generation = UUID()
+        markerGeneration = generation
         let places = selectedCitySavedPlaces
-
+        markerItems = []
+        unresolvedPlaceCount = 0
         isResolvingMarkers = true
         defer {
-            isResolvingMarkers = false
+            if markerGeneration == generation { isResolvingMarkers = false }
         }
-
         var resolvedMarkers: [SavedPlaceMapMarker] = []
-        var unresolvedCount = 0
-
         for savedPlace in places {
+            guard !Task.isCancelled, markerGeneration == generation else { return }
             guard let applePlaceID = savedPlace.applePlaceIDValue else {
-                unresolvedCount += 1
+                unresolvedPlaceCount += 1
                 continue
             }
-
             do {
-                if let resolvedPlace = try await applePlacesService.resolve(placeID: applePlaceID),
-                   let coordinate = resolvedPlace.coordinate {
-                    resolvedMarkers.append(
-                        SavedPlaceMapMarker(
-                            savedPlaceObjectID: savedPlace.objectID,
-                            displayName: resolvedPlace.displayName,
-                            fallbackName: savedPlace.displayName,
-                            coordinate: coordinate
-                        )
-                    )
+                let resolvedPlace = try await markerLookup.resolve(placeID: applePlaceID) { id in
+                    try await applePlacesService.resolve(placeID: id)
+                }
+                guard !Task.isCancelled, markerGeneration == generation else { return }
+                if let resolvedPlace, let coordinate = resolvedPlace.coordinate {
+                    resolvedMarkers.append(SavedPlaceMapMarker(
+                        savedPlaceObjectID: savedPlace.objectID,
+                        displayName: resolvedPlace.displayName,
+                        fallbackName: savedPlace.displayName,
+                        coordinate: coordinate
+                    ))
+                    markerItems = resolvedMarkers
                 } else {
-                    unresolvedCount += 1
+                    unresolvedPlaceCount += 1
                 }
             } catch {
-                unresolvedCount += 1
+                guard !Task.isCancelled, markerGeneration == generation else { return }
+                unresolvedPlaceCount += 1
             }
         }
-
-        markerItems = resolvedMarkers
-        unresolvedPlaceCount = unresolvedCount
-        updateCameraPosition(using: resolvedMarkers)
+        guard !Task.isCancelled, markerGeneration == generation else { return }
+        if browse.viewports[scope] == nil, !fittedScopes.contains(scope), !resolvedMarkers.isEmpty {
+            updateCameraPosition(using: resolvedMarkers)
+            fittedScopes.insert(scope)
+        }
     }
 
     private func updateCameraPosition(using markers: [SavedPlaceMapMarker]) {
@@ -559,18 +554,12 @@ struct MapRootView: View {
         try? viewContext.existingObject(with: objectID) as? SavedPlace
     }
 
-    private func presentSavedPlaceFilters() {
-        draftSavedPlaceFilters = savedPlaceFilters
-        showingSavedPlaceFilters = true
+    private func presentDiscovery() {
+        discoveryCityURI = selectedFeastList?.objectURIString
+        showingExploreSearch = true
     }
 
-    private func applyDraftSavedPlaceFilters() {
-        savedPlaceFilters = draftSavedPlaceFilters
-    }
-
-    private func clearSavedPlaceFilters() {
-        savedPlaceFilters.reset()
-    }
+    private func presentSavedPlaceFilters() { showingSavedPlaceFilters = true }
 
     private func uriString(for feastList: FeastList) -> String {
         feastList.objectID.uriRepresentation().absoluteString
@@ -595,342 +584,6 @@ private struct SavedPlaceMapMarker: Identifiable, Hashable {
 
     func hash(into hasher: inout Hasher) {
         hasher.combine(savedPlaceObjectID)
-    }
-}
-
-private struct MapSavedPlaceFilters: Equatable {
-    var queryText = ""
-    var selectedStatuses: Set<PlaceStatus> = []
-    var selectedTags: Set<String> = []
-
-    var hasActiveFilters: Bool {
-        !queryText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            || !selectedStatuses.isEmpty
-            || !selectedTags.isEmpty
-    }
-
-    mutating func reset() {
-        self = .init()
-    }
-
-    mutating func toggle(_ status: PlaceStatus) {
-        if selectedStatuses.contains(status) {
-            selectedStatuses.remove(status)
-        } else {
-            selectedStatuses.insert(status)
-        }
-    }
-
-    mutating func toggleTag(_ tag: String) {
-        guard let normalizedKey = FeastTag.normalizedKey(for: tag) else {
-            return
-        }
-
-        if let existingTag = selectedTags.first(where: { FeastTag.normalizedKey(for: $0) == normalizedKey }) {
-            selectedTags.remove(existingTag)
-        } else if let displayTag = FeastTag.normalizedDisplay(tag) {
-            selectedTags.insert(displayTag)
-        }
-    }
-
-    func includesTag(_ tag: String) -> Bool {
-        guard let normalizedKey = FeastTag.normalizedKey(for: tag) else {
-            return false
-        }
-
-        return selectedTags.contains { FeastTag.normalizedKey(for: $0) == normalizedKey }
-    }
-
-    static func sheetTags(availableTags: [String], selectedTags: Set<String>) -> [String] {
-        var visibleTags: [String] = []
-        var seenKeys: Set<String> = []
-
-        for tag in selectedTags.sorted(by: localizedAscending) + availableTags {
-            guard
-                let displayTag = FeastTag.normalizedDisplay(tag),
-                let normalizedKey = FeastTag.normalizedKey(for: displayTag),
-                !seenKeys.contains(normalizedKey)
-            else {
-                continue
-            }
-
-            seenKeys.insert(normalizedKey)
-            visibleTags.append(displayTag)
-        }
-
-        return visibleTags
-    }
-
-    nonisolated private static func localizedAscending(_ lhs: String, _ rhs: String) -> Bool {
-        lhs.localizedCaseInsensitiveCompare(rhs) == .orderedAscending
-    }
-}
-
-private enum MapSavedPlaceFilterEngine {
-    static func filteredPlaces(
-        from places: [SavedPlace],
-        filters: MapSavedPlaceFilters
-    ) -> [SavedPlace] {
-        let queryTokens = normalizedTokens(in: filters.queryText)
-        let selectedTagKeys = Set(filters.selectedTags.compactMap { FeastTag.normalizedKey(for: $0) })
-
-        return places.filter { place in
-            matchesStatus(place, selectedStatuses: filters.selectedStatuses)
-                && matchesTags(place, selectedTagKeys: selectedTagKeys)
-                && matchesQuery(place, queryTokens: queryTokens)
-        }
-    }
-
-    private static func matchesStatus(
-        _ place: SavedPlace,
-        selectedStatuses: Set<PlaceStatus>
-    ) -> Bool {
-        selectedStatuses.isEmpty || selectedStatuses.contains(place.placeStatus)
-    }
-
-    private static func matchesTags(
-        _ place: SavedPlace,
-        selectedTagKeys: Set<String>
-    ) -> Bool {
-        guard !selectedTagKeys.isEmpty else {
-            return true
-        }
-
-        return place.tags.contains { tag in
-            guard let normalizedKey = FeastTag.normalizedKey(for: tag) else {
-                return false
-            }
-
-            return selectedTagKeys.contains(normalizedKey)
-        }
-    }
-
-    private static func matchesQuery(
-        _ place: SavedPlace,
-        queryTokens: [String]
-    ) -> Bool {
-        guard !queryTokens.isEmpty else {
-            return true
-        }
-
-        let searchableText = searchableFields(for: place)
-            .joined(separator: " ")
-            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-
-        return queryTokens.allSatisfy { searchableText.contains($0) }
-    }
-
-    private static func searchableFields(for place: SavedPlace) -> [String] {
-        [
-            place.displayName,
-            place.displayNeighborhoodName,
-            place.note,
-            place.placeStatus.rawValue,
-            place.placeTypeValue.rawValue
-        ]
-        .compactMap { normalized($0) }
-        + place.tags
-        + place.cuisines
-    }
-
-    private static func normalizedTokens(in query: String) -> [String] {
-        query
-            .split(whereSeparator: \.isWhitespace)
-            .map(String.init)
-            .compactMap(normalized)
-    }
-
-    nonisolated private static func normalized(_ value: String?) -> String? {
-        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else {
-            return nil
-        }
-
-        return trimmed.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-    }
-}
-
-private struct MapSavedPlaceFilterSheet: View {
-    @Environment(\.dismiss) private var dismiss
-
-    @Binding var filters: MapSavedPlaceFilters
-
-    let availableTags: [String]
-    let cityName: String
-    let onApply: () -> Void
-
-    private let statuses = Array(PlaceStatus.allCases.enumerated())
-
-    var body: some View {
-        List {
-            searchSection
-            statusSection
-            tagsSection
-        }
-        .feastScrollableChrome()
-        .listStyle(.insetGrouped)
-        .navigationTitle("Filters")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                Button("Clear All") {
-                    filters.reset()
-                }
-                .disabled(!filters.hasActiveFilters)
-            }
-
-            ToolbarItem(placement: .topBarTrailing) {
-                Button("Done") {
-                    onApply()
-                    dismiss()
-                }
-            }
-        }
-    }
-
-    private var visibleTags: [String] {
-        MapSavedPlaceFilters.sheetTags(
-            availableTags: availableTags,
-            selectedTags: filters.selectedTags
-        )
-    }
-
-    private var searchSection: some View {
-        Section {
-            FeastFormGroup {
-                FeastFormField(
-                    title: "Search saved places",
-                    helper: "Search only within \(cityName)'s saved places."
-                ) {
-                    FeastSingleLineTextField(
-                        placeholder: "Name, neighborhood, note, tag, cuisine, or type",
-                        text: $filters.queryText,
-                        textInputAutocapitalization: .never,
-                        autocorrectionDisabled: true
-                    )
-                }
-            }
-        }
-    }
-
-    private var statusSection: some View {
-        Section {
-            FeastFormGroup {
-                ForEach(statuses, id: \.element.id) { index, status in
-                    MapSavedPlaceFilterRow(
-                        title: status.rawValue,
-                        isSelected: filters.selectedStatuses.contains(status)
-                    ) {
-                        filters.toggle(status)
-                    }
-
-                    if index < statuses.count - 1 {
-                        FeastFormDivider()
-                    }
-                }
-            }
-        } header: {
-            FeastFormSectionHeader(
-                title: "Status",
-                subtitle: "Choose one or more saved-place statuses."
-            )
-        }
-    }
-
-    private var tagsSection: some View {
-        Section {
-            FeastFormGroup {
-                if visibleTags.isEmpty {
-                    Text("No tags available yet")
-                        .font(FeastTheme.Typography.supporting.weight(.semibold))
-                        .foregroundStyle(FeastTheme.Colors.secondaryText)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                } else {
-                    ForEach(Array(visibleTags.enumerated()), id: \.element) { index, tag in
-                        MapSavedPlaceFilterRow(
-                            title: tag,
-                            isSelected: filters.includesTag(tag)
-                        ) {
-                            filters.toggleTag(tag)
-                        }
-
-                        if index < visibleTags.count - 1 {
-                            FeastFormDivider()
-                        }
-                    }
-                }
-            }
-        } header: {
-            FeastFormSectionHeader(
-                title: "Tags",
-                subtitle: "Choose reusable tags already attached to saved places in this city."
-            )
-        }
-    }
-
-}
-
-private struct MapSavedPlaceFilterRow: View {
-    let title: String
-    let isSelected: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: FeastTheme.Spacing.small) {
-                Text(title)
-                    .font(FeastTheme.Typography.supporting)
-                    .foregroundStyle(FeastTheme.Colors.primaryText)
-
-                Spacer(minLength: 0)
-
-                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(
-                        isSelected
-                            ? FeastTheme.Colors.accentSelection
-                            : FeastTheme.Colors.tertiaryText
-                    )
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
-}
-
-private struct MapSavedPlaceActiveChip: View {
-    let title: String
-
-    var body: some View {
-        Text(title)
-            .font(FeastTheme.Typography.rowUtility.weight(.semibold))
-            .foregroundStyle(FeastTheme.Colors.secondaryAction)
-            .lineLimit(1)
-            .padding(.horizontal, FeastTheme.Spacing.medium)
-            .padding(.vertical, 8)
-            .background {
-                Capsule(style: .continuous)
-                    .fill(FeastTheme.Colors.surfaceBackground.opacity(0.92))
-            }
-            .overlay {
-                Capsule(style: .continuous)
-                    .stroke(FeastTheme.Colors.dividerBorder.opacity(0.9), lineWidth: 1)
-            }
-    }
-}
-
-private struct MapSavedPlaceFilterBadge: View {
-    let count: Int
-
-    var body: some View {
-        Text("\(count)")
-            .font(FeastTheme.Typography.caption.weight(.semibold))
-            .foregroundStyle(FeastTheme.Colors.primaryActionLabel)
-            .frame(minWidth: 18, minHeight: 18)
-            .padding(.horizontal, 4)
-            .background {
-                Capsule(style: .continuous)
-                    .fill(FeastTheme.Colors.primaryActionFill)
-            }
     }
 }
 

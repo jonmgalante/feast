@@ -28,9 +28,22 @@ final class FeastRepository {
 
     enum SavedPlaceError: LocalizedError {
         case duplicateLocationInCity
+        case conflictingContext, incompatibleStore
+#if FEAST_TESTS
+        case duplicatePrototypeName
+        case invalidPrototypeDraft
+#endif
 
         var errorDescription: String? {
             switch self {
+#if FEAST_TESTS
+            case .invalidPrototypeDraft:
+                return "This prototype needs a clean in-memory collection and reviewed fields within the displayed limits."
+            case .duplicatePrototypeName:
+                return "A place with this name is already saved in this city. Review it instead; existing notes and status were not changed."
+#endif
+            case .conflictingContext: return "Finish the current edit before making this change."
+            case .incompatibleStore: return "This move needs the existing city review flow."
             case .duplicateLocationInCity:
                 return "This exact Apple Maps place is already saved in this city."
             }
@@ -100,11 +113,15 @@ final class FeastRepository {
         }
     }
 
+#if FEAST_TESTS
     enum SeedMode {
         case defaultListsOnly
         case previewDemoContent
     }
 
+#endif
+
+    private var defersSaving = false
     private let context: NSManagedObjectContext
     private let persistenceController: PersistenceController?
 
@@ -119,6 +136,23 @@ final class FeastRepository {
         self.persistenceController = persistenceController
     }
 
+    /// One isolated transaction for a validated conversational change. Repository methods
+    /// retain their normal validation while intermediate saves are deferred.
+    func transaction<T>(_ work:(FeastRepository) throws -> T) throws -> T {
+        guard !defersSaving,!context.hasChanges else {throw SavedPlaceError.conflictingContext}
+        defersSaving=true
+        do {let value=try work(self);defersSaving=false;try saveIfNeeded();return value}
+        catch {defersSaving=false;context.rollback();throw error}
+    }
+    func move(_ place:SavedPlace,to city:FeastList,section:ListSection?) throws {
+        guard place.managedObjectContext===context,city.managedObjectContext===context,
+              section==nil || section?.feastList===city,
+              place.objectID.persistentStore===city.objectID.persistentStore else {throw SavedPlaceError.incompatibleStore}
+        if let apple=place.applePlaceIDValue {try validateUniqueSavedPlace(withApplePlaceID:apple,in:city,excluding:place)}
+        let oldCity=place.feastList,oldSection=place.listSection
+        place.feastList=city;place.listSection=section;place.updatedAt=Date();touch(oldCity);touch(oldSection);touch(city);touch(section)
+        try saveIfNeeded()
+    }
     func fetchFeastLists() throws -> [FeastList] {
         let request = FeastList.fetchRequest()
         request.sortDescriptors = [
@@ -195,6 +229,51 @@ final class FeastRepository {
         try saveIfNeeded()
     }
 
+    enum StartupMigrationError: LocalizedError {
+        case pendingEdits
+        case storesUnavailable
+
+        var errorDescription: String? {
+            switch self {
+            case .pendingEdits:
+                return "Startup preparation requires a clean context. Pending edits were left untouched."
+            case .storesUnavailable:
+                return "No saved collection stores are available for startup preparation."
+            }
+        }
+    }
+
+    /// Run only on a dedicated, clean context before exposing the editing UI.
+    /// Metadata and changes are submitted in the same save. Replays remain
+    /// idempotent and never delete or merge records.
+    func runStartupMigrations() throws {
+        guard !context.hasChanges else { throw StartupMigrationError.pendingEdits }
+        let key = "FeastSafeStartupMigrationVersion"
+        guard let coordinator = context.persistentStoreCoordinator,
+              !coordinator.persistentStores.isEmpty else { throw StartupMigrationError.storesUnavailable }
+        let stores = coordinator.persistentStores
+        guard !stores.allSatisfy({ (coordinator.metadata(for: $0)[key] as? Int ?? 0) >= 1 }) else { return }
+        let originalMetadata = stores.map { coordinator.metadata(for: $0) }
+        defersSaving = true
+        defer { defersSaving = false }
+        do {
+            try migrateToCityNeighborhoodModelIfNeeded()
+            try migrateDeprecatedSkipNotesIfNeeded()
+            for store in stores {
+                var metadata = coordinator.metadata(for: store)
+                metadata[key] = 1
+                coordinator.setMetadata(metadata, for: store)
+            }
+            try context.save()
+        } catch {
+            for (store, metadata) in zip(stores, originalMetadata) {
+                coordinator.setMetadata(metadata, for: store)
+            }
+            context.rollback()
+            throw error
+        }
+    }
+
     func migrateToCityNeighborhoodModelIfNeeded() throws {
         let feastLists = try fetchFeastLists()
         var didChange = false
@@ -242,7 +321,8 @@ final class FeastRepository {
     func createListSection(
         named name: String,
         in feastList: FeastList,
-        parent: ListSection? = nil
+        parent: ListSection? = nil,
+        saveImmediately: Bool = true
     ) throws -> ListSection {
         if parent != nil {
             throw SectionError.nestedNeighborhoodsUnavailable
@@ -253,7 +333,7 @@ final class FeastRepository {
             list: feastList
         )
         touch(feastList)
-        try saveIfNeeded()
+        if saveImmediately { try saveIfNeeded() }
         return section
     }
 
@@ -301,6 +381,36 @@ final class FeastRepository {
         try saveIfNeeded()
         return savedPlace
     }
+
+#if FEAST_TESTS
+    /// Prototype exception explicitly limited to a synthetic in-memory store.
+    /// Unmatched announcements have no invented Maps ID or coordinate.
+    @discardableResult
+    func createUnmappedPrototypePlace(name: String, status: PlaceStatus, placeType: PlaceType,
+                                      cuisines: [String], note: String, in city: FeastList) throws -> SavedPlace {
+        let stores = context.persistentStoreCoordinator?.persistentStores ?? []
+        guard !stores.isEmpty, stores.allSatisfy({ $0.type == NSInMemoryStoreType }),
+              !context.hasChanges, city.managedObjectContext === context, !city.isDeleted,
+              !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, name.count <= 200,
+              note.count <= 12_000, cuisines.count <= 20, cuisines.allSatisfy({ $0.count <= 500 }) else {
+            throw SavedPlaceError.invalidPrototypeDraft
+        }
+        let key = name.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+            .split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        let existing = try fetchSavedPlaces().filter { $0.feastList == city }
+        guard !existing.contains(where: { $0.displayName.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+            .split(whereSeparator: \.isWhitespace).joined(separator: " ") == key }) else {
+            throw SavedPlaceError.duplicatePrototypeName
+        }
+        let place = makeSavedPlace(applePlaceID: nil, displayName: name, status: status,
+            placeType: placeType, cuisines: cuisines, tags: [], note: note, websiteURL: nil,
+            instagramURL: nil, list: city, section: nil)
+        touch(city)
+        try saveIfNeeded()
+        return place
+    }
+#endif
+
 
     func importSavedPlaces(
         from drafts: [ImportedSavedPlaceDraft],
@@ -442,6 +552,7 @@ final class FeastRepository {
         try saveIfNeeded()
     }
 
+#if FEAST_TESTS
     func seedIfNeeded(mode: SeedMode) throws {
         let countRequest = FeastList.fetchRequest()
         countRequest.includesSubentities = false
@@ -551,6 +662,8 @@ final class FeastRepository {
         )
     }
 
+#endif
+
     private func makeFeastList(name: String) -> FeastList {
         let feastList = FeastList(context: context)
         let now = Date()
@@ -599,7 +712,7 @@ final class FeastRepository {
 
     @discardableResult
     private func makeSavedPlace(
-        applePlaceID: String,
+        applePlaceID: String?,
         displayName: String,
         status: PlaceStatus,
         placeType: PlaceType,
@@ -709,7 +822,15 @@ final class FeastRepository {
             return
         }
 
-        try context.save()
+        guard !defersSaving else { return }
+        do {
+            try context.save()
+        } catch {
+            // Forms retain their draft in view state. Never let a later operation
+            // accidentally commit the failed operation's pending mutations.
+            context.rollback()
+            throw error
+        }
     }
 
     private func touch(_ feastList: FeastList?) {
@@ -756,11 +877,14 @@ final class FeastRepository {
     }
 
     private func noteContainsDeprecatedSkipGuidance(_ note: String, skipNote: String) -> Bool {
-        let normalizedNote = normalizedMigrationText(note)
         let normalizedSkipNote = normalizedMigrationText(skipNote)
         let normalizedGuidanceBlock = normalizedMigrationText(Self.legacySkipGuidancePrefix + skipNote)
-
-        return normalizedNote.contains(normalizedGuidanceBlock) || normalizedNote.contains(normalizedSkipNote)
+        // A substring is not proof that legacy guidance has been retained (for
+        // example "red" inside "bread"). Deduplicate complete paragraphs only.
+        return note.components(separatedBy: "\n\n").contains { paragraph in
+            let value = normalizedMigrationText(paragraph)
+            return value == normalizedGuidanceBlock || value == normalizedSkipNote
+        }
     }
 
     private func normalizedMigrationText(_ rawValue: String) -> String {
@@ -772,131 +896,15 @@ final class FeastRepository {
     }
 
     private func migrateSections(in feastList: FeastList) -> Bool {
-        let allSections = stableSections(from: feastList.sortedSections)
-        guard !allSections.isEmpty else {
-            return false
-        }
-
-        let retirementCandidates = Set(
-            allSections
-                .filter { !$0.sortedChildren.isEmpty && $0.sortedSavedPlaces.isEmpty }
-                .map(\.objectID)
-        )
-
+        // Preserve every neighborhood, UUID, name and place assignment. Legacy
+        // hierarchy is flattened without destructive name-based consolidation.
+        let sections = feastList.sections as? Set<ListSection> ?? []
         var didChange = false
-        var neighborhoodsByKey: [String: ListSection] = [:]
-
-        for section in stableSections(from: feastList.topLevelSections) {
-            let key = normalizedSectionKey(for: section.displayName)
-
-            if let existing = neighborhoodsByKey[key] {
-                didChange = merge(section, into: existing) || didChange
-            } else {
-                neighborhoodsByKey[key] = section
-            }
+        for section in sections where section.parent != nil {
+            section.parent = nil
+            didChange = true
         }
-
-        let nestedSections = allSections.sorted { lhs, rhs in
-            if lhs.depth != rhs.depth {
-                return lhs.depth > rhs.depth
-            }
-
-            return stableSectionLessThan(lhs, rhs)
-        }
-
-        for section in nestedSections where section.parent != nil && !section.isDeleted {
-            let key = normalizedSectionKey(for: section.displayName)
-
-            if let existing = neighborhoodsByKey[key], existing.objectID != section.objectID {
-                didChange = merge(section, into: existing) || didChange
-            } else {
-                section.parent = nil
-                touch(section)
-                touch(feastList)
-                neighborhoodsByKey[key] = section
-                didChange = true
-            }
-        }
-
-        neighborhoodsByKey.removeAll()
-
-        for section in stableSections(from: feastList.topLevelSections) where !section.isDeleted {
-            let key = normalizedSectionKey(for: section.displayName)
-
-            if let existing = neighborhoodsByKey[key], existing.objectID != section.objectID {
-                didChange = merge(section, into: existing) || didChange
-            } else {
-                neighborhoodsByKey[key] = section
-            }
-        }
-
-        for section in allSections where retirementCandidates.contains(section.objectID) && !section.isDeleted {
-            if section.parent == nil && section.sortedChildren.isEmpty && section.sortedSavedPlaces.isEmpty {
-                context.delete(section)
-                touch(feastList)
-                didChange = true
-            }
-        }
-
         return didChange
     }
 
-    @discardableResult
-    private func merge(_ source: ListSection, into destination: ListSection) -> Bool {
-        guard source.objectID != destination.objectID, !source.isDeleted else {
-            return false
-        }
-
-        var didChange = false
-        let now = Date()
-
-        let savedPlaces = source.savedPlaces as? Set<SavedPlace> ?? []
-        for savedPlace in savedPlaces where savedPlace.listSection != destination {
-            savedPlace.listSection = destination
-            savedPlace.updatedAt = now
-            didChange = true
-        }
-
-        let children = source.children as? Set<ListSection> ?? []
-        for child in children where child.parent == source {
-            child.parent = nil
-            touch(child)
-            didChange = true
-        }
-
-        if didChange {
-            touch(destination)
-            touch(destination.feastList)
-        }
-
-        context.delete(source)
-        touch(destination.feastList)
-        return true
-    }
-
-    private func stableSections(from sections: [ListSection]) -> [ListSection] {
-        sections.sorted(by: stableSectionLessThan)
-    }
-
-    private func stableSectionLessThan(_ lhs: ListSection, _ rhs: ListSection) -> Bool {
-        let lhsCreatedAt = lhs.createdAt ?? .distantPast
-        let rhsCreatedAt = rhs.createdAt ?? .distantPast
-
-        if lhsCreatedAt != rhsCreatedAt {
-            return lhsCreatedAt < rhsCreatedAt
-        }
-
-        let nameComparison = lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName)
-        if nameComparison != .orderedSame {
-            return nameComparison == .orderedAscending
-        }
-
-        return lhs.objectID.uriRepresentation().absoluteString < rhs.objectID.uriRepresentation().absoluteString
-    }
-
-    private func normalizedSectionKey(for rawValue: String) -> String {
-        rawValue
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-    }
 }

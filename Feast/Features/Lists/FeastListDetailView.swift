@@ -2,6 +2,7 @@ import CoreData
 import SwiftUI
 
 struct FeastListDetailView: View {
+    @EnvironmentObject private var browse: SavedPlaceBrowseState
     @Environment(\.managedObjectContext) private var viewContext
     @Environment(\.persistenceController) private var persistenceController
     @ObservedObject var feastList: FeastList
@@ -10,8 +11,8 @@ struct FeastListDetailView: View {
     @State private var neighborhoodEditor: NeighborhoodEditorState?
     @State private var neighborhoodPendingDeletion: ListSection?
     @State private var showingAddPlaceSheet = false
-    @State private var searchText = ""
-    @State private var searchFilters = SavedPlaceSearchFilters()
+    private var searchText: String { browse.filters.queryText }
+    private var searchFilters: SavedPlaceSearchFilters { browse.filters }
     @State private var showingSearchFilters = false
     @State private var listSharingPresentation: PreparedFeastListShare?
     @State private var listPreparingShare = false
@@ -31,12 +32,13 @@ struct FeastListDetailView: View {
 
     var body: some View {
         content
+            .rememberBrowseScroll(feastList.objectURIString)
             .feastScrollableChrome()
             .toolbar { toolbarContent }
             .listStyle(.insetGrouped)
             .navigationTitle(feastList.displayName)
             .navigationBarTitleDisplayMode(.inline)
-            .searchable(text: $searchText, prompt: "Search places in \(feastList.displayName)")
+            .searchable(text: $browse.filters.queryText, prompt: "Search places in \(feastList.displayName)")
             .sheet(item: $neighborhoodEditor) { editor in
                 NavigationStack {
                     NeighborhoodNameEditorSheet(
@@ -74,10 +76,11 @@ struct FeastListDetailView: View {
             .sheet(isPresented: $showingSearchFilters) {
                 NavigationStack {
                     SavedPlaceFilterSheet(
-                        filters: $searchFilters,
+                        filters: $browse.filters,
                         availableLists: [],
                         availableCuisines: availableCuisines,
-                        fixedFeastList: feastList
+                        fixedFeastList: feastList,
+                        availableTags: FeastTag.catalog(from: citySavedPlaces.map(\.tags))
                     )
                 }
             }
@@ -112,9 +115,10 @@ struct FeastListDetailView: View {
             if isShowingSearchResults {
                 searchResultsSection
             } else {
-                if citySavedPlaces.isEmpty && neighborhoodSections.isEmpty {
+                if citySavedPlaces.isEmpty {
                     emptyStateSection
-                } else {
+                }
+                if !citySavedPlaces.isEmpty || !neighborhoodSections.isEmpty {
                     ForEach(neighborhoodSections) { section in
                         neighborhoodSection(section)
                     }
@@ -198,7 +202,7 @@ struct FeastListDetailView: View {
     }
 
     private var isShowingSearchResults: Bool {
-        !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || searchFilters.hasActiveFilters
+        !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || searchFilters.hasCriteria
     }
 
     private var availableCuisines: [String] {
@@ -240,10 +244,9 @@ struct FeastListDetailView: View {
             }
 
             if filteredSavedPlaces.isEmpty {
-                ContentUnavailableView(
-                    "No Matching Places",
-                    systemImage: "magnifyingglass",
-                    description: Text("Try a different search or adjust your filters.")
+                SavedPlaceEmptyState(
+                    reason: SavedPlaceEmptyReason.evaluate(places: citySavedPlaces, filters: searchFilters, fixedCity: feastList),
+                    scopeName: feastList.displayName
                 )
             } else {
                 ForEach(filteredSavedPlaces) { place in
@@ -257,18 +260,14 @@ struct FeastListDetailView: View {
     private var emptyStateSection: some View {
         Section {
             VStack(alignment: .leading, spacing: FeastTheme.Spacing.medium) {
-                Text("This city is ready for neighborhoods.")
+                Text("No saved places in \(feastList.displayName) yet.")
                     .font(FeastTheme.Typography.body.weight(.semibold))
                     .foregroundStyle(FeastTheme.Colors.primaryText)
 
-                Text("Add neighborhoods like Ridgewood or Lower East Side, then save places from Apple Maps.")
+                Text("Use Add Place below to save your first Apple Maps match. Neighborhoods are optional.")
                     .font(FeastTheme.Typography.supporting)
                     .foregroundStyle(FeastTheme.Colors.secondaryText)
 
-                Button("Add Neighborhood") {
-                    presentAddNeighborhoodEditor()
-                }
-                .buttonStyle(FeastInlineActionButtonStyle())
             }
             .padding(.vertical, FeastTheme.Spacing.xSmall)
         }
@@ -345,7 +344,7 @@ struct FeastListDetailView: View {
             } label: {
                 FeastToolbarSymbol(
                     systemName: "line.3.horizontal.decrease",
-                    isEmphasized: searchFilters.hasActiveFilters
+                    isEmphasized: searchFilters.hasCriteria
                 )
             }
 
@@ -380,17 +379,7 @@ struct FeastListDetailView: View {
             components.append("Search: \(trimmedSearchText)")
         }
 
-        if let status = searchFilters.selectedStatus {
-            components.append("Status: \(status.rawValue)")
-        }
-
-        if let placeType = searchFilters.selectedPlaceType {
-            components.append("Type: \(placeType.rawValue)")
-        }
-
-        if let cuisine = searchFilters.selectedCuisine {
-            components.append("Cuisine: \(cuisine)")
-        }
+        if let criteria = searchFilters.summary { components.append(criteria) }
 
         guard !components.isEmpty else {
             return nil
@@ -412,7 +401,7 @@ struct FeastListDetailView: View {
             try repository.createListSection(named: name, in: feastList)
             neighborhoodEditor = nil
         } catch {
-            assertionFailure("Failed to create neighborhood: \(error.localizedDescription)")
+            alertState = FeastListDetailAlertState(title: "Couldn't Save Neighborhood", message: error.localizedDescription)
         }
     }
 
@@ -421,7 +410,7 @@ struct FeastListDetailView: View {
             try repository.rename(neighborhood, to: name)
             neighborhoodEditor = nil
         } catch {
-            assertionFailure("Failed to rename neighborhood: \(error.localizedDescription)")
+            alertState = FeastListDetailAlertState(title: "Couldn't Save Neighborhood", message: error.localizedDescription)
         }
     }
 
@@ -430,7 +419,7 @@ struct FeastListDetailView: View {
             try repository.delete(neighborhood)
             neighborhoodPendingDeletion = nil
         } catch {
-            assertionFailure("Failed to delete neighborhood: \(error.localizedDescription)")
+            alertState = FeastListDetailAlertState(title: "Couldn't Save Neighborhood", message: error.localizedDescription)
         }
     }
 

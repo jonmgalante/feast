@@ -11,13 +11,15 @@ struct SavedPlaceDetailView: View {
     @ObservedObject var savedPlace: SavedPlace
     @FetchRequest(fetchRequest: Self.savedPlacesFetchRequest) private var savedPlaces: FetchedResults<SavedPlace>
 
+    @State private var originalDraft: [String]?
+    @State private var showingDiscardConfirmation = false
+
     @State private var resolvedPlace: ApplePlaceMatch?
     @State private var selectedReplacementPlace: ApplePlaceMatch?
     @State private var isResolvingPlace = false
     @State private var isOpeningInMaps = false
     @State private var showingDeleteConfirmation = false
     @State private var showingLocationPicker = false
-    @State private var hasAlternativeLocations: Bool?
     @State private var detailAlert: DetailAlertState?
 
     @State private var status: PlaceStatus
@@ -62,7 +64,19 @@ struct SavedPlaceDetailView: View {
         .scrollDismissesKeyboard(.interactively)
         .navigationTitle("Place")
         .navigationBarTitleDisplayMode(.inline)
+        .navigationBarBackButtonHidden(true)
+        .interactiveDismissDisabled(hasUnsavedChanges)
+        .confirmationDialog("Discard unsaved changes?", isPresented: $showingDiscardConfirmation, titleVisibility: .visible) {
+            Button("Save Changes") { saveChanges() }
+            Button("Discard Changes", role: .destructive) { dismiss() }
+            Button("Keep Editing") { showingDiscardConfirmation = false }
+        }
         .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Button("Back", systemImage: "chevron.left") {
+                    if hasUnsavedChanges { showingDiscardConfirmation = true } else { dismiss() }
+                }
+            }
             ToolbarItem(placement: .confirmationAction) {
                 Button {
                     saveChanges()
@@ -75,11 +89,9 @@ struct SavedPlaceDetailView: View {
         .task(id: savedPlace.applePlaceIDValue) {
             await resolvePlace()
         }
-        .task(id: alternativeLocationCheckKey) {
-            await refreshAlternativeLocationAvailability()
-        }
         .onAppear {
             reloadFormStateIfNeeded()
+            if originalDraft == nil { originalDraft = draftValues }
         }
         .onChange(of: selectedNeighborhoodSelection) { _, newSelection in
             handleNeighborhoodSelectionChange(newSelection)
@@ -172,22 +184,12 @@ struct SavedPlaceDetailView: View {
         selectedReplacementPlace ?? resolvedPlace
     }
 
-    private var replacementLocationSearchQuery: String {
-        resolvedPlace?.displayName ?? savedPlace.displayName
-    }
-
-    private var alternativeLocationCheckKey: String {
-        let cityKey = savedPlace.feastList?.objectID.uriRepresentation().absoluteString ?? "nil"
-        let placeKey = savedPlace.applePlaceIDValue ?? "nil"
-        return "\(cityKey)|\(placeKey)|\(replacementLocationSearchQuery)"
-    }
-
     private var shouldShowPickDifferentLocation: Bool {
         guard savedPlace.feastList != nil else {
             return false
         }
 
-        return hasAlternativeLocations == true
+        return true
     }
 
     private var neighborhoodContextText: String {
@@ -195,9 +197,6 @@ struct SavedPlaceDetailView: View {
         return "\(savedPlace.displayCityName) • \(neighborhoodName)"
     }
 
-    private var headerStatusSummary: String {
-        "\(status.rawValue) • \(placeType.rawValue)"
-    }
 
     private var allNeighborhoods: [ListSection] {
         savedPlace.feastList?.neighborhoodSections ?? []
@@ -293,9 +292,7 @@ struct SavedPlaceDetailView: View {
                                 .fixedSize(horizontal: false, vertical: true)
                         }
 
-                        Text(headerStatusSummary)
-                            .font(FeastTheme.Typography.rowMetadata)
-                            .foregroundStyle(FeastTheme.Colors.secondaryText)
+                        FeastStatusMetadata(status: status, detail: placeType.rawValue)
 
                         if displayedPlace == nil {
                             Text("Using saved snapshot")
@@ -603,51 +600,6 @@ struct SavedPlaceDetailView: View {
         }
     }
 
-    @MainActor
-    private func refreshAlternativeLocationAvailability() async {
-        guard
-            let feastList = savedPlace.feastList,
-            savedPlace.applePlaceIDValue != nil,
-            let query = AddPlaceSearchSupport.normalizedSearchQuery(
-                from: replacementLocationSearchQuery
-            )
-        else {
-            hasAlternativeLocations = nil
-            return
-        }
-
-        hasAlternativeLocations = nil
-
-        do {
-            let matches = try await AddPlaceSearchSupport.searchMatches(
-                for: query,
-                using: applePlacesService
-            )
-
-            if Task.isCancelled {
-                return
-            }
-
-            let savedResultIDs = AddPlaceSearchSupport.savedSearchResultIDs(
-                for: matches,
-                in: feastList,
-                excluding: savedPlace,
-                repository: repository
-            )
-            let validAlternatives = AddPlaceSearchSupport.visibleMatches(
-                from: matches,
-                excluding: savedPlace
-            )
-            .filter { !savedResultIDs.contains($0.applePlaceID) }
-
-            hasAlternativeLocations = !validAlternatives.isEmpty
-        } catch is CancellationError {
-            return
-        } catch {
-            hasAlternativeLocations = nil
-        }
-    }
-
     private func saveChanges() {
         do {
             try validateUniqueReplacementLocation()
@@ -673,6 +625,7 @@ struct SavedPlaceDetailView: View {
             )
             dismiss()
         } catch {
+            viewContext.rollback()
             detailAlert = DetailAlertState(
                 title: "Couldn't Save Changes",
                 message: errorMessage(for: error)
@@ -790,7 +743,8 @@ struct SavedPlaceDetailView: View {
 
             return try repository.createListSection(
                 named: neighborhoodName,
-                in: feastList
+                in: feastList,
+                saveImmediately: false
             )
         }
     }
@@ -830,8 +784,18 @@ struct SavedPlaceDetailView: View {
         )
     }
 
+    private var draftValues: [String] {
+        [status.rawValue, placeType.rawValue, cuisinesText, note, websiteURL,
+         instagramURL, String(describing: selectedNeighborhoodSelection),
+         selectedReplacementPlace?.applePlaceID ?? ""] + tags
+    }
+
+    private var hasUnsavedChanges: Bool {
+        originalDraft.map { $0 != draftValues } ?? false
+    }
+
     private func reloadFormStateIfNeeded() {
-        guard savedPlace.updatedAtValue != lastLoadedUpdatedAt else {
+        guard !hasUnsavedChanges, savedPlace.updatedAtValue != lastLoadedUpdatedAt else {
             return
         }
 
@@ -848,6 +812,7 @@ struct SavedPlaceDetailView: View {
         committedNeighborhoodSelection = initialNeighborhoodSelection
         selectedReplacementPlace = nil
         lastLoadedUpdatedAt = savedPlace.updatedAtValue
+        originalDraft = draftValues
     }
 
     private func applySuggestedNeighborhoodIfNeeded() {

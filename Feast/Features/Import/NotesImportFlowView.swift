@@ -614,6 +614,8 @@ private struct NotesImportReviewView: View {
     let onViewImportedCity: (String) -> Void
 
     @State private var reviewItems: [NotesImportReviewItem] = []
+    @State private var userEditedItemIDs: Set<UUID> = []
+    @State private var userEditedNeighborhoodIDs: Set<UUID> = []
     @State private var isMatchingAll = false
     @State private var isImporting = false
     @State private var editorItem: NotesImportReviewItem?
@@ -965,17 +967,24 @@ private struct NotesImportReviewView: View {
 
         isMatchingAll = true
 
+        defer { isMatchingAll = false }
         for index in reviewItems.indices {
+            guard !Task.isCancelled else { return }
+            let originalItem = reviewItems[index]
             let updatedItem = await NotesImportMatcher.match(
-                reviewItems[index],
+                originalItem,
                 cityName: selectedCity.displayName,
                 neighborhoodNames: selectedCity.neighborhoodSections.map(\.displayName),
                 using: applePlacesService
             )
-            reviewItems[index] = updatedItem
+            guard !Task.isCancelled else { return }
+            reviewItems[index] = reviewItems[index].applyingBackgroundMatch(
+                updatedItem,
+                original: originalItem,
+                wasEdited: userEditedItemIDs.contains(originalItem.id),
+                preserveNeighborhood: userEditedNeighborhoodIDs.contains(originalItem.id)
+            )
         }
-
-        isMatchingAll = false
     }
 
     private func updateReviewItem(_ updatedItem: NotesImportReviewItem) {
@@ -983,6 +992,7 @@ private struct NotesImportReviewView: View {
             return
         }
 
+        userEditedItemIDs.insert(updatedItem.id)
         var normalizedItem = updatedItem
         normalizedItem.selectedNeighborhoodName = canonicalNeighborhoodName(
             for: updatedItem.selectedNeighborhoodName
@@ -1004,7 +1014,7 @@ private struct NotesImportReviewView: View {
             return
         }
 
-        for index in reviewItems.indices where reviewItems[index].id != updatedItem.id {
+        for index in reviewItems.indices where reviewItems[index].id != updatedItem.id && !userEditedItemIDs.contains(reviewItems[index].id) {
             let rowParsedNeighborhoodKey = NotesImportReviewBuilder.normalizedKey(
                 for: reviewItems[index].parsedNeighborhoodName
             )
@@ -1018,6 +1028,7 @@ private struct NotesImportReviewView: View {
 
             if currentSelectionKey == nil || currentSelectionKey == selectedNeighborhoodKey {
                 reviewItems[index].selectedNeighborhoodName = canonicalNeighborhoodName
+                userEditedNeighborhoodIDs.insert(reviewItems[index].id)
             }
         }
     }
@@ -1171,10 +1182,7 @@ private struct NotesImportReviewItemRow: View {
                     .foregroundStyle(FeastTheme.Colors.primaryText)
                     .fixedSize(horizontal: false, vertical: true)
 
-                Text(metadataLine)
-                    .font(FeastTheme.Typography.rowMetadata)
-                    .foregroundStyle(FeastTheme.Colors.secondaryText)
-                    .fixedSize(horizontal: false, vertical: true)
+                FeastStatusMetadata(status: item.status, prefix: "Line \(item.sourceLineNumber)", detail: metadataLine)
 
                 if let matchedPlace = item.matchedPlace {
                     VStack(alignment: .leading, spacing: 2) {
@@ -1222,7 +1230,7 @@ private struct NotesImportReviewItemRow: View {
     }
 
     private var metadataLine: String {
-        var components = ["Line \(item.sourceLineNumber)", item.status.rawValue]
+        var components: [String] = []
 
         if let selectedNeighborhoodName = item.selectedNeighborhoodName {
             components.append(selectedNeighborhoodName)
@@ -1425,9 +1433,7 @@ private struct NotesImportReviewItemEditorSheet: View {
                 FeastFormDivider()
 
                 FeastFormField(title: "Parsed Context") {
-                    Text(contextSummary)
-                        .font(FeastTheme.Typography.supporting)
-                        .foregroundStyle(FeastTheme.Colors.secondaryText)
+                    FeastStatusMetadata(status: item.status, detail: contextSummary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .feastFieldSurface(minHeight: 52)
                 }
@@ -1641,7 +1647,7 @@ private struct NotesImportReviewItemEditorSheet: View {
     }
 
     private var contextSummary: String {
-        var components = [item.status.rawValue]
+        var components: [String] = []
 
         if let parsedNeighborhoodName = item.parsedNeighborhoodName {
             components.append(parsedNeighborhoodName)
@@ -1760,6 +1766,7 @@ private struct NotesImportReviewItemEditorSheet: View {
         } catch is CancellationError {
             return
         } catch {
+            guard !Task.isCancelled else { return }
             searchResults = []
             searchState = .failed(error.localizedDescription)
         }

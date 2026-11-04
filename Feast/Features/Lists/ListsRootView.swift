@@ -2,6 +2,7 @@ import CoreData
 import SwiftUI
 
 struct ListsRootView: View {
+    @EnvironmentObject private var browse: SavedPlaceBrowseState
     @Environment(\.managedObjectContext) private var viewContext
     @Environment(\.persistenceController) private var persistenceController
     @Environment(\.scenePhase) private var scenePhase
@@ -12,12 +13,17 @@ struct ListsRootView: View {
     @FetchRequest(fetchRequest: Self.savedPlacesFetchRequest, animation: .default)
     private var savedPlaces: FetchedResults<SavedPlace>
 
+    @State private var showingAddPlace = false
+    @State private var appliedNavigationQA = false
+    @State private var confirmingExport = false
+    @State private var exportURL: URL?
+    @State private var pendingExportURL: URL?
+    @State private var exportError: String?
     @State private var showingNotesImportFlow = false
     @State private var cityEditor: CityEditorState?
     @State private var listPendingDeletion: FeastList?
-    @State private var importedCityRoute: ImportedCityRoute?
-    @State private var searchText = ""
-    @State private var searchFilters = SavedPlaceSearchFilters()
+    private var searchText: String { browse.filters.queryText }
+    private var searchFilters: SavedPlaceSearchFilters { browse.filters }
     @State private var showingSearchFilters = false
     @State private var listSharingPresentation: PreparedFeastListShare?
     @State private var listSharingStates: [NSManagedObjectID: FeastListSharingState] = [:]
@@ -39,7 +45,7 @@ struct ListsRootView: View {
         return request
     }()
 
-    var body: some View {
+    private var libraryContent: some View {
         Group {
             if isZeroCityState {
                 zeroCityContent
@@ -47,7 +53,7 @@ struct ListsRootView: View {
                 listContent
                     .feastScrollableChrome()
                     .listStyle(.insetGrouped)
-                    .searchable(text: $searchText, prompt: "Search places across cities")
+                    .searchable(text: $browse.filters.queryText, prompt: "Search places across cities")
             } else {
                 listContent
                     .feastScrollableChrome()
@@ -55,7 +61,31 @@ struct ListsRootView: View {
             }
         }
             .toolbar { toolbarContent }
+
             .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var libraryActionsContent: some View {
+        libraryContent
+            .sheet(isPresented: $showingAddPlace) {
+                NavigationStack { AddPlaceView() }
+            }
+            .alert("Export library", isPresented: $confirmingExport) {
+                Button("Export library") { exportLibrary() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Export notes, links, categories, and city and neighborhood organization from the places currently available on this device. Shared or unsynced changes may be missing. Feast does not yet restore exports.")
+            }
+            .sheet(isPresented: Binding(get: { exportURL != nil }, set: { if !$0 { removeExport() } }), onDismiss: removeExport) {
+                if let exportURL { ExportShareSheet(url: exportURL) }
+            }
+            .alert("Couldn't Export Places", isPresented: Binding(get: { exportError != nil }, set: { if !$0 { exportError = nil } })) {
+                Button("OK") { exportError = nil }
+            } message: { Text(exportError ?? "") }
+    }
+
+    var body: some View {
+        libraryActionsContent
             .sheet(item: $cityEditor) { editor in
                 NavigationStack {
                     CityNameEditorSheet(
@@ -73,10 +103,11 @@ struct ListsRootView: View {
             .sheet(isPresented: $showingSearchFilters) {
                 NavigationStack {
                     SavedPlaceFilterSheet(
-                        filters: $searchFilters,
+                        filters: $browse.filters,
                         availableLists: Array(feastLists),
-                        availableCuisines: availableCuisines,
-                        fixedFeastList: nil
+                        availableCuisines: SavedPlaceSearchEngine.availableCuisines(from: Array(savedPlaces)),
+                        fixedFeastList: nil,
+                        availableTags: FeastTag.catalog(from: savedPlaces.map(\.tags))
                     )
                 }
             }
@@ -123,24 +154,12 @@ struct ListsRootView: View {
             }
             .task(id: feastListRefreshKey) {
                 refreshSharingStates()
+                browse.validateCities(Set(feastLists.map(\.objectURIString)))
             }
             .onChange(of: scenePhase) { _, newPhase in
                 if newPhase == .active {
                     refreshSharingStates()
                 }
-            }
-            .onChange(of: isZeroCityState) { _, isZeroCityState in
-                if isZeroCityState {
-                    resetSearchState()
-                }
-            }
-            .onChange(of: hasSavedPlaces) { _, hasSavedPlaces in
-                if !hasSavedPlaces {
-                    resetSearchState()
-                }
-            }
-            .navigationDestination(item: $importedCityRoute) { route in
-                importedCityDestination(for: route)
             }
     }
 
@@ -166,6 +185,7 @@ struct ListsRootView: View {
             citiesSection
             importCallToActionSection
         }
+        .rememberBrowseScroll("directory")
     }
 
     private var zeroCityContent: some View {
@@ -309,10 +329,9 @@ struct ListsRootView: View {
                 }
 
                 if filteredSavedPlaces.isEmpty {
-                    ContentUnavailableView(
-                        "No Matching Places",
-                        systemImage: "magnifyingglass",
-                        description: Text("Try a different search or adjust your filters.")
+                    SavedPlaceEmptyState(
+                        reason: SavedPlaceEmptyReason.evaluate(places: Array(savedPlaces), filters: searchFilters),
+                        scopeName: feastLists.first(where: { $0.objectURIString == searchFilters.selectedListURIString })?.displayName ?? "All Cities"
                     )
                 } else {
                     ForEach(filteredSavedPlaces) { place in
@@ -353,7 +372,7 @@ struct ListsRootView: View {
             if isZeroSavedPlacesState {
                 FeastFormSectionHeader(
                     title: "Cities",
-                    subtitle: "Your cities come first. Add places when you're ready."
+                    subtitle: "No saved places yet. Choose a city, then tap Add Place."
                 )
             }
         }
@@ -373,68 +392,60 @@ struct ListsRootView: View {
         }
 
         ToolbarItem(placement: .topBarTrailing) {
-            if isZeroCityState {
+            FeastToolbarActionCluster {
+                if !isZeroCityState && !isZeroSavedPlacesState {
+                    Button { showingSearchFilters = true } label: {
+                        FeastToolbarSymbol(systemName: "line.3.horizontal.decrease", isEmphasized: searchFilters.hasCriteria)
+                            .frame(width: 36, height: 36)
+                            .contentShape(Rectangle())
+                    }
+                    .accessibilityLabel("Filter places")
+                }
                 Button {
-                    presentCreateCity()
+                    showingAddPlace = true
                 } label: {
                     FeastToolbarSymbol(systemName: "plus")
                         .frame(width: 36, height: 36)
                         .contentShape(Rectangle())
                 }
-                .accessibilityLabel("Add City")
-            } else if isZeroSavedPlacesState {
-                FeastToolbarActionCluster {
-                    Button {
-                        presentCreateCity()
-                    } label: {
-                        FeastToolbarSymbol(systemName: "plus")
-                            .frame(width: 36, height: 36)
-                            .contentShape(Rectangle())
-                    }
+                .disabled(feastLists.isEmpty)
+                .accessibilityLabel("Add Place")
+                .accessibilityHint(feastLists.isEmpty ? "Create a city first" : "Choose a city in Add Place")
 
-                    Menu {
-                        Button("Import from Notes") {
-                            presentImportFromNotes()
-                        }
-                    } label: {
-                        FeastToolbarSymbol(systemName: "ellipsis")
-                            .frame(width: 36, height: 36)
-                            .contentShape(Rectangle())
-                    }
-                }
-            } else {
-                FeastToolbarActionCluster {
-                    Button {
-                        showingSearchFilters = true
-                    } label: {
-                        FeastToolbarSymbol(
-                            systemName: "line.3.horizontal.decrease",
-                            isEmphasized: searchFilters.hasActiveFilters
-                        )
+                Menu {
+                    Button("Import from Notes", systemImage: "square.and.arrow.down") { presentImportFromNotes() }
+                    Button("Export library", systemImage: "square.and.arrow.up") { confirmingExport = true }
+                } label: {
+                    FeastToolbarSymbol(systemName: "ellipsis")
                         .frame(width: 36, height: 36)
                         .contentShape(Rectangle())
-                    }
-
-                    Button {
-                        presentCreateCity()
-                    } label: {
-                        FeastToolbarSymbol(systemName: "plus")
-                        .frame(width: 36, height: 36)
-                        .contentShape(Rectangle())
-                    }
-
-                    Menu {
-                        Button("Import from Notes") {
-                            presentImportFromNotes()
-                        }
-                    } label: {
-                        FeastToolbarSymbol(systemName: "ellipsis")
-                            .frame(width: 36, height: 36)
-                            .contentShape(Rectangle())
-                    }
                 }
+                .accessibilityLabel("Library options")
             }
         }
+    }
+
+    private func exportLibrary() {
+        do {
+            let data = try PlaceExport.capture(context: viewContext).validatedData()
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("Feast-Export-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let url = directory.appendingPathComponent("Feast-places-v1.json")
+            // Retain the URL for cleanup even if writing or verification fails.
+            pendingExportURL = url
+            try data.write(to: url, options: [.atomic, .completeFileProtection])
+            guard try Data(contentsOf: url) == data else { throw PlaceExport.ExportError.invalidContents }
+            exportURL = url
+        } catch {
+            removeExport()
+            exportError = error.localizedDescription
+        }
+    }
+
+    private func removeExport() {
+        if let pendingExportURL { try? FileManager.default.removeItem(at: pendingExportURL.deletingLastPathComponent()) }
+        pendingExportURL = nil
+        exportURL = nil
     }
 
     private var repository: FeastRepository {
@@ -468,17 +479,7 @@ struct ListsRootView: View {
             components.append("City: \(feastList.displayName)")
         }
 
-        if let status = searchFilters.selectedStatus {
-            components.append("Status: \(status.rawValue)")
-        }
-
-        if let placeType = searchFilters.selectedPlaceType {
-            components.append("Type: \(placeType.rawValue)")
-        }
-
-        if let cuisine = searchFilters.selectedCuisine {
-            components.append("Cuisine: \(cuisine)")
-        }
+        if let criteria = searchFilters.summary { components.append(criteria) }
 
         guard !components.isEmpty else {
             return nil
@@ -507,12 +508,13 @@ struct ListsRootView: View {
     }
 
     private func openImportedCity(_ cityURIString: String) {
-        importedCityRoute = ImportedCityRoute(cityURIString: cityURIString)
+        browse.filters.selectedListURIString = cityURIString
+        browse.scopeDidChange()
     }
 
     private func resetSearchState() {
-        searchText = ""
-        searchFilters.reset()
+        browse.filters.queryText = ""
+        browse.filters.reset()
         showingSearchFilters = false
     }
 
@@ -524,14 +526,12 @@ struct ListsRootView: View {
                 Text(feastList.displayName)
                     .font(FeastTheme.Typography.listTitle)
                     .foregroundStyle(FeastTheme.Colors.primaryText)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.82)
+                    .fixedSize(horizontal: false, vertical: true)
 
                 Text(listPrimaryMetadata(for: feastList))
                     .font(FeastTheme.Typography.rowMetadata)
                     .foregroundStyle(FeastTheme.Colors.secondaryText)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.88)
+                    .fixedSize(horizontal: false, vertical: true)
 
                 if let listSecondaryMetadata = listSecondaryMetadata(for: feastList) {
                     Text(listSecondaryMetadata)
@@ -557,11 +557,10 @@ struct ListsRootView: View {
         let sharingState = listSharingState(for: feastList)
         let showsTrailingStatus = listPreparingShareObjectID == feastList.objectID
 
-        return NavigationLink {
-            FeastListDetailView(feastList: feastList)
-        } label: {
+        return NavigationLink(value: SavedPlaceBrowseRoute.city(feastList.objectURIString)) {
             listRow(for: feastList)
         }
+        .browseRowAnchor(feastList.objectURIString)
         .overlay(alignment: .trailing) {
             if showsTrailingStatus {
                 cityRowTrailingStatus(for: feastList)
@@ -751,18 +750,7 @@ struct ListsRootView: View {
         return visibleNames.joined(separator: " • ") + remainingSuffix
     }
 
-    @ViewBuilder
-    private func importedCityDestination(for route: ImportedCityRoute) -> some View {
-        if let feastList = feastLists.first(where: { $0.objectURIString == route.cityURIString }) {
-            FeastListDetailView(feastList: feastList)
-        } else {
-            ContentUnavailableView(
-                "City Unavailable",
-                systemImage: "building.2.slash",
-                description: Text("The imported city is no longer available.")
-            )
-        }
-    }
+
 }
 
 private struct CityEditorState: Identifiable {

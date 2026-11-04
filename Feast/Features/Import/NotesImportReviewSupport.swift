@@ -43,6 +43,21 @@ struct NotesImportReviewItem: Identifiable, Hashable {
     var isSkipped: Bool
     var matchingErrorMessage: String?
 
+    func applyingBackgroundMatch(
+        _ result: NotesImportReviewItem,
+        original: NotesImportReviewItem,
+        wasEdited: Bool,
+        preserveNeighborhood: Bool
+    ) -> NotesImportReviewItem {
+        guard !wasEdited else { return self }
+        var expected = original
+        if preserveNeighborhood { expected.selectedNeighborhoodName = selectedNeighborhoodName }
+        guard self == expected else { return self }
+        var merged = result
+        if preserveNeighborhood { merged.selectedNeighborhoodName = selectedNeighborhoodName }
+        return merged
+    }
+
     var bucket: NotesImportReviewBucket {
         if isSkipped {
             return .skipped
@@ -240,8 +255,10 @@ enum NotesImportMatcher {
 
         do {
             for query in queries {
+                try Task.checkCancellation()
                 let matches = try await applePlacesService.search(query: query)
 
+                try Task.checkCancellation()
                 for match in matches where !seenIDs.contains(match.applePlaceID) {
                     seenIDs.insert(match.applePlaceID)
                     uniqueMatches.append(match)
@@ -361,11 +378,11 @@ enum NotesImportMatcher {
             return nil
         }
 
-        if topMatch.matchesLocationContext {
-            return topMatch.match
-        }
-
-        return confidenceGap >= 18 ? topMatch.match : nil
+        // Location context alone cannot distinguish two branches of one business.
+        // Keep every exact-name alternative for explicit address review.
+        guard rankedMatches.filter({ $0.isExactNameMatch }).count == 1,
+              confidenceGap >= 18, topMatch.matchesLocationContext else { return nil }
+        return topMatch.match
     }
 
     private static func score(

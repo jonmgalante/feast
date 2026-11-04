@@ -1,0 +1,31 @@
+.local-tools/
+
+# Local dependencies, caches, and build products.
+**/node_modules
+**/.wrangler/
+**/__pycache__/
+*.pyc
+.DS_Store
+DerivedData/
+*.xcarchive/
+*.ipa
+xcuserdata/
+
+# Credentials and local provisioning; examples contain names only.
+.env
+.env.*
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+*.p12
+*.p8
+*.key
+*.mobileprovision
+
+# Real stores and private development/release evidence stay outside public source.
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+/Tests/Evidence/
+/ReleasePreparation/
+/Backend/feast-proxy/evidence/

@@ -7,24 +7,36 @@ struct AddPlaceView: View {
     @Environment(\.applePlacesService) private var applePlacesService
     @Environment(\.persistenceController) private var persistenceController
 
-    @ObservedObject var feastList: FeastList
+    private let fixedFeastList: FeastList?
+    @FetchRequest(sortDescriptors: [NSSortDescriptor(key: "name", ascending: true)]) private var availableCities: FetchedResults<FeastList>
+    @State private var selectedCityID: NSManagedObjectID?
+    private var feastList: FeastList? {
+        if let fixedFeastList { return fixedFeastList }
+        return availableCities.first { $0.objectID == selectedCityID }
+    }
     let excludedSavedPlace: SavedPlace?
     let onSelectPlace: ((ApplePlaceMatch) -> Void)?
 
     @State private var searchQuery = ""
+    @State private var searchRetry = 0
     @State private var searchResults: [ApplePlaceMatch] = []
     @State private var savedSearchResultIDs: Set<String> = []
+    private let discoveryRegion: String?
+    @State private var pendingMatch: ApplePlaceMatch?
+    @State private var reviewDrafts = PlaceReviewDraftCache()
     @State private var selectedPlace: ApplePlaceMatch?
     @State private var searchState: SearchState = .idle
     @FocusState private var isSearchFieldFocused: Bool
 
     init(
-        feastList: FeastList,
+        feastList: FeastList? = nil,
         initialSearchQuery: String = "",
+        discoveryRegion: String? = nil,
         excludingSavedPlace: SavedPlace? = nil,
         onSelectPlace: ((ApplePlaceMatch) -> Void)? = nil
     ) {
-        self.feastList = feastList
+        self.fixedFeastList = feastList
+        self.discoveryRegion = discoveryRegion
         self.excludedSavedPlace = excludingSavedPlace
         self.onSelectPlace = onSelectPlace
         _searchQuery = State(initialValue: initialSearchQuery)
@@ -32,6 +44,21 @@ struct AddPlaceView: View {
 
     var body: some View {
         List {
+            if fixedFeastList == nil && (discoveryRegion == nil || pendingMatch != nil) {
+                Section {
+                    Picker("City", selection: $selectedCityID) {
+                        Text("Choose a city").tag(nil as NSManagedObjectID?)
+                        ForEach(availableCities) { city in
+                            Text(city.displayName).tag(Optional(city.objectID))
+                        }
+                    }
+                    .accessibilityIdentifier("add-place-city")
+                    .foregroundStyle(FeastTheme.Colors.primaryText)
+                } header: {
+                    FeastFormSectionHeader(title: "Destination city")
+                }
+                .feastSectionSurface()
+            }
             searchSection
             searchResultsSection
         }
@@ -41,13 +68,15 @@ struct AddPlaceView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
-                Button("Cancel") {
-                    dismiss()
-                }
+                Button("Cancel") { dismiss() }.accessibilityIdentifier("add-place-cancel")
             }
         }
         .scrollDismissesKeyboard(.interactively)
-        .task(id: searchQuery) {
+        .onChange(of: searchQuery) { _, _ in pendingMatch = nil; selectedPlace = nil }
+        .onChange(of: selectedCityID) { _, id in
+            if id != nil, let pendingMatch { selectedPlace = pendingMatch }
+        }
+        .task(id: "\(searchRetry)|\(searchQuery)|\(feastList?.objectURIString ?? "")") {
             await search(for: searchQuery)
         }
         .task {
@@ -61,11 +90,12 @@ struct AddPlaceView: View {
             }
         }
         .navigationDestination(item: $selectedPlace) { place in
-            AddPlaceSaveView(
-                feastList: feastList,
-                place: place,
-                onSaveComplete: { dismiss() }
-            )
+            if let feastList {
+                AddPlaceSaveView(feastList: feastList, place: place, allowsWebsiteAutofill: discoveryRegion == nil, onSaveComplete: {
+                    if discoveryRegion != nil { PlaceSaveDestinationMemory(defaults: .standard).record(identity: place.localityIdentity, cityID: feastList.id) }
+                    dismiss()
+                }, restoredDraft: reviewDrafts.draft(for: place.applePlaceID), onDraftChange: { reviewDrafts.store($0, for: place.applePlaceID) })
+            }
         }
     }
 
@@ -91,7 +121,7 @@ struct AddPlaceView: View {
                         .font(FeastTheme.Typography.formTitle)
                         .foregroundStyle(FeastTheme.Colors.primaryText)
 
-                    Text("Add a place to \(feastList.displayName) by choosing the exact Apple Maps match first.")
+                    Text(discoveryRegion != nil ? "Choose the exact Apple Maps match, then review its destination and details before saving." : feastList.map { "Add a place to \($0.displayName) by choosing the exact Apple Maps match first." } ?? "Choose a destination city here, then search for the exact Apple Maps match.")
                         .font(FeastTheme.Typography.rowMetadata)
                         .foregroundStyle(FeastTheme.Colors.secondaryText)
 
@@ -162,13 +192,13 @@ struct AddPlaceView: View {
                         ContentUnavailableView(
                             "No Matches",
                             systemImage: "mappin.slash",
-                            description: Text("Try a more specific place name.")
+                            description: Text("Try a name, street address or neighborhood in \(feastList?.displayName ?? "your destination city").")
                         )
                     }
                 } header: {
                     FeastFormSectionHeader(
                         title: "Matches",
-                        subtitle: "Apple Maps didn’t return any places yet"
+                        subtitle: "No available locations matched this search"
                     )
                 }
             } else {
@@ -183,7 +213,14 @@ struct AddPlaceView: View {
                             if let onSelectPlace {
                                 onSelectPlace(place)
                             } else {
-                                selectedPlace = place
+                                guard selectedPlace == nil else { return }
+                                pendingMatch = place
+                                if feastList == nil, discoveryRegion != nil {
+                                    let ids = Set(availableCities.compactMap(\.id))
+                                    if let id = PlaceSaveDestinationMemory(defaults: .standard).cityID(for: place.localityIdentity, available: ids),
+                                       let city = availableCities.first(where: { $0.id == id }) { selectedCityID = city.objectID }
+                                }
+                                if feastList != nil { selectedPlace = place }
                             }
                         } label: {
                             SearchResultRow(
@@ -202,14 +239,17 @@ struct AddPlaceView: View {
                 }
                 .feastSectionSurface()
             }
-        case let .failed(message):
+        case .failed:
             Section {
                 FeastFormGroup {
-                    ContentUnavailableView(
-                        "Search Unavailable",
-                        systemImage: "exclamationmark.triangle",
-                        description: Text(message)
-                    )
+                    ContentUnavailableView {
+                        Label("Search Couldn't Be Completed", systemImage: "exclamationmark.triangle")
+                    } description: {
+                        Text("Apple Maps couldn't load results. Check your connection and try again.")
+                    } actions: {
+                        Button("Retry") { searchRetry += 1 }
+                            .buttonStyle(FeastQuietChipButtonStyle())
+                    }
                 }
             } header: {
                 FeastFormSectionHeader(
@@ -222,7 +262,7 @@ struct AddPlaceView: View {
 
     @MainActor
     private func search(for rawQuery: String) async {
-        guard let query = AddPlaceSearchSupport.normalizedSearchQuery(from: rawQuery) else {
+        guard let cityName = feastList?.displayName ?? discoveryRegion, let query = AddPlaceSearchSupport.normalizedSearchQuery(from: rawQuery) else {
             searchResults = []
             savedSearchResultIDs = []
             searchState = .idle
@@ -235,6 +275,7 @@ struct AddPlaceView: View {
             try await Task.sleep(nanoseconds: 300_000_000)
             let matches = try await AddPlaceSearchSupport.searchMatches(
                 for: query,
+                cityName: cityName,
                 using: applePlacesService
             )
 
@@ -243,16 +284,17 @@ struct AddPlaceView: View {
             }
 
             searchResults = matches
-            savedSearchResultIDs = AddPlaceSearchSupport.savedSearchResultIDs(
+            savedSearchResultIDs = feastList.map { AddPlaceSearchSupport.savedSearchResultIDs(
                 for: matches,
-                in: feastList,
+                in: $0,
                 excluding: excludedSavedPlace,
                 repository: repository
-            )
+            ) } ?? []
             searchState = .loaded
         } catch is CancellationError {
             return
         } catch {
+            guard !Task.isCancelled else { return }
             searchResults = []
             savedSearchResultIDs = []
             searchState = .failed(error.localizedDescription)
@@ -271,6 +313,8 @@ private struct AddPlaceSaveView: View {
 
     let place: ApplePlaceMatch
     let onSaveComplete: () -> Void
+    let allowsWebsiteAutofill: Bool
+    let onDraftChange: (PlaceReviewDraft) -> Void
 
     @State private var status: PlaceStatus = .wantToTry
     @State private var placeType: PlaceType = .restaurant
@@ -279,6 +323,8 @@ private struct AddPlaceSaveView: View {
     @State private var note = ""
     @State private var websiteURL = ""
     @State private var instagramURL = ""
+    @State private var instagramAutofill = InstagramAutofillGuard()
+    @State private var hasAttemptedSave = false
     @State private var selectedNeighborhoodSelection: AddPlaceNeighborhoodSelection = .unsorted
     @State private var committedNeighborhoodSelection: AddPlaceNeighborhoodSelection = .unsorted
     @State private var showingNewNeighborhoodSheet = false
@@ -288,25 +334,30 @@ private struct AddPlaceSaveView: View {
     init(
         feastList: FeastList,
         place: ApplePlaceMatch,
-        onSaveComplete: @escaping () -> Void
+        allowsWebsiteAutofill: Bool = true,
+        onSaveComplete: @escaping () -> Void,
+        restoredDraft: PlaceReviewDraft? = nil,
+        onDraftChange: @escaping (PlaceReviewDraft) -> Void = { _ in }
     ) {
         self.feastList = feastList
         self.place = place
+        self.allowsWebsiteAutofill = allowsWebsiteAutofill && restoredDraft == nil
+        self.onDraftChange = onDraftChange
         self.onSaveComplete = onSaveComplete
-        _websiteURL = State(initialValue: place.websiteURL ?? "")
-        _instagramURL = State(initialValue: place.instagramURL ?? "")
-        _selectedNeighborhoodSelection = State(
-            initialValue: PlaceNeighborhoodSuggestionSupport.initialNeighborhoodSelection(
-                in: feastList,
-                for: place
-            )
-        )
-        _committedNeighborhoodSelection = State(
-            initialValue: PlaceNeighborhoodSuggestionSupport.initialNeighborhoodSelection(
-                in: feastList,
-                for: place
-            )
-        )
+        let suggested = PlaceNeighborhoodSuggestionSupport.initialNeighborhoodSelection(in: feastList, for: place)
+        let draft = restoredDraft?.forDestination(feastList.objectURIString, suggested: suggested)
+            ?? PlaceReviewDraft(place: place, cityURI: feastList.objectURIString, neighborhood: suggested)
+        _status = State(initialValue: draft.status)
+        _placeType = State(initialValue: draft.placeType)
+        _cuisinesText = State(initialValue: draft.cuisinesText)
+        _tags = State(initialValue: draft.tags)
+        _note = State(initialValue: draft.note)
+        _websiteURL = State(initialValue: draft.websiteURL)
+        _instagramURL = State(initialValue: draft.instagramURL)
+        _newNeighborhoodName = State(initialValue: draft.newNeighborhoodName)
+        _instagramAutofill = State(initialValue: InstagramAutofillGuard(identity: place.applePlaceID))
+        _selectedNeighborhoodSelection = State(initialValue: draft.neighborhood)
+        _committedNeighborhoodSelection = State(initialValue: draft.committedNeighborhood)
     }
 
     var body: some View {
@@ -327,11 +378,26 @@ private struct AddPlaceSaveView: View {
                 Button {
                     savePlace()
                 } label: {
-                    Text("Save")
-                        .fontWeight(.semibold)
+                    Text("Save").fontWeight(.semibold)
                 }
+                .accessibilityLabel("Save place to Feast")
+                .accessibilityHint("Saves the reviewed Apple Maps match to the selected city")
+                .accessibilityIdentifier("add-place-confirm-save")
             }
         }
+        .task(id: place.applePlaceID) {
+            guard allowsWebsiteAutofill, !hasAttemptedSave else { return }
+            let identity = place.applePlaceID
+            let token = instagramAutofill.begin(identity: identity)
+            guard instagramURL.isEmpty else { return }
+            let result = await InstagramWebsiteClient.profile(website: place.websiteURL, restaurantName: place.displayName)
+            guard !hasAttemptedSave, instagramAutofill.accepts(identity: identity, token: token, currentText: instagramURL, cancelled: Task.isCancelled),
+                  let result else { return }
+            instagramURL = result
+        }
+        .onAppear { onDraftChange(reviewDraft) }
+        .onChange(of: reviewDraft) { _, draft in onDraftChange(draft) }
+        .onDisappear { instagramAutofill.close(); onDraftChange(reviewDraft) }
         .onChange(of: selectedNeighborhoodSelection) { _, newSelection in
             handleNeighborhoodSelectionChange(newSelection)
         }
@@ -370,6 +436,15 @@ private struct AddPlaceSaveView: View {
 
     private var allNeighborhoods: [ListSection] {
         feastList.neighborhoodSections
+    }
+
+    private var reviewDraft: PlaceReviewDraft {
+        var draft = PlaceReviewDraft(place: place, cityURI: feastList.objectURIString, neighborhood: committedNeighborhoodSelection)
+        draft.status = status; draft.placeType = placeType; draft.cuisinesText = cuisinesText
+        draft.tags = tags; draft.note = note; draft.websiteURL = websiteURL; draft.instagramURL = instagramURL
+        draft.neighborhood = selectedNeighborhoodSelection == .manualEntry ? committedNeighborhoodSelection : selectedNeighborhoodSelection
+        draft.committedNeighborhood = committedNeighborhoodSelection; draft.newNeighborhoodName = newNeighborhoodName
+        return draft
     }
 
     private var selectedNeighborhood: ListSection? {
@@ -537,6 +612,8 @@ private struct AddPlaceSaveView: View {
                             Text(placeType.rawValue).tag(placeType)
                         }
                     }
+                    .accessibilityLabel("Place Type")
+                    .accessibilityIdentifier("add-place-type")
                     .labelsHidden()
                     .pickerStyle(.menu)
                     .tint(FeastTheme.Colors.primaryText)
@@ -624,7 +701,7 @@ private struct AddPlaceSaveView: View {
                     VStack(alignment: .leading, spacing: FeastTheme.Spacing.small) {
                         FeastSingleLineTextField(
                             placeholder: "https://instagram.com/...",
-                            text: $instagramURL,
+                            text: Binding(get: { instagramURL }, set: { instagramAutofill.edited(); instagramURL = $0 }),
                             keyboardType: .URL,
                             textInputAutocapitalization: .never,
                             autocorrectionDisabled: true
@@ -703,6 +780,8 @@ private struct AddPlaceSaveView: View {
     }
 
     private func savePlace() {
+        hasAttemptedSave = true
+        instagramAutofill.close()
         do {
             try validateUniqueLocation()
             let selectedNeighborhood = try resolvedNeighborhoodForSave()
@@ -723,6 +802,7 @@ private struct AddPlaceSaveView: View {
             )
             onSaveComplete()
         } catch {
+            viewContext.rollback()
             alertState = AddPlaceAlertState(
                 title: "Couldn’t Save Place",
                 message: errorMessage(for: error)
@@ -811,7 +891,8 @@ private struct AddPlaceSaveView: View {
 
             return try repository.createListSection(
                 named: neighborhoodName,
-                in: feastList
+                in: feastList,
+                saveImmediately: false
             )
         }
     }
@@ -959,9 +1040,12 @@ enum AddPlaceSearchSupport {
     @MainActor
     static func searchMatches(
         for query: String,
+        cityName: String? = nil,
         using applePlacesService: ApplePlacesService
     ) async throws -> [ApplePlaceMatch] {
-        try await applePlacesService.search(query: query)
+        try await PlaceSearchContext.search(query, cityName: cityName) { contextualQuery in
+            try await applePlacesService.search(query: contextualQuery)
+        }
     }
 
     static func visibleMatches(
@@ -1043,13 +1127,6 @@ enum PlaceNeighborhoodSuggestionSupport {
             .compactMap { $0 }
         )
     }
-}
-
-enum AddPlaceNeighborhoodSelection: Hashable {
-    case unsorted
-    case existing(NSManagedObjectID)
-    case create(String)
-    case manualEntry
 }
 
 struct NeighborhoodNamePromptSheet: View {

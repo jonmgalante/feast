@@ -1,9 +1,11 @@
 import Foundation
+import CoreData
 
 struct AppServices {
     let persistenceController: PersistenceController
     let repository: FeastRepository
     let applePlacesService: ApplePlacesService
+    var startupError: String? = nil
 
     static let live: AppServices = {
         let persistenceController = PersistenceController.shared
@@ -11,16 +13,32 @@ struct AppServices {
             context: persistenceController.viewContext,
             persistenceController: persistenceController
         )
-        do {
-            try repository.migrateToCityNeighborhoodModelIfNeeded()
-            try repository.migrateDeprecatedSkipNotesIfNeeded()
-        } catch {
-            assertionFailure("Failed to initialize Feast data: \(error.localizedDescription)")
+        var approvedSavedConfiguration = ProcessInfo.processInfo.arguments.contains("-feastHostedSavedPlaces")
+#if DEBUG && targetEnvironment(simulator)
+        approvedSavedConfiguration = AskHostedSimulator.savedPlaces
+#endif
+        var startupError: String?
+        if let storeLoadError = persistenceController.storeLoadError {
+            startupError = storeLoadError
+        } else if case .localFallback = persistenceController.storeMode {
+            startupError = "Feast couldn't open all iCloud stores. Your shared cities may be unavailable. Close Feast and try again."
+        } else if approvedSavedConfiguration {
+            // This read-only metadata rollout must not transform an existing collection.
+            // Store URLs, CloudKit scopes, model and ordinary startup behavior stay unchanged.
+        } else {
+            let migrationContext = NSManagedObjectContext(concurrencyType: .mainQueueConcurrencyType)
+            migrationContext.persistentStoreCoordinator = persistenceController.container.persistentStoreCoordinator
+            do {
+                try FeastRepository(context: migrationContext).runStartupMigrations()
+            } catch {
+                startupError = "Feast couldn't finish preparing your saved collection. No pending migration edits were kept. Close Feast and try again. \(error.localizedDescription)"
+            }
         }
         return AppServices(
             persistenceController: persistenceController,
             repository: repository,
-            applePlacesService: ApplePlacesService()
+            applePlacesService: ApplePlacesService(),
+            startupError: startupError
         )
     }()
 
@@ -30,13 +48,6 @@ struct AppServices {
             context: persistenceController.viewContext,
             persistenceController: persistenceController
         )
-        do {
-            try repository.seedIfNeeded(mode: .previewDemoContent)
-            try repository.migrateToCityNeighborhoodModelIfNeeded()
-            try repository.migrateDeprecatedSkipNotesIfNeeded()
-        } catch {
-            assertionFailure("Failed to initialize Feast preview data: \(error.localizedDescription)")
-        }
         return AppServices(
             persistenceController: persistenceController,
             repository: repository,

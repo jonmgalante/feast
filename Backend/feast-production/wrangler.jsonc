@@ -1,0 +1,37 @@
+{
+  "name": "feast-proxy-production",
+  "main": "worker.mjs",
+  "account_id": "994f7b36c1e049ae197d27009177804f",
+  "compatibility_date": "2026-10-20",
+  "workers_dev": true,
+  "preview_urls": false,
+  "observability": {
+    "enabled": false
+  },
+  "send_metrics": false,
+  "vars": {
+    "ENVIRONMENT": "production",
+    "ENABLED": "false",
+    "LIVE_AI": "false",
+    "OWNER_VALIDATION_ENABLED": "false",
+    "ALLOW_PUBLIC_LOOKUP": "false",
+    "ALLOW_RECONCILED_BUDGET": "false",
+    "ALLOW_LEGACY_RECONCILIATION": "false"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "PRODUCTION_STATE",
+        "class_name": "ProductionLedger"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "production-v1",
+      "new_sqlite_classes": [
+        "ProductionLedger"
+      ]
+    }
+  ]
+}

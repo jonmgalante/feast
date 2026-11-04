@@ -1,0 +1,80 @@
+import Foundation
+
+/// Accepted conversational state, not an authorization token. Current-turn grants are never restored.
+struct AskAgentOutcome:Codable,Equatable,Sendable {let id:String,state:String}
+struct AskAgentTask:Codable,Equatable,Sendable {
+    let action:String
+    let fields:[String]
+    let orderedIDs:[String]
+    let sourcePolicy:String
+    var privateSelection:Bool? = nil
+    var outcomes:[AskAgentOutcome]? = nil
+    var externalProjection:Self {
+        let privateScope=privateSelection ?? (sourcePolicy=="local_only")
+        return .init(action:action,fields:fields.filter {!["note","tags","status"].contains($0)},orderedIDs:privateScope ? [] : orderedIDs,sourcePolicy:sourcePolicy,privateSelection:privateScope,outcomes:privateScope ? nil : outcomes)
+    }
+    func checked()throws->Self {
+        guard ["query","research","change"].contains(action),["stored_only","public_if_missing","local_only"].contains(sourcePolicy),fields.count<=11,orderedIDs.count<=200,Set(orderedIDs).count==orderedIDs.count,orderedIDs.allSatisfy({UUID(uuidString:$0) != nil}) else {throw AskError.invalidEvidence}
+        return self
+    }
+}
+struct AskAgentRecord:Codable,Equatable,Sendable {let id,name,city:String;let cuisines:[String];let kind:String;var detail:String?=nil}
+struct AskAgentFinding:Codable,Equatable,Sendable {let id,recordID,field,value,sourceURL:String}
+struct AskAgentResult:Codable,Equatable,Sendable {
+    let status:String,complete:Bool,totalCount:Int
+    let records:[AskAgentRecord],findings:[AskAgentFinding]
+    let message:String,localOnly:Bool
+    static func localPrivate()->Self {.init(status:"local_only",complete:true,totalCount:0,records:[],findings:[],message:"private_result",localOnly:true)}
+}
+struct AskAgentReply:Decodable,Sendable {
+    struct Call:Decodable,Sendable {let name,callID,arguments:String}
+    let version:Int,requestID:String,step:Int
+    let call:Call
+    let continuation:String
+    let model:String
+}
+struct AskAgentCity:Codable,Sendable {let id,name:String}
+struct AskAgentStep:Encodable,Sendable {
+    struct Result:Encodable,Sendable {let callID:String;let output:AskAgentResult}
+    let version=8,mode="agentStep"
+    let requestID:String,step:Int,text:String
+    let context:AskSemanticContext
+    let cities:[AskAgentCity]
+    let task:AskAgentTask?
+    let findings:[AskAgentFinding]
+    let continuation:String?
+    let result:Result?
+}
+protocol AskAgentPlanning:Sendable {
+    func agentStep(_ step:AskAgentStep) async throws -> AskAgentReply
+    func agentAvailable() async -> Bool
+}
+extension AskAgentPlanning {func agentAvailable()async->Bool {false}}
+extension AskHostedProvider:AskAgentPlanning {
+    func agentAvailable()async->Bool {
+        guard await permission() else{return false}
+        var version=await libraryPlanVersion()
+        if version<6 {await prepareCapabilities();version=await libraryPlanVersion()}
+        let stillAllowed=await permission();return stillAllowed && version>=5
+    }
+    func agentStep(_ step:AskAgentStep) async throws -> AskAgentReply {
+        try configuration.validate()
+        guard configuration.scope == .savedMetadata,await permission(),await libraryToolsEnabled(),step.step>=0,step.step<6 else {throw AskHostedError.consentRequired}
+        try Task.checkCancellation()
+        let credential=try await token()
+        guard (43...128).contains(credential.count),credential.allSatisfy({$0.isASCII&&($0.isLetter||$0.isNumber||$0=="_"||$0=="-")}) else {throw AskHostedError.disabled}
+        let encoded=try JSONEncoder().encode(step)
+        guard var payload=try JSONSerialization.jsonObject(with:encoded) as? [String:Any] else {throw AskError.invalidEvidence}
+        for key in ["task","continuation","result"] where payload[key]==nil {payload[key]=NSNull()}
+        let body=try JSONSerialization.data(withJSONObject:payload,options:.sortedKeys)
+        guard body.count<=512000 else {throw AskError.inputLimit}
+        var http=URLRequest(url:configuration.endpoint);http.httpMethod="POST";http.httpBody=body;http.timeoutInterval=220
+        http.setValue("8",forHTTPHeaderField:"X-Feast-Agent-Protocol");http.setValue("application/json",forHTTPHeaderField:"Content-Type");http.setValue("Feast/1.0",forHTTPHeaderField:"User-Agent");http.setValue("Bearer "+credential,forHTTPHeaderField:"Authorization")
+        let (data,response)=try await send(http);try Task.checkCancellation()
+        guard response.statusCode==200 else {throw AskHostedError.failure(status: response.statusCode, data: data)}
+        guard response.url==configuration.endpoint,response.mimeType=="application/json",data.count<=400000 else {throw AskHostedError.invalidResponse}
+        let value=try JSONDecoder().decode(AskAgentReply.self,from:data)
+        guard value.version==8,value.requestID==step.requestID,value.step==step.step,value.continuation.utf8.count<=350000,value.call.arguments.utf8.count<=32000,value.call.callID.count<=200,(value.model=="gpt-6-astra"||value.model.hasPrefix("gpt-6-astra-")||value.model=="gpt-6.1-sol"||value.model.hasPrefix("gpt-6.1-sol-")),(step.step==0)==(value.call.name=="interpret_request") else {throw AskHostedError.invalidResponse}
+        return value
+    }
+}

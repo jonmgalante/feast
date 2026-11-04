@@ -1,0 +1,15 @@
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+.env
+.env.*
+.wrangler/
+node_modules/
+
+# Public local deployment status, no credentials
+.feast-dev-status.json
+
+.feast-saved-status.json
+
+.feast-answer-repair-status.json
+.feast-screenshot-status.json

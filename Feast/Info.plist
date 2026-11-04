@@ -2,6 +2,16 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>FeastPrivacyPolicyURL</key>
+	<string>https://jonmgalante.github.io/feast-site/privacy/</string>
+	<key>FeastSupportURL</key>
+	<string>https://jonmgalante.github.io/feast-site/support/</string>
+	<key>FeastAskProductionEndpoint</key>
+	<string>https://feast-proxy-production.jonmgalante.workers.dev/v1/answer</string>
+	<key>FeastAskProductionHost</key>
+	<string>feast-proxy-production.jonmgalante.workers.dev</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Center the map on your location to see nearby saved places with your current city and filters.</string>
 	<key>CKSharingSupported</key>
 	<true/>
 	<key>UIBackgroundModes</key>

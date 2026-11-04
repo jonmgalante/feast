@@ -1,0 +1,72 @@
+{
+  "name": "feast-proxy-disabled",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-10-20",
+  "workers_dev": false,
+  "preview_urls": false,
+  "observability": {
+    "enabled": false
+  },
+  "env": {
+    "dev": {
+      "name": "feast-proxy-dev",
+      "workers_dev": true,
+      "vars": {
+        "ENVIRONMENT": "dev",
+        "ENABLED": "false",
+        "TEST_MODE": "false"
+      },
+      "durable_objects": {
+        "bindings": [
+          {
+            "name": "BUDGET",
+            "class_name": "BudgetLedger"
+          }
+        ]
+      },
+      "migrations": [
+        {
+          "tag": "v1",
+          "new_sqlite_classes": [
+            "BudgetLedger"
+          ]
+        }
+      ],
+      "account_id": "994f7b36c1e049ae197d27009177804f",
+      "unsafe": {
+        "bindings": [
+          {
+            "name": "OPENAI_API_KEY",
+            "type": "inherit"
+          }
+        ]
+      }
+    },
+    "production": {
+      "name": "feast-proxy-production",
+      "workers_dev": false,
+      "vars": {
+        "ENVIRONMENT": "production",
+        "ENABLED": "false",
+        "TEST_MODE": "false"
+      },
+      "durable_objects": {
+        "bindings": [
+          {
+            "name": "BUDGET",
+            "class_name": "BudgetLedger"
+          }
+        ]
+      },
+      "migrations": [
+        {
+          "tag": "v1",
+          "new_sqlite_classes": [
+            "BudgetLedger"
+          ]
+        }
+      ]
+    }
+  },
+  "send_metrics": false
+}

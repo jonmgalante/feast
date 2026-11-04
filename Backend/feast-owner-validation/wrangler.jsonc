@@ -1,0 +1,25 @@
+{
+  "name": "feast-owner-validation",
+  "main": "worker.mjs",
+  "account_id": "994f7b36c1e049ae197d27009177804f",
+  "compatibility_date": "2026-10-20",
+  "workers_dev": true,
+  "preview_urls": false,
+  "observability": {
+    "enabled": false
+  },
+  "send_metrics": false,
+  "vars": {
+    "ENABLED": "false",
+    "LIVE_AI": "false",
+    "ALLOW_PUBLIC_LOOKUP": "false",
+    "ALLOW_RECONCILED_BUDGET": "false"
+  },
+  "services": [
+    {
+      "binding": "PRODUCTION",
+      "service": "feast-proxy-production",
+      "entrypoint": "OwnerValidationRPC"
+    }
+  ]
+}

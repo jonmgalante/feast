@@ -313,6 +313,8 @@ final class PersistenceController {
         cloudKitContainer != nil && privateCloudKitStore != nil && sharedCloudKitStore != nil
     }
 
+    private(set) var storeLoadError: String?
+
     init(
         inMemory: Bool = false,
         cloudKitSyncConfiguration: CloudKitSyncConfiguration? = nil
@@ -345,36 +347,26 @@ final class PersistenceController {
                 storeMode = .localOnly
             }
         } catch {
-            guard let preferredCloudKitSyncConfiguration else {
-                fatalError("Failed to load persistent stores: \(error.localizedDescription)")
-            }
-
-            Self.logCloudKitStoreSetupFailure(
-                containerIdentifier: preferredCloudKitSyncConfiguration.containerIdentifier,
-                error: error
-            )
-
-            let fallbackStoreDescriptions = Self.makeStoreDescriptions(
-                inMemory: inMemory,
-                cloudKitSyncConfiguration: nil
-            )
-            let fallbackContainer = Self.makeContainer(
-                managedObjectModel: model,
-                storeDescriptions: fallbackStoreDescriptions.map(\.description)
-            )
-
+            // Never expose a partial collection after a store-load failure. In
+            // particular, do not reopen just the private store as a silent fallback.
+            // This empty context exists only to render the blocking error screen.
+            storeLoadError = "Feast couldn't open its saved collection. Close Feast and try again. \(error.localizedDescription)"
+            let unavailableContainer = NSPersistentCloudKitContainer(name: "FeastDataModel", managedObjectModel: model)
+            let description = NSPersistentStoreDescription()
+            description.type = NSInMemoryStoreType
+            unavailableContainer.persistentStoreDescriptions = [description]
             do {
-                try Self.loadPersistentStores(in: fallbackContainer)
+                try Self.loadPersistentStores(in: unavailableContainer)
             } catch {
-                fatalError("Failed to load persistent stores: \(error.localizedDescription)")
+                fatalError("Unable to create the collection error screen context: \(error.localizedDescription)")
             }
-
-            container = fallbackContainer
-            loadedStores = Self.capturePersistentStores(
-                in: fallbackContainer,
-                matching: fallbackStoreDescriptions
-            )
-            storeMode = .localFallback(containerIdentifier: preferredCloudKitSyncConfiguration.containerIdentifier)
+            container = unavailableContainer
+            loadedStores = LoadedStoreReferences(local: nil, privateCloudKit: nil, sharedCloudKit: nil)
+            if let preferredCloudKitSyncConfiguration {
+                storeMode = .localFallback(containerIdentifier: preferredCloudKitSyncConfiguration.containerIdentifier)
+            } else {
+                storeMode = .localOnly
+            }
         }
 
         localPersistentStore = loadedStores.local
@@ -801,6 +793,21 @@ final class PersistenceController {
         }
 
         return .localOnly
+    }
+
+    func canPerformAskChange(_ entity:String,id:NSManagedObjectID?,operation:String)->Bool {
+        guard let id else {return operation=="create" && defaultWriteStore != nil}
+        guard let object=try? container.viewContext.existingObject(with:id),!object.isDeleted else {return false}
+        if entity=="city",operation=="delete",let city=object as? FeastList {
+            guard case .localOnly=sharingState(for:city) else {return false} // Share deletion needs the native share lifecycle.
+            return canDeleteFeastList(city)
+        }
+        if operation=="delete" {return !supportsSharing || container.canDeleteRecord(forManagedObjectWith:id)}
+        return !supportsSharing || container.canUpdateRecord(forManagedObjectWith:id)
+    }
+    func canRecoverAskStore(_ identifier:String)->Bool {container.persistentStoreCoordinator.persistentStores.contains {$0.identifier==identifier && !$0.isReadOnly && $0 !== sharedCloudKitStore}}
+    func canUpdateSavedPlace(_ id:NSManagedObjectID) -> Bool {
+        !supportsSharing || container.canUpdateRecord(forManagedObjectWith:id)
     }
 
     func canDeleteFeastList(_ feastList: FeastList) -> Bool {

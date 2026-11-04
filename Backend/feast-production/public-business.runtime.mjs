@@ -1,0 +1,35 @@
+// Real local workerd/SQLite with MOCK provider responses. Never deploy this test runner.
+import assert from 'node:assert/strict';import {createRequire} from 'node:module';import {readFile,mkdtemp,rm} from 'node:fs/promises';import {tmpdir} from 'node:os';import {join,resolve} from 'node:path';import {digest} from './broker.mjs';
+const require=createRequire(new URL('../feast-proxy/package.json',import.meta.url));const {Miniflare,convertV4MiniflareOptions}=require('miniflare');
+const packet=process.env.FEAST_PUBLIC_PACKET??'/tmp/feast-public-business-reviewed',root=await mkdtemp(join(tmpdir(),'feast-public-runtime-')),token='z'.repeat(43),now=Date.now(),record={id:'owner-original-iphone17',sha256:await digest(token),createdAt:new Date(now-1000).toISOString(),expiresAt:new Date(now+3600000).toISOString()};
+const id=crypto.randomUUID(),source='https://public-cafe.org/contact',profile='https://www.instagram.com/public_cafe/',quote='Public Cafe in London links its Instagram '+profile;
+let generation=0,fail=false;
+const contents={owner:await readFile(resolve(packet,'owner/worker.js'),'utf8'),production:await readFile(resolve(packet,'production/worker.js'),'utf8')};
+function options(enabled){return {resourcePersistencePath:join(root,'sqlite'),telemetry:{enabled:false},workers:[
+ {name:'owner',modulesRoot:root,compatibilityDate:'2026-10-20',modules:[{type:'ESModule',path:join(root,'owner.mjs'),contents:contents.owner}],bindings:{ENABLED:'true',LIVE_AI:'true',ALLOW_PUBLIC_LOOKUP:String(enabled),ALLOW_RECONCILED_BUDGET:String(enabled),OWNER_TOKEN_HASHES_JSON:JSON.stringify([record])},serviceBindings:{PRODUCTION:{name:'production',entrypoint:'OwnerValidationRPC'}},outboundService:()=>{throw Error('No owner external network')}},
+ {name:'production',modulesRoot:root,compatibilityDate:'2026-10-20',modules:[{type:'ESModule',path:join(root,'production.mjs'),contents:contents.production}],bindings:{ENVIRONMENT:'production',OWNER_VALIDATION_ENABLED:'true',LIVE_AI:'true',ALLOW_PUBLIC_LOOKUP:String(enabled),ALLOW_RECONCILED_BUDGET:String(enabled),ALLOW_LEGACY_RECONCILIATION:String(enabled),OPENAI_API_KEY:'offline-placeholder'},durableObjects:{PRODUCTION_STATE:{className:'ProductionLedger',useSQLite:true}},outboundService:async request=>{
+  assert.equal(new URL(request.url).origin,'https://api.openai.com');const body=await request.json();if(new URL(request.url).pathname.endsWith('/input_tokens'))return Response.json({input_tokens:1000});generation++;if(fail)throw Error('Unknown provider outcome');
+  let output;
+  if(body.tools?.some(x=>x.type==='function'))output=[{type:'function_call',name:'lookup_public_business',call_id:'offline-call',arguments:JSON.stringify({scope:'library',city:'London',name:'Public Cafe',positions:[],fields:['instagram']})}];
+  else if(body.tools){assert.deepEqual(JSON.parse(body.input),{business:{name:'Public Cafe',city:'London'},fields:['instagram']});output=[{type:'web_search_call',status:'completed',action:{type:'search',sources:[{type:'url',url:source}]}},{type:'message',content:[{type:'output_text',text:quote,annotations:[{type:'url_citation',url:source,title:'Contact',start_index:0,end_index:quote.length}]}]}]}
+  else output=[{type:'message',content:[{type:'output_text',text:JSON.stringify({decisions:[{field:'instagram',decision:'supported',targetName:'Public Cafe',targetCity:'London',value:profile,sourceURL:source,blockID:'e0',quote}]})}]}];
+  return Response.json({status:'completed',model:body.model,usage:{input_tokens:1000,output_tokens:100},output});
+ }}]}}
+let mf;const headers={Authorization:'Bearer '+token,'Content-Type':'application/json'},legacy={requestID:crypto.randomUUID(),userHash:'a'.repeat(64),fingerprint:'f'.repeat(64),amountMicroUSD:2500000};
+const internal=(path,p)=>new Request('https://ledger'+path,p?{method:'POST',body:JSON.stringify(p)}:undefined);
+try{
+ mf=new Miniflare(convertV4MiniflareOptions(options(false)));await mf.ready;let ns=await mf.getDurableObjectNamespace('PRODUCTION_STATE','production'),ledger=ns.get(ns.idFromName('production-validation-v1'));
+ assert.equal((await ledger.fetch(internal('/reserve',legacy))).status,200);assert.equal((await ledger.fetch(internal('/complete',{...legacy,calls:1,inputTokens:1000,outputTokens:100}))).status,200);
+ await mf.dispose();mf=new Miniflare(convertV4MiniflareOptions(options(true)));await mf.ready;
+ let s=await(await mf.dispatchFetch('https://owner/v1/status',{headers})).json();assert.equal(s.accountingVersion,2);assert.equal(s.chargedMicroUSD,33000);assert.equal(s.historicalReservedMicroUSD,2500000);
+ const p={version:7,mode:'libraryIntent',requestID:crypto.randomUUID(),text:'Find a way to contact that saved place',context:{index:[{id,name:'Public Cafe',city:'London',cuisines:[]}],recent:[]}};
+ let r=await mf.dispatchFetch('https://owner/v1/answer',{method:'POST',headers,body:JSON.stringify(p)});assert.equal(r.status,200);const planned=await r.json();assert.equal(planned.version,3);assert.equal(planned.plan.operation,'lookup');
+ const task={version:7,mode:'publicLookup',requestID:crypto.randomUUID(),business:{name:'Public Cafe',city:'London'},fields:['instagram']},send=()=>mf.dispatchFetch('https://owner/v1/answer',{method:'POST',headers,body:JSON.stringify(task)});
+ r=await send();assert.equal(r.status,200);const answer=await r.json();assert.equal(answer.findings[0].value,profile);assert.equal(answer.findings[0].sourceURL,source);assert.equal(generation,3);assert.equal((await send()).status,409);assert.equal(generation,3);
+ await mf.dispose();mf=new Miniflare(convertV4MiniflareOptions(options(true)));await mf.ready;
+ s=await(await mf.dispatchFetch('https://owner/v1/status',{headers})).json();assert.equal(s.historicalReservedMicroUSD,13000000);assert.equal(s.pendingMicroUSD,0);assert.ok(s.chargedMicroUSD>66000&&s.chargedMicroUSD<200000);assert.equal(s.remainingMicroUSD,20000000-s.chargedMicroUSD);
+ ns=await mf.getDurableObjectNamespace('PRODUCTION_STATE','production');ledger=ns.get(ns.idFromName('production-validation-v1'));assert.equal((await(await ledger.fetch(internal('/status'))).json()).reservedMicroUSD,2500000);assert.equal((await ledger.fetch(internal('/reserve',{...legacy,requestID:crypto.randomUUID()}))).status,503);
+ assert.equal((await send()).status,409);const pub=await mf.getWorker('production');assert.equal((await pub.fetch('https://prod/v1/answer',{method:'POST',body:'{}'})).status,503);
+ fail=true;const uncertain={...task,requestID:crypto.randomUUID()};assert.equal((await mf.dispatchFetch('https://owner/v1/answer',{method:'POST',headers,body:JSON.stringify(uncertain)})).status,503);s=await(await mf.dispatchFetch('https://owner/v1/status',{headers})).json();assert.equal(s.halted,true);assert.equal(s.pendingMicroUSD,8000000);
+ console.log('PASS REAL LOCAL workerd/RPC/SQLite + MOCK provider: general plan→public-only cited research, verified settlement, legacy records/counters unchanged, restart/dedup/mixed-version safety and uncertain full hold. Zero external requests; NOT live API/web/semantic verification.');
+}finally{if(mf)await mf.dispose();await rm(root,{recursive:true,force:true})}

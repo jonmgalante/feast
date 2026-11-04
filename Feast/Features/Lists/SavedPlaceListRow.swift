@@ -1,4 +1,5 @@
 import SwiftUI
+import CoreData
 
 struct SavedPlaceListRow: View {
     @ObservedObject var place: SavedPlace
@@ -6,9 +7,7 @@ struct SavedPlaceListRow: View {
     var showsLocationContext = false
 
     var body: some View {
-        NavigationLink {
-            SavedPlaceDetailView(savedPlace: place)
-        } label: {
+        NavigationLink(value: SavedPlaceBrowseRoute.place(place.objectID.uriRepresentation().absoluteString)) {
             HStack(alignment: .top, spacing: FeastTheme.Spacing.small) {
                 if isNested {
                     Color.clear
@@ -46,15 +45,11 @@ struct SavedPlaceListRow: View {
                 Spacer(minLength: 0)
             }
         }
+        .browseRowAnchor(place.objectID.uriRepresentation().absoluteString)
     }
 
     private var statusAndTypeLine: some View {
-        Text("\(Text(place.placeStatus.rawValue).fontWeight(.semibold)) • \(Text(place.placeTypeValue.rawValue))")
-            .font(FeastTheme.Typography.rowMetadata)
-            .foregroundStyle(FeastTheme.Colors.secondaryText)
-            .lineLimit(2)
-            .truncationMode(.tail)
-            .minimumScaleFactor(0.9)
+        FeastStatusMetadata(status: place.placeStatus, detail: place.placeTypeValue.rawValue)
     }
 
     private func metadataText(
