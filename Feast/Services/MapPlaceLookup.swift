@@ -43,6 +43,10 @@ enum MapPlaceLookupFailure: Error, Equatable {
     func retryEvictedLocations() { resolvedAt.removeAll() }
 
     enum Value { case place(ApplePlaceMatch), city(SavedMapViewport) }
+    enum CityAnchor {
+        case located(SavedMapViewport), deferred, unavailable
+        var viewport: SavedMapViewport? { if case let .located(value) = self { value } else { nil } }
+    }
     struct Metrics {
         var calls = 0, cacheHits = 0, joined = 0, cancelled = 0, successes = 0
         var throttled = 0, connection = 0, service = 0, unavailable = 0
@@ -85,6 +89,32 @@ enum MapPlaceLookupFailure: Error, Equatable {
     var cachedCount: Int { prune(); return cache.count }
     func cachedPlace(_ id: String) -> ApplePlaceMatch? {
         guard case let .place(match)? = cached("place:" + id, countHit: false) else { return nil }; return match
+    }
+    /// Reuse an actual saved place as the city anchor. A free-text city query can
+    /// resolve to another city or street and silently exclude the user's records.
+    /// Only try another of the three candidates when a place is unavailable.
+    func cityAnchor(placeIDs: [String], near viewport: SavedMapViewport? = nil,
+                    lookup: @escaping (String) async throws -> ApplePlaceMatch?) async throws -> CityAnchor {
+        try Task.checkCancellation()
+        let coordinates = Set(placeIDs).sorted().compactMap { cachedPlace($0)?.coordinate }
+        if let coordinate = coordinates.first(where: { viewport?.contains($0, padding: 3) == true }) ?? coordinates.first {
+            return .located(.city(around: coordinate))
+        }
+        // A successful but evicted anchor must not be fetched again on every pan.
+        // Explicit Retry/expiry allows another attempt, as for ordinary pins.
+        if !recentlyResolvedIDs.isDisjoint(with: placeIDs) { return .deferred }
+        for id in SavedMapPlan.anchorIDs(placeIDs) {
+            try Task.checkCancellation()
+            do {
+                if let place = try await resolve(placeID: id, lookup: lookup), let coordinate = place.coordinate {
+                    return .located(.city(around: coordinate))
+                }
+            } catch {
+                if error is CancellationError { throw error }
+                if MapPlaceLookupFailure.classify(error) != .unavailable { throw error }
+            }
+        }
+        return .unavailable
     }
     func cachedCity(_ name: String) -> SavedMapViewport? {
         guard case let .city(region)? = cached("city:" + name, countHit: false) else { return nil }; return region

@@ -9,9 +9,9 @@ import MapKit
             try Task.checkCancellation(); delays.append(seconds); time += seconds
         }
     }
-    static func pin(_ id: String, latitude: Double = 40) -> ApplePlaceMatch {
+    static func pin(_ id: String, latitude: Double = 40, longitude: Double = -73) -> ApplePlaceMatch {
         .init(applePlaceID: id, displayName: "Test location", secondaryText: "",
-              coordinate: .init(latitude: latitude, longitude: -73),
+              coordinate: .init(latitude: latitude, longitude: longitude),
               suggestedSectionPath: .init(cityOrRegion: nil, neighborhood: nil), websiteURL: nil, instagramURL: nil)
     }
     static func spin(_ ready: () -> Bool) async {
@@ -93,6 +93,7 @@ import MapKit
         try await capacityAndLifecycle()
         for count in [284, 1500] { try await scale(count) }
         planTests()
+        try await cityAnchors()
         try await cancellationAdapter()
     }
     static func capacityAndLifecycle() async throws {
@@ -175,6 +176,102 @@ import MapKit
         print("PASS camera results reject newer pan/Nearby/scope/background intent; coincident clusters remain selectable")
         print("PASS filter/city demand excludes unrelated 184 lookups, known hits reused, wide zoom defers unknowns, date-line viewport and order-invariant identity")
     }
+    static func cityAnchors() async throws {
+        let service = MapPlaceLookup(emit: {_,_,_ in})
+        let coordinates = ["ny": ApplePlaceCoordinate(latitude:40.72,longitude:-73.98),
+                           "london": .init(latitude:51.51,longitude:-0.12),
+                           "paris": .init(latitude:48.86,longitude:2.35)]
+        let counts = ["ny":152, "london":100, "paris":32]
+        let places = counts.flatMap { city, count in
+            (0..<count).map { SavedMapPlan.Place(id:"\(city)-record-\($0)",
+                appleID:String(format:"%@-%03d",city,$0),cityID:city) }
+        }
+        var requested: [String] = []
+        func resolve(_ id: String) async throws -> ApplePlaceMatch? {
+            requested.append(id); await Task.yield()
+            let coordinate = coordinates[String(id.split(separator:"-")[0])]!
+            return pin(id,latitude:coordinate.latitude,longitude:coordinate.longitude)
+        }
+        var anchors: [String: SavedMapViewport] = [:]
+        try await withThrowingTaskGroup(of:(String,SavedMapViewport).self) { group in
+            for city in counts.keys {
+                let ids = places.filter {$0.cityID==city}.map(\.appleID)
+                group.addTask { @MainActor in
+                    (city,try await service.cityAnchor(placeIDs:ids,lookup:resolve).viewport!)
+                }
+            }
+            for try await (city,anchor) in group { anchors[city]=anchor }
+        }
+        precondition(requested.count == 3 && service.cachedCount == 3)
+        precondition(service.metrics.maxActive <= 3)
+        precondition(SavedMapPlan.lookupIDs(places:places,selectedCity:nil,viewport:.overview,
+            cityHints:anchors,known:service.recentlyResolvedIDs).isEmpty)
+        let london = SavedMapViewport(latitude:51.5,longitude:-0.1,latitudeDelta:0.8,longitudeDelta:1.1)
+        let needed = SavedMapPlan.lookupIDs(places:places,selectedCity:nil,viewport:london,
+            cityHints:anchors,known:service.recentlyResolvedIDs)
+        precondition(needed.count == 99 && needed.allSatisfy {$0.hasPrefix("london-")})
+        for id in needed { _ = try await service.resolve(placeID:id,lookup:resolve) }
+        let calls = requested.count
+        let again = try await service.cityAnchor(placeIDs:places.filter {$0.cityID=="london"}.map(\.appleID),near:london,lookup:resolve)
+        precondition(again.viewport?.contains(coordinates["london"]!) == true && requested.count == calls)
+        precondition(SavedMapPlan.lookupIDs(places:places,selectedCity:nil,viewport:london,
+            cityHints:anchors,known:service.recentlyResolvedIDs).isEmpty)
+        // A name-only result for London, Ontario rejects UK demand in build 10.
+        // The exact saved-place anchor selects the correct UK records instead.
+        let wrongNameHint = SavedMapViewport(latitude:42.98,longitude:-81.25,latitudeDelta:0.09,longitudeDelta:0.12)
+        precondition(SavedMapPlan.lookupIDs(places:places,selectedCity:nil,viewport:london,
+            cityHints:["london":wrongNameHint],known:[]).isEmpty)
+        precondition(SavedMapPlan.lookupIDs(places:places,selectedCity:nil,viewport:london,
+            cityHints:anchors,known:[]).count == 100)
+        print("PASS cold All Cities resolves one exact saved-place anchor per city; 284 records avoid a whole-library sweep; London pan loads its 99 remaining records and reuses them")
+
+        let fallback = MapPlaceLookup(emit: {_,_,_ in}); var tried: [String] = []
+        let anchor = try await fallback.cityAnchor(placeIDs:["c","a","b","d","","a"]) { id in
+            tried.append(id)
+            if id == "a" { throw MapPlaceLookupFailure.unavailable }
+            if id == "b" { return nil }
+            return pin(id,latitude:51.51,longitude:-0.12)
+        }
+        precondition(tried == ["a","b","c"] && anchor.viewport?.contains(coordinates["london"]!) == true)
+        let unavailable = MapPlaceLookup(emit:{_,_,_ in}); var missing=0
+        let absent = try await unavailable.cityAnchor(placeIDs:["d","c","b","a"]) {_ in missing += 1;return nil}
+        precondition(absent.viewport == nil && missing == 3)
+        let offline = MapPlaceLookup(emit:{_,_,_ in}); var attempts=0
+        do {_ = try await offline.cityAnchor(placeIDs:["a","b","c"]) {_ in attempts += 1;throw MapPlaceLookupFailure.connection};preconditionFailure()}
+        catch {precondition(MapPlaceLookupFailure.classify(error) == .connection)}
+        precondition(attempts==1)
+        let blank = try await service.cityAnchor(placeIDs:["",""]) {_ in preconditionFailure("Blank anchor called provider")}
+        precondition(blank.viewport == nil)
+        print("PASS saved-place city camera anchors try at most three unavailable candidates, stop on connectivity failure, ignore duplicate/blank IDs and never query an ambiguous city label")
+
+        let spread = MapPlaceLookup(emit:{_,_,_ in})
+        _ = try await spread.resolve(placeID:"a") {pin($0,latitude:40.72,longitude:-73.98)}
+        _ = try await spread.resolve(placeID:"b") {pin($0,latitude:51.51,longitude:-0.12)}
+        let nearest = try await spread.cityAnchor(placeIDs:["a","b"],near:london) {_ in preconditionFailure("Cached anchor queried provider")}
+        precondition(nearest.viewport?.contains(coordinates["london"]!) == true)
+        precondition(SavedMapPlan.anchorIDs(["b","","a","b","d","c"]) == ["a","b","c"])
+        print("PASS city anchors prefer a cached saved place near the current viewport and remain stable under record reordering")
+
+        let clock = Clock()
+        let full = MapPlaceLookup(capacity:1,ttl:10,now:{clock.time},emit:{_,_,_ in})
+        full.visibleViewport = .city(around:coordinates["ny"]!)
+        _ = try await full.resolve(placeID:"ny") {pin($0,latitude:40.72,longitude:-73.98)}
+        let first = try await full.cityAnchor(placeIDs:["london-a","london-b"]) {pin($0,latitude:51.51,longitude:-0.12)}
+        precondition(first.viewport != nil && full.cachedPlace("london-a") == nil)
+        for _ in 0..<10 {
+            let deferred = try await full.cityAnchor(placeIDs:["london-a","london-b"]) {_ in preconditionFailure("Evicted anchor refetched automatically")}
+            guard case .deferred = deferred else {preconditionFailure("Capacity classified as unavailable")}
+        }
+        precondition(full.metrics.calls == 2 && full.cachedPlace("ny") != nil)
+        full.retryEvictedLocations()
+        _ = try await full.cityAnchor(placeIDs:["london-a"]) {pin($0,latitude:51.51,longitude:-0.12)}
+        precondition(full.metrics.calls == 3)
+        clock.time += 11
+        _ = try await full.cityAnchor(placeIDs:["london-a"]) {pin($0,latitude:51.51,longitude:-0.12)}
+        precondition(full.metrics.calls == 4)
+        print("PASS evicted city anchors defer without repeated pan lookups, preserve visible pins and become retryable after explicit Retry or TTL expiry")
+    }
+
     static func cancellationAdapter() async throws {
         var callback: AppleMapItemOperation.Completion?, cancels = 0
         let operation = AppleMapItemOperation(start: { callback = $0 }, cancel: { cancels += 1 })

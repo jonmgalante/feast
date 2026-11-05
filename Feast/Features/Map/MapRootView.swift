@@ -37,6 +37,7 @@ struct MapRootView: View {
     @State private var clusterIDs: [String] = []
     @State private var selectedPlaceID: NSManagedObjectID?
     @State private var isResolvingMarkers = false
+    @State private var showLoadingIndicator = false
 
     @State private var markerFailure: MapPlaceLookupFailure?
     @State private var showingExploreSearch = false
@@ -65,11 +66,6 @@ struct MapRootView: View {
 
     private var lifecycleContent: some View {
         content
-            .toolbar {
-                if (markerFailure != nil || !failedIDs.isEmpty || capacityDeferredCount > 0) && !isResolvingMarkers {
-                    Button("Retry Missing Pins") { markerLookup.retryEvictedLocations(); markerRetry += 1 }
-                }
-            }
             .onDisappear { markerLookup.visibleViewport = nil; nearby.cancel(); markerGeneration = UUID(); isResolvingMarkers = false }
             .onChange(of: scenePhase) { _, phase in if phase == .background { nearby.cancel() } }
             .onChange(of: browse.selectedTab) { _, tab in if tab != 1 { nearby.cancel() } }
@@ -93,9 +89,14 @@ struct MapRootView: View {
 
     var body: some View {
         lifecycleContent
-            .navigationTitle("Map")
-            .navigationBarTitleDisplayMode(.inline)
-            .task(id: "camera|\(browse.scopeKey)|\(markerRetry)|\(mapIsActive)") {
+            .toolbar(presentedPlaceID == nil ? .hidden : .visible, for: .navigationBar)
+            .task(id: isResolvingMarkers) {
+                showLoadingIndicator = false
+                guard isResolvingMarkers else { return }
+                do { try await Task.sleep(for: .milliseconds(400)) } catch { return }
+                if !Task.isCancelled { showLoadingIndicator = true }
+            }
+            .task(id: "camera|\(cameraResolutionKey)|\(markerRetry)|\(mapIsActive)") {
                 if mapIsActive { await prepareCamera() }
             }
             .task(id: markerResolutionKey + "|\(markerRetry)|\(mapIsActive)") {
@@ -240,7 +241,6 @@ struct MapRootView: View {
     private var filteredMarkerItems: [SavedPlaceMapMarker] {
         markerItems.filter { viewport.contains($0.coordinate) }
     }
-    private var unresolvedPlaceCount: Int { max(0, filteredCitySavedPlaces.count - markerItems.count) }
     private var capacityDeferredCount: Int {
         let cached = Set(markerItems.map(\.applePlaceID)), attempted = markerLookup.recentlyResolvedIDs
         return placePlan.filter { !cached.contains($0.appleID) && attempted.contains($0.appleID) }.count
@@ -256,11 +256,13 @@ struct MapRootView: View {
         savedPlaceFilters.hasCriteria
     }
 
-    private var mapIsActive: Bool { browse.selectedTab == 1 && scenePhase != .background }
+    private var mapIsActive: Bool { browse.selectedTab == 1 && scenePhase != .background && presentedPlaceID == nil }
 
     private var markerResolutionKey: String {
-        let cities = feastLists.map { "\($0.objectURIString):\($0.displayName)" }.sorted().joined(separator: "|")
-        return browse.scopeKey + "|" + SavedMapPlan.identity(placePlan) + "|" + cities + "|" + viewport.queryKey
+        browse.scopeKey + "|" + SavedMapPlan.identity(placePlan) + "|" + viewport.queryKey
+    }
+    private var cameraResolutionKey: String {
+        browse.scopeKey + "|" + SavedMapPlan.identity(placePlan)
     }
 
     private var headerLayout: AnyLayout {
@@ -270,90 +272,52 @@ struct MapRootView: View {
     }
 
     private var mapHeaderOverlay: some View {
-        VStack(alignment: .leading, spacing: FeastTheme.Spacing.small) {
-            headerLayout {
-                VStack(alignment: .leading, spacing: FeastTheme.Spacing.small) {
-                    Text("City")
-                        .font(FeastTheme.Typography.sectionLabel)
-                        .tracking(0.8)
-                        .foregroundStyle(FeastTheme.Colors.secondaryText)
-
-                    Menu {
-                        Button("All Cities") { browse.filters.selectedListURIString = nil }
-                        ForEach(feastLists) { feastList in
-                            Button(feastList.displayName) {
-                                browse.filters.selectedListURIString = uriString(for: feastList)
-                            }
-                        }
-                    } label: {
-                        HStack(spacing: FeastTheme.Spacing.small) {
-                            Image(systemName: "mappin.circle.fill")
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundStyle(FeastTheme.Colors.accentSelection)
-
-                            Text(selectedFeastList?.displayName ?? "All Cities")
-                                .font(FeastTheme.Typography.listTitle)
-                                .foregroundStyle(FeastTheme.Colors.primaryText)
-                                .fixedSize(horizontal: false, vertical: true)
-
-                            Image(systemName: "chevron.down")
-                                .font(FeastTheme.Typography.caption.weight(.semibold))
-                                .foregroundStyle(FeastTheme.Colors.secondaryText)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
+        headerLayout {
+            Menu {
+                Button("All Cities") { browse.filters.selectedListURIString = nil }
+                ForEach(feastLists) { feastList in
+                    Button(feastList.displayName) {
+                        browse.filters.selectedListURIString = uriString(for: feastList)
                     }
-                    .buttonStyle(.plain)
-                    .frame(minHeight: 44)
-
-                    if let markerFailure, unresolvedPlaceCount > 0, !isResolvingMarkers {
-                        Text(markerFailure.message).font(FeastTheme.Typography.caption)
-                            .foregroundStyle(FeastTheme.Colors.secondaryText)
-                    }
-                    Text(citySummaryText)
-                        .font(FeastTheme.Typography.rowMetadata)
-                        .foregroundStyle(citySummaryColor)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .multilineTextAlignment(.leading)
                 }
-
-                if !dynamicTypeSize.isAccessibilitySize { Spacer(minLength: 0) }
-
-                VStack(alignment: .trailing, spacing: FeastTheme.Spacing.small) {
-                    Button {
-                        presentDiscovery()
-                    } label: {
-                        Label("Search", systemImage: "magnifyingglass")
-                    }
-                    .buttonStyle(FeastQuietChipButtonStyle())
-                    .accessibilityLabel("Search Apple Maps")
-
-                    Button {
-                        presentSavedPlaceFilters()
-                    } label: {
-                        HStack(spacing: FeastTheme.Spacing.xSmall) {
-                            Image(
-                                systemName: hasActiveSavedPlaceFilters
-                                    ? "line.3.horizontal.decrease.circle.fill"
-                                    : "line.3.horizontal.decrease.circle"
-                            )
-
-                            Text("Filters")
-
-                        }
-                    }
-                    .buttonStyle(FeastQuietChipButtonStyle())
-                    .accessibilityLabel("Filters")
-                    .accessibilityValue(
-                        hasActiveSavedPlaceFilters
-                            ? "Active filters"
-                            : "No active filters"
-                    )
+            } label: {
+                HStack(spacing: FeastTheme.Spacing.small) {
+                    Image(systemName: "mappin.circle.fill")
+                        .foregroundStyle(FeastTheme.Colors.accentSelection)
+                    Text(selectedFeastList?.displayName ?? "All Cities")
+                        .font(FeastTheme.Typography.listTitle)
+                        .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 1)
+                    Image(systemName: "chevron.down")
+                        .font(FeastTheme.Typography.caption.weight(.semibold))
                 }
+                .foregroundStyle(FeastTheme.Colors.primaryText)
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel("City")
+            .accessibilityValue(selectedFeastList?.displayName ?? "All Cities")
 
+            HStack(spacing: FeastTheme.Spacing.small) {
+                Button(action: presentDiscovery) {
+                    if dynamicTypeSize.isAccessibilitySize {
+                        Label("Search", systemImage: "magnifyingglass")
+                    } else { Image(systemName: "magnifyingglass") }
+                }
+                .buttonStyle(FeastQuietChipButtonStyle())
+                .accessibilityLabel("Search Apple Maps")
+                Button(action: presentSavedPlaceFilters) {
+                    let symbol = hasActiveSavedPlaceFilters
+                        ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle"
+                    if dynamicTypeSize.isAccessibilitySize { Label("Filters", systemImage: symbol) }
+                    else { Image(systemName: symbol) }
+                }
+                .buttonStyle(FeastQuietChipButtonStyle())
+                .accessibilityLabel("Filters")
+                .accessibilityValue(hasActiveSavedPlaceFilters ? "Active filters" : "No active filters")
+            }
         }
-        .padding(.horizontal, FeastTheme.Spacing.large)
-        .padding(.vertical, FeastTheme.Spacing.medium)
+        .padding(FeastTheme.Spacing.medium)
         .feastMapOverlayCard(cornerRadius: FeastTheme.CornerRadius.medium)
     }
 
@@ -385,39 +349,31 @@ struct MapRootView: View {
                 }
             }
             .overlay(alignment: .bottomLeading) {
-                if isResolvingMarkers {
-                    HStack(spacing: 6) {
-                        ProgressView().controlSize(.small)
-                        Text(loadingCount > 0 ? "Loading locations · \(completedCount)/\(loadingCount)" : "Finding nearby cities…")
-                            .font(FeastTheme.Typography.caption)
-                    }
-                    .padding(10).feastMapOverlayCard(cornerRadius: FeastTheme.CornerRadius.medium)
-                    .padding(.leading, 12).padding(.bottom, 70)
-                    .accessibilityElement(children: .combine)
+                if isResolvingMarkers && showLoadingIndicator {
+                    ProgressView()
+                        .controlSize(.small)
+                        .padding(12)
+                        .feastMapOverlayCard(cornerRadius: FeastTheme.CornerRadius.medium)
+                        .padding(.leading, 12).padding(.bottom, 70)
+                        .accessibilityLabel("Loading saved places")
+                } else if !isResolvingMarkers && needsRetry {
+                    Button {
+                        markerLookup.retryEvictedLocations(); markerRetry += 1
+                    } label: { Label("Retry", systemImage: "arrow.clockwise") }
+                        .buttonStyle(FeastQuietChipButtonStyle())
+                        .padding(.leading, 12).padding(.bottom, 70)
+                        .accessibilityLabel("Retry loading saved places")
+                        .accessibilityHint(markerFailure?.message ?? "Reload missing map pins.")
                 }
             }
     }
 
-    private var citySummaryColor: Color {
-        filteredCitySavedPlaces.isEmpty ? FeastTheme.Colors.secondaryText : FeastTheme.Colors.tertiaryText
-    }
-
-    private var citySummaryText: String {
-        if selectedCitySavedPlaces.isEmpty { return "Search Apple Maps and save places to start building the map." }
-        if shouldShowNoMatchingResults { return emptyReason == .queryHasNoMatches ? "No saved places match this search." : "Filters are hiding matching places." }
-        let base = "\(filteredMarkerItems.count) pins in view · \(filteredCitySavedPlaces.count) saved places"
-        if capacityDeferredCount > 0 { return base + ". Some locations were released from temporary memory. Retry Missing Pins to reload them." }
-        if browse.filters.selectedListURIString == nil && !viewport.loadsUnknownPlaces { return base + ". Zoom in or choose a city to load locations." }
-        if unresolvedPlaceCount > 0 && !isResolvingMarkers && failedIDs.isEmpty { return base + ". Some locations aren't loaded yet; choose a city to include them." }
-        return base
+    private var needsRetry: Bool {
+        markerFailure != nil || !failedIDs.isEmpty || capacityDeferredCount > 0
     }
 
     private var emptyReason: SavedPlaceEmptyReason {
         SavedPlaceEmptyReason.evaluate(places: Array(savedPlaces), filters: savedPlaceFilters)
-    }
-
-    private var shouldShowNoMatchingResults: Bool {
-        emptyReason == .queryHasNoMatches || emptyReason == .filtersHideMatches
     }
 
     @MainActor private func setCamera(_ next: SavedMapViewport) {
@@ -430,15 +386,17 @@ struct MapRootView: View {
         viewportRevision += 1
         if let remembered = browse.viewports[scope] { displayedScope = scope; setCamera(remembered); return }
         let revision = viewportRevision
-        if let city = selectedFeastList {
+        let requestedIdentity = cameraResolutionKey
+        if selectedFeastList != nil {
             do {
-                let hint = try await markerLookup.city(name: city.displayName) { try await applePlacesService.cityViewport(name: $0) }
-                guard !Task.isCancelled, let hint,
+                let ids = placePlan.map(\.appleID)
+                let anchor = try await markerLookup.cityAnchor(placeIDs: ids) { try await applePlacesService.resolve(placeID: $0) }
+                guard !Task.isCancelled, let hint = anchor.viewport, requestedIdentity == cameraResolutionKey,
                       SavedMapPlan.acceptsCameraResult(requestedScope: scope, currentScope: browse.scopeKey,
                           requestedRevision: revision, currentRevision: viewportRevision, active: mapIsActive) else { return }
                 displayedScope = scope; setCamera(hint)
             } catch {
-                if !Task.isCancelled { markerFailure = MapPlaceLookupFailure.classify(error) }
+                if !Task.isCancelled, requestedIdentity == cameraResolutionKey { markerFailure = MapPlaceLookupFailure.classify(error) }
             }
         } else {
             automaticNearby = true; nearbyScope = scope; nearbyRevision = revision
@@ -454,9 +412,13 @@ struct MapRootView: View {
         let generation = UUID(); markerGeneration = generation
         let plan = placePlan, scope = browse.scopeKey, requestedViewport = viewport
         let selected = browse.filters.selectedListURIString
-        let eligibleCities = Set(plan.map(\.cityID))
-        let cities = feastLists.filter { eligibleCities.contains($0.objectURIString) }
-            .map { ($0.objectURIString, $0.displayName) }
+        let cities = Dictionary(grouping: plan, by: \.cityID).map { id, places in
+            let ids = places.map(\.appleID).filter { !$0.isEmpty }
+            let nearby = ids.contains { id in
+                markerLookup.cachedPlace(id)?.coordinate.map { requestedViewport.contains($0, padding: 3) } ?? false
+            }
+            return (id: id, ids: ids, nearby: nearby)
+        }.filter { !$0.ids.isEmpty }
         isResolvingMarkers = true; loadingCount = 0; completedCount = 0; markerFailure = nil; failedIDs = []
         defer {
             if markerGeneration == generation {
@@ -471,14 +433,12 @@ struct MapRootView: View {
                 viewport: requestedViewport, cityHints: [:], known: markerLookup.recentlyResolvedIDs), generation: generation)
             return
         }
-        guard requestedViewport.loadsUnknownPlaces else { return }
-        // Hints are city-level demand hints, not a spatial index for unknown records.
-        // Nearby cached hints go first. As a nearby hint returns, load that city's
-        // eligible places without waiting for every other city's hint.
+        // Even a wide overview resolves at most one successful saved place per
+        // city (up to three candidates if unavailable). This gives other cities
+        // a real anchor without a whole-library sweep. Near a city, its eligible
+        // places load automatically; a label such as "London" never gates them.
         let orderedCities = cities.sorted {
-            let a = markerLookup.cachedCity($0.1).map { requestedViewport.contains(.init(latitude:$0.latitude,longitude:$0.longitude),padding:3) } ?? false
-            let b = markerLookup.cachedCity($1.1).map { requestedViewport.contains(.init(latitude:$0.latitude,longitude:$0.longitude),padding:3) } ?? false
-            return a != b ? a : $0.0 < $1.0
+            $0.nearby != $1.nearby ? $0.nearby : $0.id < $1.id
         }
         var index = 0
         await withTaskGroup(of: (String, SavedMapViewport?, MapPlaceLookupFailure?).self) { group in
@@ -486,8 +446,14 @@ struct MapRootView: View {
                 guard index < orderedCities.count, !Task.isCancelled else { return }
                 let city = orderedCities[index]; index += 1
                 group.addTask { @MainActor in
-                    do { return (city.0, try await markerLookup.city(name: city.1) { try await applePlacesService.cityViewport(name: $0) }, nil) }
-                    catch { return (city.0, nil, error is CancellationError ? nil : MapPlaceLookupFailure.classify(error)) }
+                    do {
+                        let anchor = try await markerLookup.cityAnchor(placeIDs: city.ids, near: requestedViewport) {
+                            try await applePlacesService.resolve(placeID: $0)
+                        }
+                        if case .unavailable = anchor { return (city.id, nil, .unavailable) }
+                        return (city.id, anchor.viewport, nil)
+                    }
+                    catch { return (city.id, nil, error is CancellationError ? nil : MapPlaceLookupFailure.classify(error)) }
                 }
             }
             for _ in 0..<min(3, orderedCities.count) { add() }

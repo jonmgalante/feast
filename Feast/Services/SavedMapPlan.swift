@@ -19,6 +19,10 @@ extension SavedMapViewport {
     static func nearby(_ coordinate: CLLocationCoordinate2D) -> Self {
         Self(MKCoordinateRegion(center: coordinate, latitudinalMeters: 3_000, longitudinalMeters: 3_000))
     }
+    static func city(around coordinate: ApplePlaceCoordinate) -> Self {
+        .init(latitude: coordinate.latitude, longitude: coordinate.longitude,
+              latitudeDelta: 0.09, longitudeDelta: 0.12)
+    }
     /// Wrapped longitude handles both sides of the date line, including padded views.
     func contains(_ coordinate: ApplePlaceCoordinate, padding: Double = 1.25) -> Bool {
         guard isValid, CLLocationCoordinate2DIsValid(.init(latitude: coordinate.latitude, longitude: coordinate.longitude)) else { return false }
@@ -29,9 +33,12 @@ extension SavedMapViewport {
     var queryKey: String { "\(latitude),\(longitude),\(latitudeDelta),\(longitudeDelta)" }
 }
 
-/// Metadata-only plan. A city anchor is a demand hint, not proof of a record's
-/// location. Unknown places outside these hints stay unattempted, never 'missing'.
+/// Metadata-only plan. Anchors come from exact saved Apple place IDs, never a
+/// potentially ambiguous city-name search. They are demand hints, not boundaries.
 enum SavedMapPlan {
+    static func anchorIDs(_ ids: [String]) -> [String] {
+        Array(Set(ids.filter { !$0.isEmpty }).sorted().prefix(3))
+    }
     static func acceptsCameraResult(requestedScope: String, currentScope: String,
                                     requestedRevision: Int, currentRevision: Int, active: Bool) -> Bool {
         active && requestedScope == currentScope && requestedRevision == currentRevision

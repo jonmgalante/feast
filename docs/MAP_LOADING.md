@@ -11,18 +11,27 @@ container, stores, sharing, saved coordinates, Ask Feast, access, or accounting.
   viewports take precedence. Pan start and newer Nearby requests invalidate late
   camera results. Adding, expiring, or resolving pins never frames the camera.
 - Active saved filters apply before requests. An explicitly selected city loads
-  its eligible records. All Cities uses temporary Apple city-center hints to
-  prioritize nearby eligible cities. A nearby hint starts its place work without
-  waiting for all other hints. No place-level whole-library sweep runs on open.
+  its eligible records. All Cities resolves an exact saved Apple place ID per
+  eligible city as a temporary anchor, including at wide zoom. A nearby anchor
+  starts its place work without waiting for all other anchors. No place-level
+  whole-library sweep runs on open. Camera requests use the same filtered IDs
+  and invalidate pending results when the eligible identity changes.
 - Known locations are drawn only within a padded viewport. MapKit clusters them;
   coincident pins or clusters at close zoom open an exact-record selection list.
-- Unknown coordinates cannot honestly be spatially filtered. City labels/hints
-  are approximate and can be ambiguous or include outlying records. Unknown
-  records stay saved and are described as not loaded, never as nonexistent.
-  Wide All Cities views defer new unknown locations until zoomed in/selected.
-- All Cities may need one city-hint request per eligible city. This is not a
-  complete persistent spatial index. A large number of cities is a remaining
-  first-stage limitation; explicit city selection avoids that work.
+- Unknown coordinates cannot honestly be spatially filtered. A saved-place
+  anchor is a demand hint, not a geographic boundary; outlying records can still
+  need explicit city selection. Wide All Cities views load city anchors and defer
+  the remaining unknown places until zoomed in or selected.
+- All Cities needs one successful saved-place request per eligible city. It tries
+  up to three stable candidates only when earlier candidates are unavailable. If
+  all three fail, explicit city selection still attempts the remaining records.
+  This is not a complete persistent spatial index; many cities remain a bounded-
+  concurrency first-stage cost. Cached points near the viewport take precedence.
+- The header is a compact city picker with Search and Filters controls. Routine
+  loading counts and explanatory copy are removed. A small spinner appears only
+  after 400 ms of loading; actual requests begin immediately. Failures or capacity
+  deferral expose Retry on the map, without adding a navigation bar. Detail
+  navigation restores its own bar and pauses map demand while pushed.
 
 ## Scheduling and temporary reuse
 
@@ -35,14 +44,14 @@ retry automatically. Six healthy completions permit a gradual increase back to
 three. Each native item/search request has a 20-second cancellation deadline.
 Failures stop further batch dispatch; completed successes remain usable.
 
-Apple-derived matches and city hints live only in RAM, for five minutes from
+Apple-derived matches and their city anchors live only in RAM, for five minutes from
 retrieval, capped at 2,048 entries; reads do not extend expiry. Visible entries are
 preferred over distant entries on eviction. Backgrounding clears entries and
 subscribers. Views read the shared entries rather than retaining a second result
 cache. Timed eviction refreshes active demand without canceling unrelated work.
 A bounded, same-TTL record of successful requested IDs prevents capacity churn;
-it contains no coordinates. Capacity-deferred results have an explicit reload
-message and Retry control. Collections exceeding capacity do not have guaranteed
+it contains no coordinates. This memo also prevents an evicted city anchor from
+being fetched on every pan. Capacity-deferred results have a Retry control. Collections exceeding capacity do not have guaranteed
 complete simultaneous pin coverage. No disk cache or coordinate migration exists.
 
 This implements a conservative temporary, limited performance cache under
@@ -84,7 +93,7 @@ performance or all 284 real saved records were checked from synthetic fixtures.
 Rollback is the preceding source/build. No data restoration or migration is
 required because this change writes no saved collection data.
 
-## Local validation recorded 2026-11-05
+## Initial map candidate validation recorded 2026-11-05
 
 - Baseline `fe03eeed7f0ad12d229026088fc7f29ac1cc9da0`: 159 offline Swift test
   groups passed. The corrected candidate passed 164 groups, then passed all 164
@@ -110,3 +119,55 @@ Local evidence is in the sibling `map-redesign-evidence` directory, outside the
 repository: full baseline/candidate/repeat logs, final Debug/Release logs, the
 temporary renderer harness, and three simulator screenshots. The renderer harness
 has a separate bundle identifier and no persistence, CloudKit, or account access.
+
+
+## Build 10 feedback follow-up (local only)
+
+The user screenshots show populated New York pins and an empty London UK view
+with All Cities selected. The London viewport is within the existing regional
+loading threshold. Build 10 used the first result of an unscoped free-text city
+search as the gate for further place requests. An ambiguous or wrong-city result
+can silently exclude London UK and can also position a selected-city camera away
+from its loaded records. The historic provider response on the phone is unknown;
+a London Ontario fixture reproduces this class of failure, not that exact event.
+
+The follow-up removes name-based city searches, uses exact saved-place anchors,
+and simplifies the map chrome. No collection model, persistence, CloudKit,
+sharing, Ask, release identity, or build-number files change. The successful
+build 10 release is the baseline; these follow-up fixes have not been uploaded.
+
+Follow-up validation:
+
+- Initial implementation: 167 Swift test groups passed. After independent review
+  fixes for filtered camera requests and evicted-anchor churn: all 168 groups
+  passed, exit zero. Final Debug and Release simulator builds passed with signing
+  disabled.
+- Independent Astra extra-high re-review found both findings corrected and no
+  remaining source blockers.
+- A separate full-app simulator wrapper runs the exact production `MapRootView`,
+  `MapPlaceLookup`, and `SavedMapPlan` sources (SHA-256 identity recorded outside
+  the repo). It substitutes only a 284-place provider fixture, in-memory store,
+  startup wrapper and QA viewport controls. CloudKit and production service
+  configuration are disabled in that temporary app; its bundle ID is distinct.
+- Cold All Cities: one NYC, one London and one Paris anchor, three calls total.
+  Moving the actual MKMapView to NYC loaded all 152 NYC fixtures (154 cumulative
+  calls). Moving to the reported London region while All Cities remained selected
+  loaded all 100 London fixtures (253 cumulative calls), visually clustered as 100.
+  These viewport changes used QA buttons through the real map delegate, not
+  native drag input. The compact header and absent top navigation bar were
+  visually inspected.
+- The Mac locked during UI testing and the automation could not unlock it.
+  Manual unlock is required to finish detail/back/save navigation, actual drag,
+  delayed-filter cancellation, accessibility text size, and offline Retry UI.
+  Unit tests cover scheduler cancellation, filtered planning, offline behavior,
+  anchor fallback, capacity deferral, Retry and expiry; they do not replace those
+  unfinished full-app interactions.
+- This is simulator evidence with synthetic locations, not verification of the
+  phone's real London IDs, live Apple latency, or the complete real collection.
+  No phone installation, upload, push, deployment or credential action occurred
+  for this feedback follow-up.
+
+Private local evidence is in the sibling `map-feedback-evidence` directory:
+provider/request runtime log, tests/build logs, source-identity comparison,
+validation manifest, synthetic wrapper and cold-overview screenshot. User-provided
+screenshots remain outside the public repository.
