@@ -47,8 +47,8 @@ struct AskSavedCollectionPanel: View {
                     LazyVStack(alignment: .leading, spacing: FeastTheme.Spacing.large) {
                         if session.turns.isEmpty {
                             VStack(alignment: .leading, spacing: FeastTheme.Spacing.medium) {
-                                Text("Where would you like to eat?").font(FeastTheme.Typography.listTitle)
-                                Text(state.collectionCount == 0 ? "No saved places are available on this device. Add places in Cities to ask about them." : "Ask about your saved places.")
+                                Text("What sounds good?").font(FeastTheme.Typography.listTitle)
+                                Text("Find somewhere new, explore your saved places, or keep them organized.")
                                     .foregroundStyle(FeastTheme.AdaptiveColors.secondaryText)
                             }.padding(.top, FeastTheme.Spacing.xxLarge)
                         }
@@ -156,10 +156,10 @@ struct AskSavedCollectionPanel: View {
                     .accessibilityAction(named:Text("Open chat history")) {showHistory()}
                     .accessibilityAction(named:Text("Start new chat")) {_ = session.newChat()}
                     .overlay(alignment: .topLeading) {
-                        if session.input.isEmpty { Text("Ask about a place…").font(FeastTheme.Typography.supporting).foregroundStyle(FeastTheme.AdaptiveColors.secondaryText).allowsHitTesting(false).accessibilityHidden(true) }
+                        if session.input.isEmpty { Text("Ask Feast…").font(FeastTheme.Typography.supporting).foregroundStyle(FeastTheme.AdaptiveColors.secondaryText).allowsHitTesting(false).accessibilityHidden(true) }
                     }
             } else {
-                TextField("Message", text: $session.input, prompt: Text("Ask about a place…"), axis: .vertical)
+                TextField("Message", text: $session.input, prompt: Text("Ask Feast…"), axis: .vertical)
                     .lineLimit(1...5).focused($focused).font(FeastTheme.Typography.supporting)
                     .accessibilityLabel("Message Ask Feast")
                     .accessibilityAction(named:Text("Open chat history")) {showHistory()}
