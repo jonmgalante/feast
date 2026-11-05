@@ -53,12 +53,24 @@ struct AskPendingActivation: Codable, Equatable {
 }
 /// Separate pending and active Keychain items. A lost reply never causes a new device secret.
 /// These items are device-only, non-synchronizing, and never written to preferences or files.
-@MainActor final class AskActivationKeychain: AskActivationStoring {
+@MainActor final class AskActivationKeychain: AskActivationStoring, AskManagementStoring {
     private let service="com.jongalante.Feast.ask.production"
     private func query(_ account:String)->[String:Any] {
         [kSecClass as String:kSecClassGenericPassword,kSecAttrService as String:service,
          kSecAttrAccount as String:account,kSecAttrSynchronizable as String:false,
          kSecUseAuthenticationUI as String:kSecUseAuthenticationUIFail]
+    }
+    func managementPending()throws->AskAccessPending? {
+        guard let data=try read("management-pending") else{return nil}
+        guard data.count<=4096,let value=try? JSONDecoder().decode(AskAccessPending.self,from:data),value.valid else{throw AskActivationError.keychain};return value
+    }
+    func saveManagementPending(_ value:AskAccessPending)throws {
+        guard value.valid,try managementPending()==nil else{throw AskActivationError.pending}
+        try add(JSONEncoder().encode(value),account:"management-pending")
+    }
+    func clearManagementPending()throws {
+        let status=SecItemDelete(query("management-pending") as CFDictionary)
+        guard status==errSecSuccess||status==errSecItemNotFound else{throw AskActivationError.keychain}
     }
     func active()->Bool { AskProductionAccess.credentialAvailable }
     private func read(_ account:String)throws->Data? {
@@ -108,6 +120,7 @@ struct AskPendingActivation: Codable, Equatable {
     @Published private(set) var working=false
     @Published private(set) var hasPending=false
     @Published private(set) var activated=false
+    @Published private(set) var isOwner=false
     @Published private(set) var message:String?
     private let store:any AskActivationStoring
     private let send:(URLRequest)async throws->(Data,HTTPURLResponse)
@@ -116,14 +129,14 @@ struct AskPendingActivation: Codable, Equatable {
         self.store=store ?? AskActivationKeychain();self.send=send;self.makeToken=makeToken;refresh()
     }
     func refresh(){activated=store.active();do{hasPending=try store.pending() != nil}catch{message=AskActivationError.keychain.localizedDescription}}
-    nonisolated private static func randomToken()throws->String {
+    nonisolated static func randomToken()throws->String {
         var bytes=[UInt8](repeating:0,count:32)
         guard SecRandomCopyBytes(kSecRandomDefault,bytes.count,&bytes)==errSecSuccess else {throw AskActivationError.keychain}
         return Data(bytes).base64EncodedString().replacingOccurrences(of:"+",with:"-").replacingOccurrences(of:"/",with:"_").replacingOccurrences(of:"=",with:"")
     }
     /// Explicit free access check, not AI consent and not an automatic credential reset.
     func checkAccess(configuration:AskHostedConfiguration)async {
-        guard !working else{return};working=true;message=nil;defer{working=false;refresh()}
+        guard !working else{return};working=true;message=nil;isOwner=false;defer{working=false;refresh()}
         do {
             try configuration.validate();guard !configuration.ownerValidation,configuration.environment == .production else{throw AskActivationError.unavailable}
             let token=try store.activeToken(),endpoint=configuration.endpoint.deletingLastPathComponent().appendingPathComponent("access/status")
@@ -134,6 +147,7 @@ struct AskPendingActivation: Codable, Equatable {
                 try store.removeRevokedCredential(token);message="This device no longer has Ask Feast access. You can enter a new activation code."
             } else {
                 guard response.statusCode==200,value["version"] as? Int==1,let id=value["deviceID"] as? String,UUID(uuidString:id) != nil else{throw AskActivationError.unavailable}
+                isOwner=value["role"] as? String == "owner"
                 message="Ask Feast access is active."
             }
         }catch{message=AskActivationError.unavailable.localizedDescription}

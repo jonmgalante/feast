@@ -32,14 +32,14 @@ struct AskFeastTab: View {
         NavigationStack {
             Group {
                 if state.savedCollection != nil, let session = state.session {
-                    AskSavedCollectionPanel(state: state, session: session,showHistory:{showingHistory=true})
+                    AskSavedCollectionPanel(state: state, session: session,showHistory:{showingHistory=true},invitationRequired:phoneActivationAvailable && !AskProductionAccess.credentialAvailable,enterInvitation:{showingActivation=true})
                 } else if let error = state.error {
                     ContentUnavailableView("Ask Feast", systemImage: "exclamationmark.triangle", description: Text(error))
                 } else { ProgressView("Preparing Ask Feast") }
             }
             .navigationTitle("Ask Feast").navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                if phoneActivationAvailable {
+                if phoneActivationAvailable && AskProductionAccess.credentialAvailable {
                     ToolbarItem(placement:.bottomBar){Button(onlineConfigured ? "Ask Feast access" : "Activate Ask Feast"){showingActivation=true}.accessibilityIdentifier("ask.activate")}
                 }
                 ToolbarItem(placement:.topBarLeading) { Button("History",systemImage:"clock.arrow.circlepath") { showingHistory = true }.accessibilityIdentifier("ask.history") }
@@ -50,7 +50,7 @@ struct AskFeastTab: View {
             .toolbarColorScheme(colorScheme, for: .navigationBar)
         }
         .sheet(isPresented:$showingHistory) { if let session = state.session { AskChatHistoryView(session:session,onlineConfigured:onlineConfigured) } }
-        .sheet(isPresented:$showingActivation) {
+        .sheet(isPresented:$showingActivation,onDismiss:{onlineConfigured=AskProductionAccess.credentialAvailable;if !onlineConfigured {state.disableOnline()}}) {
             if let configuration=AskProductionAccess.configuration(info:Bundle.main.infoDictionary ?? [:]) {
                 AskActivationView(configuration:configuration,onActivated:{
                     guard state.connectActivatedPhone(configuration) else{return false}

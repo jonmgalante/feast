@@ -15,6 +15,7 @@ struct AskActivationView: View {
                     if activation.activated {
                         Label("Access activated",systemImage:"checkmark.circle")
                         Button("Continue") { connect() }
+                        if activation.isOwner {NavigationLink("Manage Access"){AskManageAccessView(configuration:configuration)}}
                         Button("Check access") {Task{await activation.checkAccess(configuration:configuration)}}.disabled(activation.working)
                     } else {
                         if !activation.hasPending {
@@ -34,6 +35,7 @@ struct AskActivationView: View {
                     }
                 }
             }.navigationTitle("Ask Feast access")
+             .task {if activation.activated {await activation.checkAccess(configuration:configuration)}}
              .toolbar {ToolbarItem(placement:.cancellationAction){Button("Close"){dismiss()}}}
         }
     }

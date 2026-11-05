@@ -1,7 +1,7 @@
 import {ACTIVE_MODEL} from './active-model.mjs';
 import {VALIDATION_CAP_MICRO_USD} from './budget-policy.mjs';
 import {json,brokerAnswer} from './broker.mjs';
-import {phoneGrants,phoneStore,phoneAuthenticate,accessJSON} from './phone-access.mjs';
+import {phoneGrants,phoneStore,phoneAuthenticate,phoneManage,accessJSON} from './phone-access.mjs';
 import {validPublicRequest} from './public-business.mjs';
 export async function publicFetch(request,env,send=fetch){
   const path=new URL(request.url).pathname;
@@ -13,6 +13,7 @@ export async function publicFetch(request,env,send=fetch){
     const payload=await accessJSON(request,2048);
     return await phoneStore(env).fetch(new Request('https://access/phone-access/activate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}));
    }
+   if(path==='/v1/access/manage'&&request.method==='POST')return await phoneManage(request,env);
    if(!((path==='/v1/access/status'&&request.method==='GET')||(path==='/v1/answer'&&request.method==='POST')))return json({error:'not_found'},404);
    const actor=await phoneAuthenticate(request,env);if(!actor)return json({error:'unauthorized'},401);
    if(path==='/v1/access/status'){const {userHash,...status}=actor;return json(status)}

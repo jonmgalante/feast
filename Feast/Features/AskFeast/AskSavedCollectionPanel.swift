@@ -9,6 +9,8 @@ struct AskSavedCollectionPanel: View {
     @ObservedObject var state: AskFeastTabState
     @ObservedObject var session: AskSession
     var showHistory:()->Void = {}
+    var invitationRequired=false
+    var enterInvitation:()->Void = {}
     @State private var photo: PhotosPickerItem?
     @State private var photoTask: Task<Void, Never>?
     @State private var readingPhoto = false
@@ -86,6 +88,7 @@ struct AskSavedCollectionPanel: View {
                                 }
                             }.id(turn.id)
                         }
+                        if invitationRequired {AskInvitationCard(enterCode:enterInvitation)}
                         Color.clear.frame(height: 1).id("bottom")
                     }.padding(FeastTheme.Spacing.large)
                 }
@@ -94,7 +97,7 @@ struct AskSavedCollectionPanel: View {
                 .onChange(of: session.activeChatID) { _, _ in proxy.scrollTo("bottom", anchor: .bottom) }
                 .onChange(of: session.turns.count) { _, _ in proxy.scrollTo("bottom", anchor: .bottom) }
                 .onChange(of: session.isLoading) { _, loading in if !loading { proxy.scrollTo("bottom", anchor: .bottom) } }
-                composer
+                if !invitationRequired {composer}
             }
         }
         .background(FeastTheme.AdaptiveColors.groupedBackground)
