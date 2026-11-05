@@ -9,6 +9,7 @@ final class FailingContext: NSManagedObjectContext, @unchecked Sendable {
 @main struct PersistenceSafetyTests {
     @MainActor static func main() async throws {
         setbuf(stdout, nil)
+        try await MapPlaceLookupTests.run()
         let model = NSManagedObjectModel(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1]))!
         if CommandLine.arguments.count == 4 && CommandLine.arguments[3] == "--verify-real-copy" {
             try RealStoreUpgradeCheck.run(model:model,directory:URL(fileURLWithPath:CommandLine.arguments[2]));return

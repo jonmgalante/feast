@@ -4,6 +4,7 @@ import SwiftUI
 
 struct MapRootView: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var browse: SavedPlaceBrowseState
     @Environment(\.managedObjectContext) private var viewContext
     @Environment(\.persistenceController) private var persistenceController
@@ -16,9 +17,8 @@ struct MapRootView: View {
     private var savedPlaces: FetchedResults<SavedPlace>
 
     @State private var discoveryCityURI: String?
-    @State private var presentedMarker: SavedPlaceMapMarker?
+    @State private var presentedPlaceID: NSManagedObjectID?
     @State private var displayedScope: String?
-    @State private var fittedScopes: Set<String> = []
     @StateObject private var nearby = NearbyLocationService()
     @State private var nearbyScope: String?
     @State private var cameraPosition: MapCameraPosition = .automatic
@@ -26,9 +26,10 @@ struct MapRootView: View {
     @State private var markerGeneration = UUID()
     @State private var markerRetry = 0
     @State private var markerItems: [SavedPlaceMapMarker] = []
-    @State private var selectedMarker: SavedPlaceMapMarker?
+    @State private var selectedPlaceID: NSManagedObjectID?
     @State private var isResolvingMarkers = false
     @State private var unresolvedPlaceCount = 0
+    @State private var markerFailure: MapPlaceLookupFailure?
     @State private var showingExploreSearch = false
     @State private var showingSavedPlaceFilters = false
     private var savedPlaceFilters: SavedPlaceSearchFilters { browse.filters }
@@ -58,7 +59,7 @@ struct MapRootView: View {
                     Button("Retry Missing Pins") { markerRetry += 1 }
                 }
             }
-            .onDisappear { nearby.cancel() }
+            .onDisappear { nearby.cancel(); endMapSession() }
             .onChange(of: browse.selectedTab) { _, tab in if tab != 1 { nearby.cancel() } }
             .onChange(of: browse.scopeKey) { _, _ in nearby.cancel() }
             .onChange(of: nearby.resultID) { _, _ in
@@ -74,11 +75,11 @@ struct MapRootView: View {
             .onChange(of: feastLists.map(\.objectURIString)) { _, values in browse.validateCities(Set(values)) }
             .navigationTitle("Map")
             .navigationBarTitleDisplayMode(.inline)
-            .task(id: markerResolutionKey + "|\(markerRetry)") {
-                await resolveMarkers()
+            .task(id: markerResolutionKey + "|\(markerRetry)|\(mapIsActive)") {
+                if mapIsActive { await resolveMarkers() } else { endMapSession() }
             }
-            .navigationDestination(item: $presentedMarker) { marker in
-                if let savedPlace = savedPlace(for: marker.savedPlaceObjectID) {
+            .navigationDestination(item: $presentedPlaceID) { placeID in
+                if let savedPlace = savedPlace(for: placeID) {
                     SavedPlaceDetailView(savedPlace: savedPlace)
                 } else {
                     ContentUnavailableView(
@@ -88,11 +89,11 @@ struct MapRootView: View {
                     )
                 }
             }
-            .onChange(of: selectedMarker) { _, marker in
-                if let marker { presentedMarker = marker }
+            .onChange(of: selectedPlaceID) { _, placeID in
+                if let placeID { presentedPlaceID = placeID }
             }
-            .onChange(of: presentedMarker) { _, marker in
-                if marker == nil { selectedMarker = nil }
+            .onChange(of: presentedPlaceID) { _, placeID in
+                if placeID == nil { selectedPlaceID = nil }
             }
             .sheet(isPresented: $showingExploreSearch) {
                 NavigationStack {
@@ -196,6 +197,8 @@ struct MapRootView: View {
         savedPlaceFilters.hasCriteria
     }
 
+    private var mapIsActive: Bool { browse.selectedTab == 1 && scenePhase != .background }
+
     private var markerResolutionKey: String {
         let listKey = browse.scopeKey
         let placeKeys = selectedCitySavedPlaces.map { place in
@@ -249,6 +252,10 @@ struct MapRootView: View {
                     .buttonStyle(.plain)
                     .frame(minHeight: 44)
 
+                    if let markerFailure, unresolvedPlaceCount > 0, !isResolvingMarkers {
+                        Text(markerFailure.message).font(FeastTheme.Typography.caption)
+                            .foregroundStyle(FeastTheme.Colors.secondaryText)
+                    }
                     Text(citySummaryText)
                         .font(FeastTheme.Typography.rowMetadata)
                         .foregroundStyle(citySummaryColor)
@@ -299,7 +306,7 @@ struct MapRootView: View {
 
     private var mapContent: some View {
         ZStack {
-            Map(position: $cameraPosition, selection: $selectedMarker) {
+            Map(position: $cameraPosition, selection: $selectedPlaceID) {
                 if let fix = nearby.location {
                     Annotation("Your location", coordinate: fix.coordinate) {
                         Image(systemName: "location.circle.fill")
@@ -310,7 +317,7 @@ struct MapRootView: View {
                 ForEach(filteredMarkerItems) { marker in
                     Marker(marker.markerLabel, coordinate: marker.coordinate.clLocationCoordinate2D)
                         .tint(FeastTheme.Colors.mapPinTint)
-                        .tag(marker)
+                        .tag(marker.savedPlaceObjectID)
                 }
             }
             .onMapCameraChange(frequency: .onEnd) { camera in
@@ -358,7 +365,7 @@ struct MapRootView: View {
                 ContentUnavailableView {
                     Label("Locations Couldn't Be Loaded", systemImage: "mappin.slash")
                 } description: {
-                    Text("Your places are still saved. Try loading their map locations again.")
+                    Text(markerFailure?.message ?? "Your places are still saved. Try loading their map locations again.")
                 } actions: {
                     Button("Retry") { markerRetry += 1 }.buttonStyle(FeastQuietChipButtonStyle())
                 }
@@ -370,7 +377,7 @@ struct MapRootView: View {
             if isResolvingMarkers && emptyReason == .hasMatches {
                 HStack(spacing: FeastTheme.Spacing.small) {
                     ProgressView()
-                    Text("Loading places")
+                    Text("Loading pins · \(markerItems.count) of \(selectedCitySavedPlaces.count)")
                         .font(FeastTheme.Typography.rowMetadata)
                         .foregroundStyle(FeastTheme.Colors.primaryText)
                 }
@@ -450,6 +457,16 @@ struct MapRootView: View {
     }
 
     @MainActor
+    private func endMapSession() {
+        markerGeneration = UUID()
+        markerLookup.clear()
+        markerItems = []
+        unresolvedPlaceCount = 0
+        markerFailure = nil
+        isResolvingMarkers = false
+    }
+
+    @MainActor
     private func resolveMarkers() async {
         guard !Task.isCancelled else { return }
         let scope = browse.scopeKey
@@ -464,17 +481,20 @@ struct MapRootView: View {
         let generation = UUID()
         markerGeneration = generation
         let places = selectedCitySavedPlaces
-        markerItems = []
-        unresolvedPlaceCount = 0
+        let currentIDs = Dictionary(uniqueKeysWithValues: places.map { ($0.objectID, $0.applePlaceIDValue ?? "") })
+        markerLookup.retainOnly(Set(currentIDs.values.filter { !$0.isEmpty }))
+        markerItems = markerItems.filter { currentIDs[$0.savedPlaceObjectID] == $0.applePlaceID }
+        unresolvedPlaceCount = places.count - markerItems.count
+        markerFailure = nil
         isResolvingMarkers = true
         defer {
             if markerGeneration == generation { isResolvingMarkers = false }
         }
-        var resolvedMarkers: [SavedPlaceMapMarker] = []
+        var resolvedMarkers = markerItems
         for savedPlace in places {
             guard !Task.isCancelled, markerGeneration == generation else { return }
             guard let applePlaceID = savedPlace.applePlaceIDValue else {
-                unresolvedPlaceCount += 1
+                markerFailure = markerFailure ?? .unavailable
                 continue
             }
             do {
@@ -483,25 +503,30 @@ struct MapRootView: View {
                 }
                 guard !Task.isCancelled, markerGeneration == generation else { return }
                 if let resolvedPlace, let coordinate = resolvedPlace.coordinate {
+                    resolvedMarkers.removeAll { $0.savedPlaceObjectID == savedPlace.objectID }
                     resolvedMarkers.append(SavedPlaceMapMarker(
                         savedPlaceObjectID: savedPlace.objectID,
+                        applePlaceID: applePlaceID,
                         displayName: resolvedPlace.displayName,
                         fallbackName: savedPlace.displayName,
                         coordinate: coordinate
                     ))
                     markerItems = resolvedMarkers
+                    unresolvedPlaceCount = places.count - resolvedMarkers.count
                 } else {
-                    unresolvedPlaceCount += 1
+                    markerFailure = markerFailure ?? .unavailable
                 }
             } catch {
                 guard !Task.isCancelled, markerGeneration == generation else { return }
-                unresolvedPlaceCount += 1
+                if error is CancellationError { return }
+                let failure = MapPlaceLookupFailure.classify(error)
+                markerFailure = failure
+                if failure.pausesBatch { break }
             }
         }
         guard !Task.isCancelled, markerGeneration == generation else { return }
-        if browse.viewports[scope] == nil, !fittedScopes.contains(scope), !resolvedMarkers.isEmpty {
+        if browse.viewports[scope] == nil, !cameraPosition.positionedByUser, !resolvedMarkers.isEmpty {
             updateCameraPosition(using: resolvedMarkers)
-            fittedScopes.insert(scope)
         }
     }
 
@@ -568,6 +593,7 @@ struct MapRootView: View {
 
 private struct SavedPlaceMapMarker: Identifiable, Hashable {
     let savedPlaceObjectID: NSManagedObjectID
+    let applePlaceID: String
     let displayName: String
     let fallbackName: String
     let coordinate: ApplePlaceCoordinate

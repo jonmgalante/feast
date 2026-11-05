@@ -143,15 +143,7 @@ extension ApplePlacesService {
 
     @MainActor
     private static func mapItem(for request: MKMapItemRequest) async throws -> MKMapItem {
-        try await withCheckedThrowingContinuation { continuation in
-            request.getMapItem { mapItem, error in
-                if let mapItem {
-                    continuation.resume(returning: mapItem)
-                } else {
-                    continuation.resume(throwing: error ?? ApplePlacesError.resolveFailed)
-                }
-            }
-        }
+        try await AppleMapItemOperation(request: request).value()
     }
 
     @MainActor

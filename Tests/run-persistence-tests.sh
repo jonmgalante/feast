@@ -8,7 +8,7 @@ xcrun swiftc -D FEAST_TESTS -parse-as-library -module-cache-path "$work/cache" -
   Feast/Persistence/ManagedObjects/*.swift Feast/Models/FeastTag.swift \
   Feast/Core/Theme/StatusBadgePalette.swift Tests/StatusBadgeTests.swift \
   Feast/Models/PlaceType.swift Feast/Models/PlaceStatus.swift \
-  Tests/Fixtures/ApplePlacesFixtures.swift Feast/Services/PlaceReviewDraft.swift Feast/Services/PlaceSaveDestination.swift Feast/Models/ApplePlaceMatch.swift Feast/Services/NearbyLocationService.swift Tests/NearbyLocationTests.swift Feast/Services/PlaceSearchContext.swift Feast/Services/MapPlaceLookup.swift \
+  Tests/Fixtures/ApplePlacesFixtures.swift Feast/Services/PlaceReviewDraft.swift Feast/Services/PlaceSaveDestination.swift Feast/Models/ApplePlaceMatch.swift Feast/Services/NearbyLocationService.swift Tests/NearbyLocationTests.swift Feast/Services/PlaceSearchContext.swift Feast/Services/MapPlaceLookup.swift Tests/MapPlaceLookupTests.swift \
   Feast/Features/Import/NotesImportParser.swift Feast/Features/Import/NotesImportReviewSupport.swift \
   Feast/Services/InstagramWebsiteParser.swift Feast/Services/InstagramWebsiteClient.swift Feast/Services/AskPinnedWebsiteClient.swift Tests/InstagramAutofillTests.swift Tests/AskPinnedWebsiteTests.swift \
   Feast/Features/Lists/SavedPlaceBrowseState.swift Tests/BrowsingConsistencyTests.swift Tests/EmptyStateTests.swift \
