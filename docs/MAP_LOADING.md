@@ -1,4 +1,4 @@
-# Saved map loading (local candidate)
+# Saved map loading
 
 This change is confined to map presentation, Apple lookup scheduling, and temporary
 reuse in saved-place detail. It does not change the Core Data model, CloudKit
@@ -121,7 +121,7 @@ temporary renderer harness, and three simulator screenshots. The renderer harnes
 has a separate bundle identifier and no persistence, CloudKit, or account access.
 
 
-## Build 10 feedback follow-up (local only)
+## Build 10 feedback follow-up
 
 The user screenshots show populated New York pins and an empty London UK view
 with All Cities selected. The London viewport is within the existing regional
@@ -134,7 +134,8 @@ a London Ontario fixture reproduces this class of failure, not that exact event.
 The follow-up removes name-based city searches, uses exact saved-place anchors,
 and simplifies the map chrome. No collection model, persistence, CloudKit,
 sharing, Ask, release identity, or build-number files change. The successful
-build 10 release is the baseline; these follow-up fixes have not been uploaded.
+build 10 release is the baseline. These fixes are included in TestFlight 1.1 (11),
+available to the existing internal Feast Testers group on 5 November 2026.
 
 Follow-up validation:
 
@@ -185,7 +186,18 @@ Follow-up validation:
 - This is simulator evidence with synthetic locations, not verification of the
   phone's real London IDs, live Apple latency, or the complete real collection.
   No phone installation, upload, push, deployment or credential action occurred
-  for this feedback follow-up.
+  during this local feedback validation.
+
+Build 11 release verification:
+
+- Release source commit: `1f88fe0ae0ef3201a3739d34e6f70f7148cb91bd`.
+- All 168 client regression groups passed again; the signed iPhone archive passed.
+- The final distribution package preserved build 10's signed entitlements,
+  Production CloudKit configuration, certificate, provisioning profile and compiled
+  Core Data model files. Map QA fixtures and controls were absent.
+- App Store Connect confirmed build 1.1 (11) as Testing in the existing internal
+  group. No agent phone installation or launch, owner activation, backend deployment,
+  or App Review submission was performed.
 
 Private local evidence is in the sibling `map-feedback-evidence` directory:
 provider/request runtime log, tests/build logs, source-identity comparison,
