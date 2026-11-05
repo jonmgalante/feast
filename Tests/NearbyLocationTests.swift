@@ -19,7 +19,12 @@ import Foundation
         let service = NearbyLocationService(makeManager: {
             let manager = FixtureLocationManager(); managers.append(manager); return manager
         })
-        service.request()
+        let notAuthorized = FixtureLocationManager(); notAuthorized.fixtureAuthorization = .notDetermined
+        let silent = NearbyLocationService(makeManager:{notAuthorized})
+        silent.requestIfAuthorized(); precondition(notAuthorized.permissionRequests == 0 && notAuthorized.requests == 0)
+        notAuthorized.fixtureAuthorization = .denied
+        silent.requestIfAuthorized(); precondition(silent.errorMessage == nil && !silent.isRequesting)
+        service.requestIfAuthorized()
         let first = managers.last!
         service.locationManagerDidChangeAuthorization(first)
         precondition(first.requests == 1 && service.isRequesting)

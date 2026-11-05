@@ -1,5 +1,9 @@
 # Pre-release map reliability and Ask opening copy
 
+Historical build-9 baseline. The subsequent local map redesign is documented in
+[MAP_LOADING.md](MAP_LOADING.md); its scheduling and cache behavior supersede the
+baseline behavior described below.
+
 Local change on top of owner-access candidate `b47a24d`; no deployment, installation,
 CloudKit schema changes, record edits or provider calls are needed for the offline checks.
 

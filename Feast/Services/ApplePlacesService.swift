@@ -98,6 +98,18 @@ struct ApplePlacesService {
         }
     }
 
+    /// Geographic hint for map demand planning, never a saved-place boundary.
+    @MainActor func cityViewport(name: String) async throws -> SavedMapViewport? {
+        guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        if case .preview = mode { return nil }
+        let request = MKLocalSearch.Request(naturalLanguageQuery: name)
+        request.resultTypes = .address
+        let response = try await Self.startSearch(request: request)
+        guard let item = response.mapItems.first, let coordinate = Self.coordinate(from: item) else { return nil }
+        return SavedMapViewport(latitude: coordinate.latitude, longitude: coordinate.longitude,
+            latitudeDelta: 0.09, longitudeDelta: 0.12)
+    }
+
     @MainActor
     func openInMaps(placeID: String) async throws -> Bool {
         switch mode {
@@ -129,16 +141,8 @@ extension ApplePlacesService {
 
     @MainActor
     private static func startSearch(request: MKLocalSearch.Request) async throws -> MKLocalSearch.Response {
-        try await withCheckedThrowingContinuation { continuation in
-            let search = MKLocalSearch(request: request)
-            search.start { response, error in
-                if let response {
-                    continuation.resume(returning: response)
-                } else {
-                    continuation.resume(throwing: error ?? ApplePlacesError.searchFailed)
-                }
-            }
-        }
+        let operation = AppleMapSearchOperation(search: MKLocalSearch(request: request))
+        return try await operation.value()
     }
 
     @MainActor

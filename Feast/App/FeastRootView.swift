@@ -2,6 +2,7 @@ import SwiftUI
 import CoreData
 
 struct FeastRootView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @Environment(\.colorScheme) private var colorScheme
     let services: AppServices
     @StateObject private var ask = AskFeastTabState()
@@ -65,6 +66,7 @@ struct FeastRootView: View {
                 .toolbarColorScheme(colorScheme, for: .tabBar)
             }
         }
+        .onChange(of: scenePhase) { _, phase in if phase == .background { MapPlaceLookup.shared.clear() } }
         .onChange(of: browse.selectedTab) { _, tab in ask.selectionChanged(to: tab) }
         .environmentObject(browse)
         .onChange(of: browse.filters.selectedListURIString) { _, _ in browse.scopeDidChange() }

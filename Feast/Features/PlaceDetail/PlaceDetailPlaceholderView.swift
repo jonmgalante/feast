@@ -2,6 +2,7 @@ import CoreData
 import SwiftUI
 
 struct SavedPlaceDetailView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dismiss) private var dismiss
     @Environment(\.managedObjectContext) private var viewContext
     @Environment(\.openURL) private var openURL
@@ -14,7 +15,11 @@ struct SavedPlaceDetailView: View {
     @State private var originalDraft: [String]?
     @State private var showingDiscardConfirmation = false
 
-    @State private var resolvedPlace: ApplePlaceMatch?
+    @StateObject private var mapLookup = MapPlaceLookup.shared
+    @State private var resolvedPlaceID: String?
+    @State private var detailRefresh = 0
+    @State private var resolutionGeneration = UUID()
+    private var resolvedPlace: ApplePlaceMatch? { resolvedPlaceID.flatMap { mapLookup.cachedPlace($0) } }
     @State private var selectedReplacementPlace: ApplePlaceMatch?
     @State private var isResolvingPlace = false
     @State private var isOpeningInMaps = false
@@ -86,8 +91,13 @@ struct SavedPlaceDetailView: View {
                 }
             }
         }
-        .task(id: savedPlace.applePlaceIDValue) {
-            await resolvePlace()
+        .task(id: (savedPlace.applePlaceIDValue ?? "") + "|\(scenePhase == .background)|\(detailRefresh)") {
+            if scenePhase != .background { await resolvePlace() } else { resolvedPlaceID = nil }
+        }
+        .onChange(of: mapLookup.expiration) { _, _ in
+            guard scenePhase != .background, !isResolvingPlace, let id = resolvedPlaceID,
+                  mapLookup.cachedPlace(id) == nil else { return }
+            detailRefresh += 1
         }
         .onAppear {
             reloadFormStateIfNeeded()
@@ -553,22 +563,25 @@ struct SavedPlaceDetailView: View {
 
     @MainActor
     private func resolvePlace() async {
+        let generation = UUID(); resolutionGeneration = generation
         guard let applePlaceID = savedPlace.applePlaceIDValue else {
-            resolvedPlace = nil
+            resolvedPlaceID = nil
             return
         }
 
         isResolvingPlace = true
 
         defer {
-            isResolvingPlace = false
+            if resolutionGeneration == generation { isResolvingPlace = false }
         }
 
         do {
-            resolvedPlace = try await applePlacesService.resolve(placeID: applePlaceID)
+            let match = try await mapLookup.resolve(placeID: applePlaceID) { try await applePlacesService.resolve(placeID: $0) }
+            guard !Task.isCancelled, resolutionGeneration == generation, savedPlace.applePlaceIDValue == applePlaceID else { return }
+            resolvedPlaceID = match == nil ? nil : applePlaceID
             applySuggestedNeighborhoodIfNeeded()
         } catch {
-            resolvedPlace = nil
+            if resolutionGeneration == generation && !Task.isCancelled { resolvedPlaceID = nil }
         }
     }
 

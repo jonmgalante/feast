@@ -1,6 +1,7 @@
 import CoreData
 import MapKit
 import SwiftUI
+import os
 
 struct MapRootView: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -21,18 +22,28 @@ struct MapRootView: View {
     @State private var displayedScope: String?
     @StateObject private var nearby = NearbyLocationService()
     @State private var nearbyScope: String?
-    @State private var cameraPosition: MapCameraPosition = .automatic
-    @State private var markerLookup = MapPlaceLookup()
+    @State private var viewport = SavedMapViewport.overview
+    @State private var cameraRevision = UUID()
+    @State private var viewportRevision = 0
+    @State private var automaticNearby = false
+    @State private var nearbyRevision = 0
+    @StateObject private var markerLookup = MapPlaceLookup.shared
     @State private var markerGeneration = UUID()
     @State private var markerRetry = 0
-    @State private var markerItems: [SavedPlaceMapMarker] = []
+    @State private var refreshAfterLoading = false
+    @State private var failedIDs: Set<String> = []
+    @State private var loadingCount = 0
+    @State private var completedCount = 0
+    @State private var clusterIDs: [String] = []
     @State private var selectedPlaceID: NSManagedObjectID?
     @State private var isResolvingMarkers = false
-    @State private var unresolvedPlaceCount = 0
+
     @State private var markerFailure: MapPlaceLookupFailure?
     @State private var showingExploreSearch = false
     @State private var showingSavedPlaceFilters = false
     private var savedPlaceFilters: SavedPlaceSearchFilters { browse.filters }
+
+    private static let loadLogger = Logger(subsystem: "com.jongalante.Feast", category: "SavedMapLoad")
 
     private static let feastListsFetchRequest: NSFetchRequest<FeastList> = {
         let request = FeastList.fetchRequest()
@@ -52,31 +63,43 @@ struct MapRootView: View {
         return request
     }()
 
-    var body: some View {
+    private var lifecycleContent: some View {
         content
             .toolbar {
-                if unresolvedPlaceCount > 0 && !isResolvingMarkers && !filteredMarkerItems.isEmpty {
-                    Button("Retry Missing Pins") { markerRetry += 1 }
+                if (markerFailure != nil || !failedIDs.isEmpty || capacityDeferredCount > 0) && !isResolvingMarkers {
+                    Button("Retry Missing Pins") { markerLookup.retryEvictedLocations(); markerRetry += 1 }
                 }
             }
-            .onDisappear { nearby.cancel(); endMapSession() }
+            .onDisappear { markerLookup.visibleViewport = nil; nearby.cancel(); markerGeneration = UUID(); isResolvingMarkers = false }
+            .onChange(of: scenePhase) { _, phase in if phase == .background { nearby.cancel() } }
             .onChange(of: browse.selectedTab) { _, tab in if tab != 1 { nearby.cancel() } }
             .onChange(of: browse.scopeKey) { _, _ in nearby.cancel() }
             .onChange(of: nearby.resultID) { _, _ in
-                guard let fix = nearby.location, nearbyScope == browse.scopeKey, browse.selectedTab == 1 else { return }
-                let region = MKCoordinateRegion(center: fix.coordinate, latitudinalMeters: 2_000, longitudinalMeters: 2_000)
-                guard browse.rememberNearbyViewport(SavedMapViewport(latitude: region.center.latitude, longitude: region.center.longitude,
-                    latitudeDelta: region.span.latitudeDelta, longitudeDelta: region.span.longitudeDelta), requestedScope: nearbyScope ?? "") else { return }
-                cameraPosition = .region(region)
+                guard let fix = nearby.location,
+                      SavedMapPlan.acceptsCameraResult(requestedScope: nearbyScope ?? "", currentScope: browse.scopeKey,
+                          requestedRevision: nearbyRevision, currentRevision: viewportRevision, active: mapIsActive) else { return }
+                displayedScope = browse.scopeKey
+                setCamera(.nearby(fix.coordinate))
             }
-            .alert("Location Unavailable", isPresented: Binding(get: { nearby.errorMessage != nil }, set: { if !$0 { nearby.errorMessage = nil } })) {
+            .alert("Location Unavailable", isPresented: Binding(get: { !automaticNearby && nearby.errorMessage != nil }, set: { if !$0 { nearby.errorMessage = nil } })) {
                 Button("OK") { nearby.errorMessage = nil }
             } message: { Text(nearby.errorMessage ?? "") }
+            .onChange(of: markerLookup.expiration) { _, _ in
+                guard mapIsActive else { return }
+                if isResolvingMarkers { refreshAfterLoading = true } else { markerRetry += 1 }
+            }
             .onChange(of: feastLists.map(\.objectURIString)) { _, values in browse.validateCities(Set(values)) }
+    }
+
+    var body: some View {
+        lifecycleContent
             .navigationTitle("Map")
             .navigationBarTitleDisplayMode(.inline)
+            .task(id: "camera|\(browse.scopeKey)|\(markerRetry)|\(mapIsActive)") {
+                if mapIsActive { await prepareCamera() }
+            }
             .task(id: markerResolutionKey + "|\(markerRetry)|\(mapIsActive)") {
-                if mapIsActive { await resolveMarkers() } else { endMapSession() }
+                if mapIsActive { await resolveMarkers() }
             }
             .navigationDestination(item: $presentedPlaceID) { placeID in
                 if let savedPlace = savedPlace(for: placeID) {
@@ -94,6 +117,9 @@ struct MapRootView: View {
             }
             .onChange(of: presentedPlaceID) { _, placeID in
                 if placeID == nil { selectedPlaceID = nil }
+            }
+            .sheet(isPresented: Binding(get: { !clusterIDs.isEmpty }, set: { if !$0 { clusterIDs = [] } })) {
+                clusterSheet
             }
             .sheet(isPresented: $showingExploreSearch) {
                 NavigationStack {
@@ -113,6 +139,22 @@ struct MapRootView: View {
                 }
                 .presentationDetents([.medium, .large])
             }
+    }
+
+    private var clusterSheet: some View {
+        NavigationStack {
+            List(savedPlaces.filter { clusterIDs.contains($0.objectID.uriRepresentation().absoluteString) }) { place in
+                Button { clusterIDs = []; selectedPlaceID = place.objectID } label: {
+                    VStack(alignment: .leading) {
+                        Text(place.displayName)
+                        Text(place.displayCityName + " · " + place.displayNeighborhoodName).font(.caption).foregroundStyle(.secondary)
+                    }.frame(minHeight: 44)
+                }
+            }
+            .navigationTitle("Saved Places")
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { clusterIDs = [] } } }
+        }
+        .presentationDetents([.medium, .large])
     }
 
     private var content: some View {
@@ -151,7 +193,9 @@ struct MapRootView: View {
         }
             .overlay(alignment: .bottomTrailing) {
                 Button {
-                    nearbyScope = browse.scopeKey
+                    automaticNearby = false
+                    viewportRevision += 1
+                    nearbyScope = browse.scopeKey; nearbyRevision = viewportRevision
                     nearby.request()
                 } label: {
                     HStack {
@@ -184,11 +228,26 @@ struct MapRootView: View {
         SavedPlaceSearchEngine.filteredPlaces(from: Array(savedPlaces), query: browse.filters.queryText, filters: browse.filters)
     }
 
-    private var filteredMarkerItems: [SavedPlaceMapMarker] {
-        let filteredPlaceIDs = SavedPlaceSearchEngine.mappedPlaceIDs(from: Array(savedPlaces), filters: browse.filters, resolvedIDs: Set(markerItems.map(\.savedPlaceObjectID)))
-        return markerItems.filter { filteredPlaceIDs.contains($0.savedPlaceObjectID) }
+    /// No second coordinate cache in the view. Expiry/background eviction in the
+    /// shared service also removes annotations from the Apple map.
+    private var markerItems: [SavedPlaceMapMarker] {
+        filteredCitySavedPlaces.compactMap { place in
+            guard let id = place.applePlaceIDValue, let match = markerLookup.cachedPlace(id), let coordinate = match.coordinate else { return nil }
+            return SavedPlaceMapMarker(savedPlaceObjectID: place.objectID, applePlaceID: id,
+                displayName: match.displayName, fallbackName: place.displayName, coordinate: coordinate)
+        }
     }
-
+    private var filteredMarkerItems: [SavedPlaceMapMarker] {
+        markerItems.filter { viewport.contains($0.coordinate) }
+    }
+    private var unresolvedPlaceCount: Int { max(0, filteredCitySavedPlaces.count - markerItems.count) }
+    private var capacityDeferredCount: Int {
+        let cached = Set(markerItems.map(\.applePlaceID)), attempted = markerLookup.recentlyResolvedIDs
+        return placePlan.filter { !cached.contains($0.appleID) && attempted.contains($0.appleID) }.count
+    }
+    private var placePlan: [SavedMapPlan.Place] {
+        filteredCitySavedPlaces.map { .init(id: $0.objectID.uriRepresentation().absoluteString, appleID: $0.applePlaceIDValue ?? "", cityID: $0.feastList?.objectURIString ?? "") }
+    }
     private var availableTags: [String] {
         FeastTag.catalog(from: selectedCitySavedPlaces.map(\.tags))
     }
@@ -200,14 +259,8 @@ struct MapRootView: View {
     private var mapIsActive: Bool { browse.selectedTab == 1 && scenePhase != .background }
 
     private var markerResolutionKey: String {
-        let listKey = browse.scopeKey
-        let placeKeys = selectedCitySavedPlaces.map { place in
-            let objectKey = place.objectID.uriRepresentation().absoluteString
-            let updateKey = place.updatedAtValue.timeIntervalSinceReferenceDate
-            return "\(objectKey)-\(updateKey)"
-        }
-
-        return ([listKey] + placeKeys).joined(separator: "|")
+        let cities = feastLists.map { "\($0.objectURIString):\($0.displayName)" }.sorted().joined(separator: "|")
+        return browse.scopeKey + "|" + SavedMapPlan.identity(placePlan) + "|" + cities + "|" + viewport.queryKey
     }
 
     private var headerLayout: AnyLayout {
@@ -305,87 +358,44 @@ struct MapRootView: View {
     }
 
     private var mapContent: some View {
-        ZStack {
-            Map(position: $cameraPosition, selection: $selectedPlaceID) {
-                if let fix = nearby.location {
-                    Annotation("Your location", coordinate: fix.coordinate) {
-                        Image(systemName: "location.circle.fill")
-                            .font(.title).foregroundStyle(.white, .blue)
-                            .accessibilityLabel("Your last requested location")
-                    }
+        SavedPinsMap(viewport: viewport, cameraRevision: cameraRevision,
+            pins: filteredMarkerItems.map { .init(id: $0.savedPlaceObjectID.uriRepresentation().absoluteString,
+                title: $0.markerLabel, coordinate: $0.coordinate) },
+            location: nearby.location.map { .init(latitude: $0.coordinate.latitude, longitude: $0.coordinate.longitude) },
+            interactionBegan: {
+                viewportRevision += 1; nearby.cancel(); displayedScope = browse.scopeKey
+            }, moved: { next, userInitiated in
+                guard viewport != next else { return }
+                viewport = next; markerLookup.visibleViewport = next
+                if userInitiated {
+                    viewportRevision += 1; nearby.cancel(); displayedScope = browse.scopeKey
+                    browse.viewports[browse.scopeKey] = next
                 }
-                ForEach(filteredMarkerItems) { marker in
-                    Marker(marker.markerLabel, coordinate: marker.coordinate.clLocationCoordinate2D)
-                        .tint(FeastTheme.Colors.mapPinTint)
-                        .tag(marker.savedPlaceObjectID)
-                }
-            }
-            .onMapCameraChange(frequency: .onEnd) { camera in
-                guard cameraPosition.positionedByUser else { return }
-                let region = camera.region
-                browse.viewports[browse.scopeKey] = SavedMapViewport(latitude: region.center.latitude, longitude: region.center.longitude,
-                    latitudeDelta: region.span.latitudeDelta, longitudeDelta: region.span.longitudeDelta)
-            }
-            .mapStyle(.standard(elevation: .flat))
+                // User panning takes precedence over a late automatic fix/city lookup.
+            }, clusterSelected: { clusterIDs = $0 }, selected: { uri in
+                if let place = savedPlaces.first(where: { $0.objectID.uriRepresentation().absoluteString == uri }) { selectedPlaceID = place.objectID }
+            })
             .ignoresSafeArea(edges: .bottom)
             .overlay {
-                VStack(spacing: 0) {
-                    LinearGradient(
-                        colors: [
-                            FeastTheme.Colors.groupedBackground.opacity(0.26),
-                            .clear
-                        ],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                    .frame(height: 120)
-
-                    Spacer(minLength: 0)
-
-                    LinearGradient(
-                        colors: [
-                            .clear,
-                            FeastTheme.Colors.appBackground.opacity(0.2)
-                        ],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                    .frame(height: 140)
+                if emptyReason != .hasMatches {
+                    SavedPlaceEmptyState(reason: emptyReason, scopeName: selectedFeastList?.displayName ?? "All Cities", addPlace: presentDiscovery)
+                        .padding(FeastTheme.Spacing.large)
+                        .feastMapOverlayCard(cornerRadius: FeastTheme.CornerRadius.medium)
+                        .padding(.horizontal, FeastTheme.Spacing.large)
                 }
-                .allowsHitTesting(false)
             }
-
-            if case let .savedContent(reason) = emptyPresentation {
-                SavedPlaceEmptyState(reason: reason, scopeName: selectedFeastList?.displayName ?? "All Cities", addPlace: presentDiscovery)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(FeastTheme.Spacing.large)
-                    .feastMapOverlayCard(cornerRadius: FeastTheme.CornerRadius.medium)
-                    .padding(.horizontal, FeastTheme.Spacing.large)
-            } else if emptyPresentation == .locationsUnavailable {
-                ContentUnavailableView {
-                    Label("Locations Couldn't Be Loaded", systemImage: "mappin.slash")
-                } description: {
-                    Text(markerFailure?.message ?? "Your places are still saved. Try loading their map locations again.")
-                } actions: {
-                    Button("Retry") { markerRetry += 1 }.buttonStyle(FeastQuietChipButtonStyle())
+            .overlay(alignment: .bottomLeading) {
+                if isResolvingMarkers {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text(loadingCount > 0 ? "Loading locations · \(completedCount)/\(loadingCount)" : "Finding nearby cities…")
+                            .font(FeastTheme.Typography.caption)
+                    }
+                    .padding(10).feastMapOverlayCard(cornerRadius: FeastTheme.CornerRadius.medium)
+                    .padding(.leading, 12).padding(.bottom, 70)
+                    .accessibilityElement(children: .combine)
                 }
-                .padding(FeastTheme.Spacing.large)
-                .feastMapOverlayCard(cornerRadius: FeastTheme.CornerRadius.medium)
-                .padding(.horizontal, FeastTheme.Spacing.large)
             }
-
-            if isResolvingMarkers && emptyReason == .hasMatches {
-                HStack(spacing: FeastTheme.Spacing.small) {
-                    ProgressView()
-                    Text("Loading pins · \(markerItems.count) of \(selectedCitySavedPlaces.count)")
-                        .font(FeastTheme.Typography.rowMetadata)
-                        .foregroundStyle(FeastTheme.Colors.primaryText)
-                }
-                .padding(.horizontal, FeastTheme.Spacing.large)
-                .padding(.vertical, FeastTheme.Spacing.medium)
-                .feastMapOverlayCard(cornerRadius: FeastTheme.CornerRadius.medium)
-            }
-        }
     }
 
     private var citySummaryColor: Color {
@@ -393,45 +403,13 @@ struct MapRootView: View {
     }
 
     private var citySummaryText: String {
-        let savedCount = selectedCitySavedPlaces.count
-        let filteredSavedCount = filteredCitySavedPlaces.count
-        let mappedCount = filteredMarkerItems.count
-
-        if savedCount == 0 {
-            return "Search Apple Maps and save places to start building the map."
-        }
-
-        if shouldShowNoMatchingResults {
-            return emptyReason == .queryHasNoMatches ? "No saved places match this search." : "Filters are hiding matching places."
-        }
-
-        if hasActiveSavedPlaceFilters {
-            let unresolvedFilteredCount = max(filteredSavedCount - mappedCount, 0)
-
-            if unresolvedFilteredCount > 0 {
-                return "\(mappedCount) of \(filteredSavedCount) matching saved places mapped"
-            }
-
-            if mappedCount == 0 {
-                return "Matching saved places will appear here once Apple Maps can resolve them."
-            }
-
-            return "\(mappedCount) matching saved \(mappedCount == 1 ? "place" : "places") in \(selectedFeastList?.displayName ?? "All Cities")"
-        }
-
-        if unresolvedPlaceCount > 0 {
-            return "\(mappedCount) of \(savedCount) saved places mapped"
-        }
-
-        if mappedCount == 0 {
-            return "Saved places in this city will appear here once Apple Maps can resolve them."
-        }
-
-        return "\(mappedCount) saved \(mappedCount == 1 ? "place" : "places") in \(selectedFeastList?.displayName ?? "All Cities")"
-    }
-
-    private var emptyPresentation: SavedMapEmptyPresentation {
-        .evaluate(reason: emptyReason, resolving: isResolvingMarkers, pinCount: filteredMarkerItems.count)
+        if selectedCitySavedPlaces.isEmpty { return "Search Apple Maps and save places to start building the map." }
+        if shouldShowNoMatchingResults { return emptyReason == .queryHasNoMatches ? "No saved places match this search." : "Filters are hiding matching places." }
+        let base = "\(filteredMarkerItems.count) pins in view · \(filteredCitySavedPlaces.count) saved places"
+        if capacityDeferredCount > 0 { return base + ". Some locations were released from temporary memory. Retry Missing Pins to reload them." }
+        if browse.filters.selectedListURIString == nil && !viewport.loadsUnknownPlaces { return base + ". Zoom in or choose a city to load locations." }
+        if unresolvedPlaceCount > 0 && !isResolvingMarkers && failedIDs.isEmpty { return base + ". Some locations aren't loaded yet; choose a city to include them." }
+        return base
     }
 
     private var emptyReason: SavedPlaceEmptyReason {
@@ -442,137 +420,113 @@ struct MapRootView: View {
         emptyReason == .queryHasNoMatches || emptyReason == .filtersHideMatches
     }
 
-    private var trimmedSavedPlaceQueryText: String? {
-        let trimmed = savedPlaceFilters.queryText.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
+    @MainActor private func setCamera(_ next: SavedMapViewport) {
+        guard next.isValid else { return }
+        viewport = next; markerLookup.visibleViewport = next; cameraRevision = UUID(); browse.viewports[browse.scopeKey] = next
     }
-
-    private func compactFilterChipText(_ text: String, limit: Int = 24) -> String {
-        guard text.count > limit else {
-            return text
-        }
-
-        let endIndex = text.index(text.startIndex, offsetBy: max(limit - 3, 0))
-        return "\(text[..<endIndex])..."
-    }
-
-    @MainActor
-    private func endMapSession() {
-        markerGeneration = UUID()
-        markerLookup.clear()
-        markerItems = []
-        unresolvedPlaceCount = 0
-        markerFailure = nil
-        isResolvingMarkers = false
-    }
-
-    @MainActor
-    private func resolveMarkers() async {
-        guard !Task.isCancelled else { return }
+    @MainActor private func prepareCamera() async {
         let scope = browse.scopeKey
-        if displayedScope != scope {
-            displayedScope = scope
-            if let viewport = browse.viewports[scope] {
-                cameraPosition = .region(MKCoordinateRegion(center: CLLocationCoordinate2D(latitude: viewport.latitude, longitude: viewport.longitude),
-                    span: MKCoordinateSpan(latitudeDelta: viewport.latitudeDelta, longitudeDelta: viewport.longitudeDelta)))
-            } else { cameraPosition = .automatic }
-        }
-
-        let generation = UUID()
-        markerGeneration = generation
-        let places = selectedCitySavedPlaces
-        let currentIDs = Dictionary(uniqueKeysWithValues: places.map { ($0.objectID, $0.applePlaceIDValue ?? "") })
-        markerLookup.retainOnly(Set(currentIDs.values.filter { !$0.isEmpty }))
-        markerItems = markerItems.filter { currentIDs[$0.savedPlaceObjectID] == $0.applePlaceID }
-        unresolvedPlaceCount = places.count - markerItems.count
-        markerFailure = nil
-        isResolvingMarkers = true
-        defer {
-            if markerGeneration == generation { isResolvingMarkers = false }
-        }
-        var resolvedMarkers = markerItems
-        for savedPlace in places {
-            guard !Task.isCancelled, markerGeneration == generation else { return }
-            guard let applePlaceID = savedPlace.applePlaceIDValue else {
-                markerFailure = markerFailure ?? .unavailable
-                continue
-            }
+        guard displayedScope != scope else { return }
+        viewportRevision += 1
+        if let remembered = browse.viewports[scope] { displayedScope = scope; setCamera(remembered); return }
+        let revision = viewportRevision
+        if let city = selectedFeastList {
             do {
-                let resolvedPlace = try await markerLookup.resolve(placeID: applePlaceID) { id in
-                    try await applePlacesService.resolve(placeID: id)
-                }
-                guard !Task.isCancelled, markerGeneration == generation else { return }
-                if let resolvedPlace, let coordinate = resolvedPlace.coordinate {
-                    resolvedMarkers.removeAll { $0.savedPlaceObjectID == savedPlace.objectID }
-                    resolvedMarkers.append(SavedPlaceMapMarker(
-                        savedPlaceObjectID: savedPlace.objectID,
-                        applePlaceID: applePlaceID,
-                        displayName: resolvedPlace.displayName,
-                        fallbackName: savedPlace.displayName,
-                        coordinate: coordinate
-                    ))
-                    markerItems = resolvedMarkers
-                    unresolvedPlaceCount = places.count - resolvedMarkers.count
-                } else {
-                    markerFailure = markerFailure ?? .unavailable
-                }
+                let hint = try await markerLookup.city(name: city.displayName) { try await applePlacesService.cityViewport(name: $0) }
+                guard !Task.isCancelled, let hint,
+                      SavedMapPlan.acceptsCameraResult(requestedScope: scope, currentScope: browse.scopeKey,
+                          requestedRevision: revision, currentRevision: viewportRevision, active: mapIsActive) else { return }
+                displayedScope = scope; setCamera(hint)
             } catch {
-                guard !Task.isCancelled, markerGeneration == generation else { return }
-                if error is CancellationError { return }
-                let failure = MapPlaceLookupFailure.classify(error)
-                markerFailure = failure
-                if failure.pausesBatch { break }
+                if !Task.isCancelled { markerFailure = MapPlaceLookupFailure.classify(error) }
             }
-        }
-        guard !Task.isCancelled, markerGeneration == generation else { return }
-        if browse.viewports[scope] == nil, !cameraPosition.positionedByUser, !resolvedMarkers.isEmpty {
-            updateCameraPosition(using: resolvedMarkers)
+        } else {
+            automaticNearby = true; nearbyScope = scope; nearbyRevision = revision
+            nearby.requestIfAuthorized()
+            if !nearby.isRequesting { displayedScope = scope }
         }
     }
 
-    private func updateCameraPosition(using markers: [SavedPlaceMapMarker]) {
-        guard !markers.isEmpty else {
-            cameraPosition = .automatic
+    @MainActor private func resolveMarkers() async {
+        guard !Task.isCancelled else { return }
+        markerLookup.visibleViewport = viewport
+        let start = ProcessInfo.processInfo.systemUptime
+        let generation = UUID(); markerGeneration = generation
+        let plan = placePlan, scope = browse.scopeKey, requestedViewport = viewport
+        let selected = browse.filters.selectedListURIString
+        let eligibleCities = Set(plan.map(\.cityID))
+        let cities = feastLists.filter { eligibleCities.contains($0.objectURIString) }
+            .map { ($0.objectURIString, $0.displayName) }
+        isResolvingMarkers = true; loadingCount = 0; completedCount = 0; markerFailure = nil; failedIDs = []
+        defer {
+            if markerGeneration == generation {
+                isResolvingMarkers = false
+                let elapsed = Int((ProcessInfo.processInfo.systemUptime - start) * 1000)
+                Self.loadLogger.info("elapsed_ms=\(elapsed, privacy: .public) attempted=\(completedCount, privacy: .public) planned=\(loadingCount, privacy: .public) visible=\(filteredMarkerItems.count, privacy: .public) cancelled=\(Task.isCancelled, privacy: .public)")
+                if refreshAfterLoading { refreshAfterLoading = false; markerRetry += 1 }
+            }
+        }
+        if let selected {
+            await resolvePlaceIDs(SavedMapPlan.lookupIDs(places: plan, selectedCity: selected,
+                viewport: requestedViewport, cityHints: [:], known: markerLookup.recentlyResolvedIDs), generation: generation)
             return
         }
-
-        let coordinates = markers.map(\.coordinate.clLocationCoordinate2D)
-        cameraPosition = .region(regionFitting(coordinates: coordinates))
+        guard requestedViewport.loadsUnknownPlaces else { return }
+        // Hints are city-level demand hints, not a spatial index for unknown records.
+        // Nearby cached hints go first. As a nearby hint returns, load that city's
+        // eligible places without waiting for every other city's hint.
+        let orderedCities = cities.sorted {
+            let a = markerLookup.cachedCity($0.1).map { requestedViewport.contains(.init(latitude:$0.latitude,longitude:$0.longitude),padding:3) } ?? false
+            let b = markerLookup.cachedCity($1.1).map { requestedViewport.contains(.init(latitude:$0.latitude,longitude:$0.longitude),padding:3) } ?? false
+            return a != b ? a : $0.0 < $1.0
+        }
+        var index = 0
+        await withTaskGroup(of: (String, SavedMapViewport?, MapPlaceLookupFailure?).self) { group in
+            func add() {
+                guard index < orderedCities.count, !Task.isCancelled else { return }
+                let city = orderedCities[index]; index += 1
+                group.addTask { @MainActor in
+                    do { return (city.0, try await markerLookup.city(name: city.1) { try await applePlacesService.cityViewport(name: $0) }, nil) }
+                    catch { return (city.0, nil, error is CancellationError ? nil : MapPlaceLookupFailure.classify(error)) }
+                }
+            }
+            for _ in 0..<min(3, orderedCities.count) { add() }
+            while let (id, hint, failure) = await group.next() {
+                guard !Task.isCancelled, markerGeneration == generation, scope == browse.scopeKey else { group.cancelAll(); break }
+                if let failure { markerFailure = failure }
+                if let failure, failure.pausesBatch { group.cancelAll(); break }
+                if let hint {
+                    let ids = SavedMapPlan.lookupIDs(places:plan.filter {$0.cityID == id},selectedCity:nil,
+                        viewport:requestedViewport,cityHints:[id:hint],known:markerLookup.recentlyResolvedIDs)
+                    await resolvePlaceIDs(ids,generation:generation)
+                    if markerFailure?.pausesBatch == true { group.cancelAll(); break }
+                }
+                add()
+            }
+        }
     }
 
-    private func regionFitting(coordinates: [CLLocationCoordinate2D]) -> MKCoordinateRegion {
-        guard let firstCoordinate = coordinates.first else {
-            return MKCoordinateRegion()
+    @MainActor private func resolvePlaceIDs(_ ids: [String], generation: UUID) async {
+        let needed = ids.filter { markerLookup.cachedPlace($0) == nil }
+        loadingCount += needed.count
+        var index = 0, stopped = false
+        await withTaskGroup(of: (String, Bool, MapPlaceLookupFailure?).self) { group in
+            func add() {
+                guard !stopped, index < needed.count, !Task.isCancelled else { return }; let id = needed[index]; index += 1
+                group.addTask { @MainActor in
+                    do { return (id, try await markerLookup.resolve(placeID: id) { try await applePlacesService.resolve(placeID: $0) } != nil, nil) }
+                    catch { return (id, false, error is CancellationError ? nil : MapPlaceLookupFailure.classify(error)) }
+                }
+            }
+            for _ in 0..<min(3, needed.count) { add() }
+            while let (id, success, failure) = await group.next() {
+                guard !Task.isCancelled, markerGeneration == generation else { group.cancelAll(); break }
+                completedCount += 1
+                if !success { failedIDs.insert(id); markerFailure = failure ?? .unavailable }
+                if let failure, failure.pausesBatch { stopped = true }
+                add()
+            }
         }
-
-        guard coordinates.count > 1 else {
-            return MKCoordinateRegion(
-                center: firstCoordinate,
-                span: MKCoordinateSpan(latitudeDelta: 0.08, longitudeDelta: 0.08)
-            )
-        }
-
-        let latitudes = coordinates.map(\.latitude)
-        let longitudes = coordinates.map(\.longitude)
-
-        let minLatitude = latitudes.min() ?? firstCoordinate.latitude
-        let maxLatitude = latitudes.max() ?? firstCoordinate.latitude
-        let minLongitude = longitudes.min() ?? firstCoordinate.longitude
-        let maxLongitude = longitudes.max() ?? firstCoordinate.longitude
-
-        let latitudeDelta = max((maxLatitude - minLatitude) * 1.6, 0.08)
-        let longitudeDelta = max((maxLongitude - minLongitude) * 1.6, 0.08)
-
-        return MKCoordinateRegion(
-            center: CLLocationCoordinate2D(
-                latitude: (minLatitude + maxLatitude) / 2,
-                longitude: (minLongitude + maxLongitude) / 2
-            ),
-            span: MKCoordinateSpan(
-                latitudeDelta: latitudeDelta,
-                longitudeDelta: longitudeDelta
-            )
-        )
     }
 
     private func savedPlace(for objectID: NSManagedObjectID) -> SavedPlace? {

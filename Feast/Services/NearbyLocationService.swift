@@ -20,6 +20,16 @@ import Foundation
         super.init()
     }
 
+    /// Opening the map uses an already granted permission only. Explicit Nearby
+    /// retains the existing permission prompt and error explanation.
+    func requestIfAuthorized() {
+        let status = makeManager().authorizationStatus
+        switch status {
+        case .authorizedAlways, .authorizedWhenInUse: request()
+        default: return
+        }
+    }
+
     func request() {
         cancel()
         errorMessage = nil
