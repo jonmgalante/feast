@@ -182,8 +182,14 @@ struct MapRootView: View {
 
             VStack(spacing: 0) {
                 if dynamicTypeSize.isAccessibilitySize {
-                    ScrollView { mapHeaderOverlay }
-                        .frame(maxHeight: 260)
+                    ScrollView {
+                        VStack(spacing: FeastTheme.Spacing.small) {
+                            mapHeaderOverlay
+                            if emptyReason != .hasMatches { mapEmptyState }
+                        }
+                    }
+                    .frame(maxHeight: emptyReason == .hasMatches ? 260 : .infinity)
+                    .padding(.bottom, emptyReason == .hasMatches ? 0 : 100)
                 } else {
                     mapHeaderOverlay
                 }
@@ -270,6 +276,11 @@ struct MapRootView: View {
             ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
             : AnyLayout(HStackLayout(alignment: .top, spacing: 12))
     }
+    private var headerActionsLayout: AnyLayout {
+        dynamicTypeSize.isAccessibilitySize
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: FeastTheme.Spacing.small))
+            : AnyLayout(HStackLayout(spacing: FeastTheme.Spacing.small))
+    }
 
     private var mapHeaderOverlay: some View {
         headerLayout {
@@ -298,7 +309,7 @@ struct MapRootView: View {
             .accessibilityLabel("City")
             .accessibilityValue(selectedFeastList?.displayName ?? "All Cities")
 
-            HStack(spacing: FeastTheme.Spacing.small) {
+            headerActionsLayout {
                 Button(action: presentDiscovery) {
                     if dynamicTypeSize.isAccessibilitySize {
                         Label("Search", systemImage: "magnifyingglass")
@@ -341,11 +352,8 @@ struct MapRootView: View {
             })
             .ignoresSafeArea(edges: .bottom)
             .overlay {
-                if emptyReason != .hasMatches {
-                    SavedPlaceEmptyState(reason: emptyReason, scopeName: selectedFeastList?.displayName ?? "All Cities", addPlace: presentDiscovery)
-                        .padding(FeastTheme.Spacing.large)
-                        .feastMapOverlayCard(cornerRadius: FeastTheme.CornerRadius.medium)
-                        .padding(.horizontal, FeastTheme.Spacing.large)
+                if emptyReason != .hasMatches && !dynamicTypeSize.isAccessibilitySize {
+                    mapEmptyState.padding(.horizontal, FeastTheme.Spacing.large)
                 }
             }
             .overlay(alignment: .bottomLeading) {
@@ -366,6 +374,12 @@ struct MapRootView: View {
                         .accessibilityHint(markerFailure?.message ?? "Reload missing map pins.")
                 }
             }
+    }
+
+    private var mapEmptyState: some View {
+        SavedPlaceEmptyState(reason: emptyReason, scopeName: selectedFeastList?.displayName ?? "All Cities", addPlace: presentDiscovery)
+            .padding(FeastTheme.Spacing.large)
+            .feastMapOverlayCard(cornerRadius: FeastTheme.CornerRadius.medium)
     }
 
     private var needsRetry: Bool {

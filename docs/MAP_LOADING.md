@@ -156,12 +156,32 @@ Follow-up validation:
   These viewport changes used QA buttons through the real map delegate, not
   native drag input. The compact header and absent top navigation bar were
   visually inspected.
-- The Mac locked during UI testing and the automation could not unlock it.
-  Manual unlock is required to finish detail/back/save navigation, actual drag,
-  delayed-filter cancellation, accessibility text size, and offline Retry UI.
-  Unit tests cover scheduler cancellation, filtered planning, offline behavior,
-  anchor fallback, capacity deferral, Retry and expiry; they do not replace those
-  unfinished full-app interactions.
+- After the Mac was unlocked, native pin selection opened a saved-place profile
+  with Back and Save visible. Both actions returned to the same London camera
+  with pins intact and the map navigation bar hidden. Save acted only on the
+  in-memory synthetic record.
+- Injected offline failure exposed Retry at the lower left, without a top bar.
+  Repeated observations produced no automatic request loop. Restoring the fixture
+  provider and tapping Retry loaded all 100 London records at the same camera
+  center (51.53, -0.10). Retry remained readable and separate from Nearby and
+  attribution at the largest tested accessibility text size.
+- The larger accessibility sizes exposed wrapping Search/Filters labels and an
+  empty-state card overlapping the header. The follow-up stacks those controls
+  and places the header plus empty-state content in one bounded scroll area.
+  Final native rendering showed readable labels and separated content. Clear
+  Search was activated successfully through its native accessibility control,
+  restoring city loading and the delayed map-level spinner. Normal-size layout
+  is unchanged. Independent Astra extra-high review found no layout blockers.
+- During a three-second delayed-provider fixture, changing the query after
+  150 ms cancelled four pending requests; cache and annotation counts stayed zero
+  and the overview camera stayed unchanged. Clearing search resumed London demand;
+  returning the fixture provider to normal produced 100 London pins.
+- Actual touch gestures remain inconclusive: repeated native CUA drag attempts
+  did not move the map, and native scroll input did not visibly scroll the long
+  empty-state area. Tap, city selection, cluster zoom, programmatic viewport
+  changes through the real delegate, and accessibility activation worked. Do not
+  treat these as verification of finger-drag, touch scrolling, or pan-versus-late-
+  location behavior; those still need hands-on acceptance testing.
 - This is simulator evidence with synthetic locations, not verification of the
   phone's real London IDs, live Apple latency, or the complete real collection.
   No phone installation, upload, push, deployment or credential action occurred
@@ -169,5 +189,6 @@ Follow-up validation:
 
 Private local evidence is in the sibling `map-feedback-evidence` directory:
 provider/request runtime log, tests/build logs, source-identity comparison,
-validation manifest, synthetic wrapper and cold-overview screenshot. User-provided
+validation manifest, synthetic wrapper and screenshots of overview/London,
+detail/back return, offline/online Retry, and accessibility layouts. User-provided
 screenshots remain outside the public repository.
