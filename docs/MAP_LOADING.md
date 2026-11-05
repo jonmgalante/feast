@@ -78,7 +78,7 @@ Acceptance checks:
 Before release: install a reviewed candidate only through the approved release
 flow; verify initial/returned city camera, pan during delayed location, filters,
 map/detail return, partial failures, background/foreground, dynamic type and actual
-Apple latency/error distribution on Sugar Bear. Do not claim physical-device
+Apple latency/error distribution on the test phone. Do not claim physical-device
 performance or all 284 real saved records were checked from synthetic fixtures.
 
 Rollback is the preceding source/build. No data restoration or migration is
@@ -103,7 +103,7 @@ required because this change writes no saved collection data.
   user's collection, or the full app's navigation and cluster-list presentation.
   Automated drag input did not produce a verifiable pan; native gesture behavior
   remains a hands-on acceptance check. Full-app Dynamic Type also remains open.
-- Sugar Bear remains on build 1.1 (9). No candidate phone installation, upload,
+- At this validation checkpoint, the test phone remained on build 1.1 (9). No candidate phone installation, upload,
   deployment, credential creation, or collection-data change occurred.
 
 Local evidence is in the sibling `map-redesign-evidence` directory, outside the
