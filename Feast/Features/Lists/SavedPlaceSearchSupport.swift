@@ -4,8 +4,7 @@ import SwiftUI
 struct SavedPlaceFilterSheet: View {
     @Environment(\.dismiss) private var dismiss
 
-    @Binding private var committedFilters: SavedPlaceSearchFilters
-    @State private var filters: SavedPlaceSearchFilters
+    @Binding private var filters: SavedPlaceSearchFilters
 
     let availableLists: [FeastList]
     let availableCuisines: [String]
@@ -14,8 +13,7 @@ struct SavedPlaceFilterSheet: View {
     let showsQuery: Bool
 
     init(filters: Binding<SavedPlaceSearchFilters>, availableLists: [FeastList], availableCuisines: [String], fixedFeastList: FeastList?, availableTags: [String] = [], showsQuery: Bool = false) {
-        _committedFilters = filters
-        _filters = State(initialValue: filters.wrappedValue)
+        _filters = filters
         self.availableLists = availableLists
         self.availableCuisines = availableCuisines
         self.fixedFeastList = fixedFeastList
@@ -43,20 +41,16 @@ struct SavedPlaceFilterSheet: View {
         .navigationTitle("Filters")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItemGroup(placement: .cancellationAction) {
-                Button("Reset") {
+            ToolbarItem(placement: .topBarLeading) {
+                Button("Clear filters") {
                     filters.reset()
                 }
                 .disabled(!filters.hasCriteria)
-                Button("Cancel") { dismiss() }
             }
 
-            ToolbarItem(placement: .confirmationAction) {
-                Button {
-                    committedFilters = filters
-                    dismiss()
-                } label: {
-                    Text("Done")
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { dismiss() } label: {
+                    Text("Close")
                         .fontWeight(.semibold)
                 }
             }

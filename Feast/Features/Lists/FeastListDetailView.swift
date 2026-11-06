@@ -394,10 +394,11 @@ struct FeastListDetailView: View {
                 showingSearchFilters = true
             } label: {
                 FeastToolbarSymbol(
-                    systemName: "line.3.horizontal.decrease",
+                    systemName: "slider.horizontal.3",
                     isEmphasized: searchFilters.hasCriteria
                 )
             }
+            .accessibilityLabel("Filter places")
 
             Menu {
                 Button("Add Neighborhood") {

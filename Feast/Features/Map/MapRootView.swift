@@ -121,6 +121,8 @@ struct MapRootView: View {
             }
             .task(id: markerResolutionKey + "|\(markerRetry)|\(mapIsActive)") {
                 if mapIsActive {
+                    do { try await SavedMapPlan.waitForFilterSettling(isEditing: showingSavedPlaceFilters) }
+                    catch { return }
                     let recovering = connectionRecoveryRevision == markerRetry && connectionRecoveryDemand == cameraResolutionKey
                     connectionRecoveryRevision = nil; connectionRecoveryDemand = nil
                     await resolveMarkers(recoveringConnection: recovering)
@@ -339,10 +341,13 @@ struct MapRootView: View {
                 .buttonStyle(FeastQuietChipButtonStyle())
                 .accessibilityLabel("Search Apple Maps")
                 Button(action: presentSavedPlaceFilters) {
-                    let symbol = hasActiveSavedPlaceFilters
-                        ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle"
-                    if dynamicTypeSize.isAccessibilitySize { Label("Filters", systemImage: symbol) }
-                    else { Image(systemName: symbol) }
+                    if dynamicTypeSize.isAccessibilitySize {
+                        Label { Text("Filters") } icon: {
+                            FeastToolbarSymbol(systemName: "slider.horizontal.3", isEmphasized: hasActiveSavedPlaceFilters)
+                        }
+                    } else {
+                        FeastToolbarSymbol(systemName: "slider.horizontal.3", isEmphasized: hasActiveSavedPlaceFilters)
+                    }
                 }
                 .buttonStyle(FeastQuietChipButtonStyle())
                 .accessibilityLabel("Filters")
@@ -376,7 +381,7 @@ struct MapRootView: View {
             }, clusterSelected: { clusterIDs = $0 }, selected: { uri in
                 if let place = savedPlaces.first(where: { $0.objectID.uriRepresentation().absoluteString == uri }) { selectedPlaceID = place.objectID }
             })
-            .ignoresSafeArea(edges: .bottom)
+            .ignoresSafeArea(edges: [.top, .bottom])
             .overlay {
                 if emptyReason != .hasMatches && !dynamicTypeSize.isAccessibilitySize {
                     mapEmptyState.padding(.horizontal, FeastTheme.Spacing.large)
@@ -426,6 +431,7 @@ struct MapRootView: View {
         if selectedFeastList != nil {
             do {
                 let ids = placePlan.map(\.appleID)
+                try await SavedMapPlan.waitForFilterSettling(isEditing: showingSavedPlaceFilters)
                 let anchor = try await markerLookup.cityAnchor(placeIDs: ids) { try await applePlacesService.resolve(placeID: $0) }
                 guard !Task.isCancelled, let hint = anchor.viewport, requestedIdentity == cameraResolutionKey,
                       SavedMapPlan.acceptsCameraResult(requestedScope: scope, currentScope: browse.scopeKey,

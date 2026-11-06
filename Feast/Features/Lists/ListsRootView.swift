@@ -24,7 +24,6 @@ struct ListsRootView: View {
     @State private var listPendingDeletion: FeastList?
     private var searchText: String { browse.filters.queryText }
     private var searchFilters: SavedPlaceSearchFilters { browse.filters }
-    @State private var showingSearchFilters = false
     @State private var listSharingPresentation: PreparedFeastListShare?
     @State private var listSharingStates: [NSManagedObjectID: FeastListSharingState] = [:]
     @State private var listPreparingShareObjectID: NSManagedObjectID?
@@ -100,7 +99,7 @@ struct ListsRootView: View {
                     }
                 }
             }
-            .sheet(isPresented: $showingSearchFilters) {
+            .sheet(isPresented: $browse.showingCityFilters, onDismiss: browse.scopeDidChange) {
                 NavigationStack {
                     SavedPlaceFilterSheet(
                         filters: $browse.filters,
@@ -394,8 +393,8 @@ struct ListsRootView: View {
         ToolbarItem(placement: .topBarTrailing) {
             FeastToolbarActionCluster {
                 if !isZeroCityState && !isZeroSavedPlacesState {
-                    Button { showingSearchFilters = true } label: {
-                        FeastToolbarSymbol(systemName: "line.3.horizontal.decrease", isEmphasized: searchFilters.hasCriteria)
+                    Button { browse.showingCityFilters = true } label: {
+                        FeastToolbarSymbol(systemName: "slider.horizontal.3", isEmphasized: searchFilters.hasCriteria)
                             .frame(width: 36, height: 36)
                             .contentShape(Rectangle())
                     }
@@ -515,7 +514,7 @@ struct ListsRootView: View {
     private func resetSearchState() {
         browse.filters.queryText = ""
         browse.filters.reset()
-        showingSearchFilters = false
+        browse.showingCityFilters = false
     }
 
     private func listRow(for feastList: FeastList) -> some View {

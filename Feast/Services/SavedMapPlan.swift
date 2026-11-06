@@ -36,6 +36,17 @@ extension SavedMapViewport {
 /// Metadata-only plan. Anchors come from exact saved Apple place IDs, never a
 /// potentially ambiguous city-name search. They are demand hints, not boundaries.
 enum SavedMapPlan {
+    /// Cached pins and shared criteria update immediately. Only new lookup
+    /// demand waits, so cancelled intermediate edits never reach MapKit.
+    @MainActor static func waitForFilterSettling(isEditing: Bool,
+        sleep: (Duration) async throws -> Void = { try await Task.sleep(for: $0) }) async throws {
+        try Task.checkCancellation()
+        if isEditing {
+            try await sleep(.milliseconds(250))
+            try Task.checkCancellation()
+        }
+    }
+
     static func anchorIDs(_ ids: [String]) -> [String] {
         Array(Set(ids.filter { !$0.isEmpty }).sorted().prefix(3))
     }

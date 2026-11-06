@@ -251,6 +251,7 @@ struct SavedMapViewport: Equatable {
     @Published var filters = SavedPlaceSearchFilters()
     @Published var selectedTab = 0
     @Published var citiesPath: [SavedPlaceBrowseRoute] = []
+    @Published var showingCityFilters = false
     var scrollAnchors: [String: String] = [:]
     var viewports: [String: SavedMapViewport] = [:]
     private var hasEnteredMap = false
@@ -277,13 +278,15 @@ struct SavedMapViewport: Equatable {
     var scopeKey: String { filters.selectedListURIString ?? "all-cities" }
 
     func scopeDidChange() {
-        guard !citiesPath.contains(where: \.isPlace) else { return }
+        // The root sheet edits shared filters immediately. Keep its presenter
+        // in place until dismissal, then reconcile navigation to the live city.
+        guard !showingCityFilters, !citiesPath.contains(where: \.isPlace) else { return }
         let desired = filters.selectedListURIString.map { [SavedPlaceBrowseRoute.city($0)] } ?? []
         if citiesPath != desired { citiesPath = desired }
     }
 
     func pathDidChange(from previous: [SavedPlaceBrowseRoute]) {
-        guard !citiesPath.contains(where: \.isPlace) else { return }
+        guard !showingCityFilters, !citiesPath.contains(where: \.isPlace) else { return }
         if previous.contains(where: \.isPlace) { scopeDidChange(); return }
         if case let .city(uri) = citiesPath.last { filters.selectedListURIString = uri }
         else { filters.selectedListURIString = nil }

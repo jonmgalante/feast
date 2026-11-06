@@ -1,5 +1,6 @@
 import CoreData
 import Foundation
+import SwiftUI
 
 @MainActor enum BrowsingConsistencyTests {
     static func run(model: NSManagedObjectModel) async throws {
@@ -73,15 +74,64 @@ import Foundation
         precondition(global.count == 3)
         print("PASS two-way city transitions, All Cities, deleted-city fallback and deferred navigation while an editor is open")
 
-        let committed = browse.filters
-        var draft = committed
-        draft.queryText = "Different"; draft.selectedStatuses = [.been]
-        precondition(browse.filters == committed) // Cancel/dismiss discards this uncommitted value.
-        browse.filters = draft // Done commits the complete value once.
+        // The shared sheet binds to this value directly at every entry point.
+        // No opening snapshot or dismissal callback owns the filter criteria.
+        let live = Binding(get: { browse.filters }, set: { browse.filters = $0 })
+        live.wrappedValue = .init()
+        browse.scopeDidChange()
+        browse.showingCityFilters = true
+        for query in ["c", "ca", "café"] {
+            live.queryText.wrappedValue = query
+            precondition(browse.filters.queryText == query)
+        }
+        live.selectedStatuses.wrappedValue = [.love, .regulars]
+        live.selectedTags.wrappedValue = ["Quiet"]
+        live.selectedPlaceType.wrappedValue = .cafe
+        live.selectedCuisine.wrappedValue = "French"
+        live.selectedListURIString.wrappedValue = london.objectURIString
+        browse.scopeDidChange()
+        precondition(browse.citiesPath.isEmpty)
+        precondition(SavedPlaceSearchEngine.matchingPlaceIDs(from: places, filters: browse.filters) == [cafe.objectID])
+        live.selectedListURIString.wrappedValue = nyc.objectURIString
+        browse.scopeDidChange()
+        // A navigation callback while the root sheet is open must not overwrite
+        // the live city with its still-visible root route.
+        browse.pathDidChange(from: [])
+        precondition(browse.citiesPath.isEmpty && browse.filters.selectedListURIString == nyc.objectURIString)
+        precondition(SavedPlaceSearchEngine.matchingPlaceIDs(from: places, filters: browse.filters) == [otherCity.objectID])
+        let beforeDismissal = browse.filters
+        browse.showingCityFilters = false
+        browse.scopeDidChange() // The sheet's onDismiss reconciles only navigation.
+        precondition(browse.citiesPath == [.city(nyc.objectURIString)] && browse.filters == beforeDismissal)
+        let reopened = Binding(get: { browse.filters }, set: { browse.filters = $0 })
+        precondition(reopened.wrappedValue == beforeDismissal)
+        browse.selectedTab = 1
+        precondition(live.wrappedValue == reopened.wrappedValue)
+        browse.selectedTab = 0
+        print("PASS live query and all filter criteria update matches immediately; root sheet retains its presenter and dismiss/reopen/tab changes preserve shared filters")
+
+        // Clear filters intentionally clears search too, while keeping city.
+        reopened.wrappedValue.reset()
+        precondition(browse.filters.queryText.isEmpty && browse.filters.selectedStatuses.isEmpty && browse.filters.selectedTags.isEmpty)
+        precondition(browse.filters.selectedPlaceType == nil && browse.filters.selectedCuisine == nil)
+        precondition(!browse.filters.hasCriteria && browse.filters.selectedListURIString == nyc.objectURIString)
+        precondition(SavedPlaceSearchEngine.matchingPlaceIDs(from: places, filters: browse.filters) == [otherCity.objectID])
+
+        browse.citiesPath = []; browse.pathDidChange(from: [.city(nyc.objectURIString)])
+        browse.showingCityFilters = true
+        live.selectedListURIString.wrappedValue = "deleted-city"
+        browse.scopeDidChange()
+        browse.validateCities([london.objectURIString, nyc.objectURIString])
+        precondition(live.selectedListURIString.wrappedValue == nil && browse.citiesPath.isEmpty)
+        live.queryText.wrappedValue = "café" // A later edit cannot restore a deleted opening city.
+        precondition(browse.filters.selectedListURIString == nil)
+        browse.showingCityFilters = false; browse.scopeDidChange()
+        precondition(browse.citiesPath.isEmpty && live.queryText.wrappedValue == "café")
+        live.wrappedValue.reset()
+        precondition(SavedPlaceSearchEngine.matchingPlaceIDs(from: places, filters: browse.filters) == Set(places.map(\.objectID)))
+        precondition(!context.hasChanges)
         browse.filters.selectedListURIString = london.objectURIString
-        browse.filters.reset()
-        precondition(!browse.filters.hasCriteria && browse.filters.selectedListURIString == london.objectURIString)
-        print("PASS staged filter cancellation, atomic Done and Reset preserving city scope")
+        print("PASS Clear filters removes search/status/tag/type/cuisine, preserves city, observes city deletion live and never changes saved records")
 
         let viewport = SavedMapViewport(latitude: 1, longitude: 2, latitudeDelta: 3, longitudeDelta: 4)
         browse.viewports[london.objectURIString] = viewport

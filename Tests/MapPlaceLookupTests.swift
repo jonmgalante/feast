@@ -97,6 +97,52 @@ import MapKit
         try await cancellationAdapter()
         await connectionRecovery()
         try await unavailableRecovery()
+        try await liveFilterSettling()
+    }
+
+    static func liveFilterSettling() async throws {
+        // An injected sleeper makes rapid edits and late cancellation
+        // deterministic, including the shared lookup service's provider calls.
+        let lookup = MapPlaceLookup(emit: {_,_,_ in})
+        _ = try await lookup.resolve(placeID: "cached") { pin($0) }
+        try await SavedMapPlan.waitForFilterSettling(isEditing: false) { _ in
+            preconditionFailure("Ordinary Map browsing was delayed")
+        }
+        var sleepers: [CheckedContinuation<Void, Never>] = []
+        var requests: [String] = []
+        var tasks: [Task<Void, Error>] = []
+        for query in ["w", "we", "west", "west village", "clear", "final selection"] {
+            tasks.last?.cancel()
+            tasks.append(Task {
+                try await SavedMapPlan.waitForFilterSettling(isEditing: true) { delay in
+                    precondition(delay == .milliseconds(250))
+                    await withCheckedContinuation { sleepers.append($0) }
+                }
+                _ = try await lookup.resolve(placeID: query) { id in requests.append(id); return pin(id) }
+            })
+            let count = tasks.count
+            await spin { sleepers.count == count }
+        }
+        precondition(requests.isEmpty && lookup.cachedPlace("cached") != nil)
+        // Even a cancelled sleeper that completes late cannot dispatch lookup.
+        for sleeper in sleepers { sleeper.resume() }
+        for task in tasks.dropLast() {
+            do { try await task.value; preconditionFailure("Cancelled filter demand dispatched") }
+            catch is CancellationError {}
+        }
+        try await tasks.last!.value
+        precondition(requests == ["final selection"] && lookup.metrics.calls == 2)
+        precondition(lookup.cachedPlace("cached") != nil)
+
+        var cancelledSleep = false
+        let alreadyCancelled = Task {
+            try await SavedMapPlan.waitForFilterSettling(isEditing: true) { _ in cancelledSleep = true }
+        }
+        alreadyCancelled.cancel()
+        do { try await alreadyCancelled.value; preconditionFailure("Cancelled demand proceeded") }
+        catch is CancellationError {}
+        precondition(!cancelledSleep)
+        print("PASS live filter lookup demand settles once, rejects cancelled/late edits, retains cached pins and leaves ordinary browsing undelayed")
     }
 
     static func connectionRecovery() async {
