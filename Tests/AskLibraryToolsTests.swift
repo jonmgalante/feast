@@ -14,6 +14,7 @@ private struct LibraryPlannerFixture: AskLibraryIntentPlanning {
 }
 @MainActor enum AskLibraryToolsTests {
     static func run(model: NSManagedObjectModel) async throws {
+        try await AskLargeCollectionTests.run(model:model)
         let appSource = try String(contentsOfFile: "Feast/Features/AskFeast/AskFeastTab.swift", encoding:.utf8)
         precondition(!appSource.contains("state.prepare(") && !appSource.contains("MockAskFeastProvider("))
         precondition(!appSource.contains("AskFeastPanel(sandbox:"))
@@ -390,5 +391,184 @@ private struct LibraryPlannerFixture: AskLibraryIntentPlanning {
 
 
 
+    }
+}
+
+private actor LargeCollectionPlanner:AskFeastProvider,AskAgentPlanning,AskConversationPlanning,AskBusinessResearching {
+    let label="Synthetic collection regression"
+    var calls:[AskAgentReply.Call],steps:[AskConversationStep]=[]
+    let text:String
+    init(calls:[AskAgentReply.Call]=[],text:String="Public discovery remains available."){self.calls=calls;self.text=text}
+    func answer(_ request:AskRequest,tools:AskReadTools)async throws->AskResponse {preconditionFailure("Unexpected fallback")}
+    func agentAvailable()async->Bool {true}
+    func conversationAvailable()async->Bool {true}
+    func publicLookupAvailable()async->Bool {false}
+    func agentStep(_ step:AskAgentStep)async throws->AskAgentReply {preconditionFailure("Unexpected legacy loop")}
+    func conversationStep(_ step:AskConversationStep)async throws->AskConversationReply {
+        steps.append(step)
+        let call=calls.isEmpty ? nil : calls.removeFirst()
+        return .init(version:9,requestID:step.requestID,step:step.step,kind:call==nil ? "answer" : "tool",text:call==nil ? text : "",continuation:"offline-fixture",model:"gpt-6-astra",call:call)
+    }
+    func searchConversationWeb(_ query:String)async throws->AskWebResearchResult {preconditionFailure("No network")}
+    func authorizePendingConfirmation(_ actions:[AskCollectionAction],question:String,history:[String])async throws->AskHumanAuthorization {preconditionFailure("No mutation authorization")}
+    func authorizeConversationChange(_ proposal:AskChangeProposal,question:String,history:[String],targets:[AskAgentRecord])async throws->AskHumanAuthorization {preconditionFailure("Malformed target reached authorization")}
+    func businessResearch(_ request:AskBusinessRequest)async throws->AskBusinessResult {preconditionFailure("No research")}
+    func captured()->[AskConversationStep] {steps}
+}
+
+@MainActor private enum AskLargeCollectionTests {
+    static func run(model:NSManagedObjectModel)async throws {
+        let coordinator=NSPersistentStoreCoordinator(managedObjectModel:model)
+        _ = try coordinator.addPersistentStore(ofType:NSInMemoryStoreType,configurationName:nil,at:nil)
+        let context=NSManagedObjectContext(concurrencyType:.mainQueueConcurrencyType);context.persistentStoreCoordinator=coordinator
+        func city(_ name:String)->FeastList {let value=FeastList(context:context);value.id=UUID();value.name=name;return value}
+        let bulk=city("Bulk"),tail=city("Tail"),hidden=city("HIDDEN_CITY_SENTINEL")
+        func insert(_ number:Int,_ parent:FeastList)->SavedPlace {
+            let place=SavedPlace(context:context);place.id=UUID(uuidString:String(format:"00000000-0000-4000-8000-%012d",number));place.displayNameSnapshot=String(format:"Venue %04d",number);place.feastList=parent;place.cuisinesStorage="French";place.status="Want to try";place.placeType="Restaurant";place.note="PRIVATE_NOTE_SENTINEL";place.tagsStorage="PRIVATE_TAG_SENTINEL";place.applePlaceID="fixture-\(number)";return place
+        }
+        var stored:[SavedPlace]=[]
+        var visible:Set<UUID>=[bulk.id!,tail.id!]
+        let adapter=AskSavedCollection(context:context,canMutate:{_,_,_ in true},canRecoverStore:{_ in true},visibleCities:{visible})
+        let request=AskRequest(mode:.collection,text:"Count my saved places",fromOCR:false)
+        func plan(_ operation:AskLibraryPlan.Operation,city:String?=nil,scope:AskLibraryPlan.Scope = .library,positions:[Int]=[])->AskLibraryPlan {.init(operation:operation,scope:scope,city:city,positions:positions,fields:[])}
+        func query(_ plan:AskLibraryPlan,selection:[String]?=nil)->AskAgentReply.Call {
+            let value:[String:Any]=["entity":"place","query":try! JSONSerialization.jsonObject(with:JSONEncoder().encode(plan)),"selectionIDs":selection.map {$0 as Any} ?? NSNull()]
+            return .init(name:"query_collection",callID:UUID().uuidString,arguments:String(data:try! JSONSerialization.data(withJSONObject:value),encoding:.utf8)!)
+        }
+        let directory=FileManager.default.temporaryDirectory.appendingPathComponent("feast-large-collection-"+UUID().uuidString)
+        try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true);defer{try? FileManager.default.removeItem(at:directory)}
+        let engine=AskCollectionChangeEngine(adapter:adapter,journalURL:directory.appendingPathComponent("actions.json"))
+        let planner=LargeCollectionPlanner(),intent=AskAgentInterpretation(goal:"query",sourcePolicy:"stored_only",fields:[],selectionIDs:[],permissions:[])
+        for count in [200,201,1205] {
+            for i in stored.count..<count {stored.append(insert(i,i>=1200 ? tail : bulk))}
+            try context.save()
+            let view=try adapter.readView(),semantic=try AskSemanticContext.make(request,catalog:view.snapshot)
+            precondition(view.snapshot.totalCount==count && view.snapshot.complete && view.index.records.count==count)
+            precondition(semantic.index.count<=200 && (semantic.indexComplete == false)==(count>200))
+            precondition(try! JSONEncoder().encode(semantic).count<26_000)
+            let result=try AskLibraryReadTools.execute(plan(.count),snapshot:view.snapshot,context:nil)
+            let tools=try AskReadTools(request:request,index:view.index),answer=try tools.checked(AskLibraryReadTools.response(result,tools:tools))
+            precondition(answer.summary.contains(String(count)) && answer.libraryContext?.selectionIDs?.count==count)
+            let listed=try AskLibraryReadTools.execute(plan(.list),snapshot:view.snapshot,context:nil)
+            let rendered=try tools.checked(AskLibraryReadTools.response(listed,tools:tools))
+            precondition(count==200 ? rendered.candidates.count==200 : rendered.candidates.isEmpty && rendered.summary.contains("Narrow"))
+        }
+        _ = insert(99999,hidden);try context.save()
+        let view=try adapter.readView(),tools=try AskReadTools(request:request,index:view.index)
+        let searchStart=DispatchTime.now().uptimeNanoseconds
+        for _ in 0..<3 {
+            let matches=view.index.search("French in Tail",limit:6)
+            precondition(matches.count==5 && Set(matches.map(\.id))==Set(stored.suffix(5).map {$0.id!.uuidString}))
+        }
+        let searchMS=AskPerformanceRecorder.milliseconds(since:searchStart)
+        // A generous stall guard catches collection-wide regex work repeated for
+        // every record; this is an offline diagnostic, not a live latency promise.
+        precondition(searchMS<30_000)
+        print("PASS three exact 1205-place local searches in \(Int(searchMS))ms (offline synthetic diagnostic)")
+        let scoped=try AskLibraryReadTools.execute(plan(.list,city:"Tail"),snapshot:view.snapshot,context:nil)
+        precondition(scoped.status == .success && scoped.records.count==5)
+        _ = try tools.checked(AskLibraryReadTools.response(scoped,tools:tools))
+        let executor=AskAgentExecutor(adapter:adapter,engine:engine,request:request,researcher:planner,searchMaps:{_ in []})
+        let counted=try await executor.execute(query(plan(.count)),intent:intent)
+        precondition(counted.output.complete && counted.output.totalCount==1205 && counted.output.records.isEmpty && counted.orderedIDs.count==1205 && !counted.selectionIsOrdered)
+        let ordinal=try await executor.execute(query(plan(.details,scope:.previous,positions:[2])),intent:intent)
+        precondition(ordinal.response?.candidates.isEmpty==true && ordinal.response?.summary.contains("ordered")==true)
+        let exactIDs=[stored.last!.id!.uuidString,UUID().uuidString]
+        let stale=try await executor.execute(query(plan(.list),selection:exactIDs),intent:intent)
+        precondition(stale.output.status=="stale" && stale.response?.candidates.isEmpty==true && stale.orderedIDs.isEmpty)
+        var privateCount=plan(.count);privateCount.status="Want to try"
+        let privateResult=try await executor.execute(query(privateCount),intent:intent)
+        let privateJSON=String(data:try JSONEncoder().encode(privateResult.output),encoding:.utf8)!
+        precondition(privateResult.output.localOnly && privateResult.output.records.isEmpty && privateResult.output.totalCount==0 && !privateJSON.contains("Venue"))
+        let outsideID=stored.last!.id!.uuidString
+        let maps=AskAgentReply.Call(name:"search_maps",callID:"maps-after-count",arguments:"{\"query\":\"Fixture\",\"cityID\":null}")
+        let aggregatePlanner=LargeCollectionPlanner(calls:[query(plan(.count)),maps],text:"")
+        let aggregateProvider=AskAgentProvider(remote:aggregatePlanner,fallback:NeverLibraryRemote(),adapter:adapter,engine:engine,searchMaps:{_ in []})
+        let aggregateAnswer=try await aggregateProvider.answer(request,tools:tools)
+        precondition(aggregateAnswer.agentTask?.orderedIDs.isEmpty==true && aggregateAnswer.agentTask?.selectionIDs?.count==1205)
+        let projectedTask=try aggregateAnswer.agentTask!.checked().externalProjection
+        precondition(projectedTask.orderedIDs.isEmpty && projectedTask.selectionIDs==nil)
+        let history=AskConversationStore(url:directory.appendingPathComponent("history.json"))
+        let turn=AskTurn(id:UUID(),request:request,response:aggregateAnswer,status:.complete)
+        precondition(history.save(.init(turns:[AskArchivedTurn(turn)])))
+        let reloaded=AskConversationStore(url:history.url).load().turns[0].response
+        precondition(reloaded.agentTask?.selectionIDs?.count==1205 && reloaded.agentTask?.orderedIDs.isEmpty==true)
+        var resumed=request;resumed.agentTask=reloaded.agentTask
+        let resumedExecutor=AskAgentExecutor(adapter:adapter,engine:engine,request:resumed,researcher:planner,searchMaps:{_ in []})
+        let refined=try await resumedExecutor.execute(query(plan(.count,city:"Tail",scope:.previous)),intent:intent)
+        precondition(refined.output.complete && refined.output.totalCount==5 && !refined.selectionIsOrdered)
+        let noOrdinal=try await resumedExecutor.execute(query(plan(.details,scope:.previous,positions:[1])),intent:intent)
+        precondition(noOrdinal.response?.summary.contains("ordered")==true && noOrdinal.response?.candidates.isEmpty==true)
+        let removal=AskChangeProposal(entity:"city",operation:"delete",targetIDs:[bulk.id!.uuidString],cityID:nil,sectionID:nil,mapMatchID:nil,changes:[],instructionQuote:"Delete Bulk")
+        let grant=AskChangeGrant(question:removal.instructionQuote,entity:"city",operations:["delete"],fields:[],targetIDs:Set(removal.targetIDs),allowsCreation:false,boundProposal:removal)
+        do {_ = try engine.prepare(removal,question:removal.instructionQuote,authorization:grant,findings:[]);preconditionFailure("Unrecoverable large cascade was prepared")}catch AskChangeError.recoveryUnavailable {}
+        precondition(!FileManager.default.fileExists(atPath:engine.journalURL.path) && !bulk.isDeleted && !context.hasChanges)
+        let reopened=AskCollectionChangeEngine(adapter:adapter,journalURL:engine.journalURL)
+        precondition(try! reopened.receipts(forTurn:UUID()).isEmpty)
+        let scopedPlanner=LargeCollectionPlanner(calls:[query(plan(.list,city:"Tail"))],text:"Here is [[place:\(outsideID)]].")
+        let scopedProvider=AskAgentProvider(remote:scopedPlanner,fallback:NeverLibraryRemote(),adapter:adapter,engine:engine,searchMaps:{_ in []})
+        let linked=try tools.checked(await scopedProvider.answer(request,tools:tools))
+        precondition(linked.paragraphs.first?.spans.contains(.place(outsideID))==true)
+        let steps=await scopedPlanner.captured()
+        precondition(!steps[0].context.index.contains {$0.id==outsideID} && steps[1].result?.output.records.count==5)
+        print("PASS complete 200/201/1205 local reads, exact counts, explicit large-list limits, late scoped targets, bounded transport and aggregate membership without invented ordinals")
+
+        let damaged=city("Damaged");visible.insert(damaged.id!)
+        let duplicate=insert(20000,bulk);duplicate.id=stored[0].id
+        let missingID=insert(20001,damaged);missingID.id=nil
+        let missingName=insert(20002,damaged);missingName.displayNameSnapshot=nil
+        let blank=insert(20003,damaged);blank.displayNameSnapshot=" \n "
+        let oversized=insert(20004,damaged);oversized.displayNameSnapshot=String(repeating:"😀",count:101)
+        let cuisine=insert(20005,damaged);cuisine.cuisinesStorage=Array(repeating:"French",count:21).joined(separator:"\n")
+        let url=insert(20006,damaged);url.websiteURL=String(repeating:"x",count:2001)
+        try context.save()
+        let before=stored.map {$0.id},beforeNotes=stored.map {$0.note},malformed=try adapter.readView()
+        precondition(malformed.snapshot.totalCount==1212 && !malformed.snapshot.complete && malformed.snapshot.places.count==1204)
+        precondition(!malformed.snapshot.places.contains {$0.id==duplicate.id!.uuidString})
+        precondition(try! AskLibraryReadTools.execute(plan(.count),snapshot:malformed.snapshot,context:nil).status == .partial)
+        precondition(try! AskLibraryReadTools.execute(plan(.list,city:"Tail"),snapshot:malformed.snapshot,context:nil).status == .success)
+        let discovery=AskRequest(mode:.discovery,text:"Find new cafes in London",fromOCR:false)
+        let publicPlanner=LargeCollectionPlanner(),provider=AskAgentProvider(remote:publicPlanner,fallback:NeverLibraryRemote(),adapter:adapter,engine:engine,searchMaps:{_ in []})
+        let answer=try await provider.answer(discovery,tools:AskReadTools(request:discovery,index:malformed.index))
+        precondition(answer.summary=="Public discovery remains available.")
+        let captured=await publicPlanner.captured(),payload=try JSONEncoder().encode(captured[0]),payloadText=String(data:payload,encoding:.utf8)!
+        precondition(captured.count==1 && captured[0].context.indexComplete==false)
+        for privateValue in ["PRIVATE_NOTE_SENTINEL","PRIVATE_TAG_SENTINEL","HIDDEN_CITY_SENTINEL","Want to try"] {precondition(!payloadText.contains(privateValue))}
+        let rejectedExecutor=AskAgentExecutor(adapter:adapter,engine:engine,request:request,researcher:planner,searchMaps:{_ in []})
+        let missingTarget=try await rejectedExecutor.execute(query(plan(.list),selection:[duplicate.id!.uuidString]),intent:intent)
+        precondition(missingTarget.output.status=="stale" && missingTarget.output.records.isEmpty)
+        let permission=AskAgentPermission(entity:"place",operations:["update"],fields:["name"],targetIDs:[duplicate.id!.uuidString],instructionQuote:request.text)
+        do {try rejectedExecutor.prepare(.init(goal:"change",sourcePolicy:"stored_only",fields:["name"],selectionIDs:[],permissions:[permission]));preconditionFailure("Duplicate identity authorized")}catch {}
+        precondition(stored.map {$0.id}==before && stored.map {$0.note}==beforeNotes && !context.hasChanges)
+
+        // Cross-language validation uses only synthetic JSON and local modules.
+        var wire=try JSONSerialization.jsonObject(with:payload) as! [String:Any]
+        for key in ["task","continuation","result"] where wire[key]==nil {wire[key]=NSNull()}
+        let script="""
+        import fs from 'node:fs';
+        import assert from 'node:assert/strict';
+        import {validConversationPayload} from './Backend/feast-production/conversation.mjs';
+        import {validLibraryIntent} from './Backend/feast-proxy/library-intent.mjs';
+        const p=JSON.parse(fs.readFileSync(0,'utf8'));
+        assert.ok(validConversationPayload(p));
+        assert.ok(validLibraryIntent({version:6,mode:'libraryIntent',requestID:p.requestID,text:p.text,context:p.context}));
+        """
+        let process=Process(),input=Pipe();process.executableURL=URL(fileURLWithPath:"/usr/bin/env");process.arguments=["node","--input-type=module","-e",script];process.standardInput=input
+        try process.run();try input.fileHandleForWriting.write(contentsOf:JSONSerialization.data(withJSONObject:wire));try input.fileHandleForWriting.close();process.waitUntilExit();precondition(process.terminationStatus==0)
+        let collidingCity=city("HIDDEN_DUPLICATE_PARENT");collidingCity.id=tail.id
+        _ = insert(30000,collidingCity);try context.save()
+        let collided=try adapter.librarySnapshot(),collisionContext=try AskSemanticContext.make(request,catalog:collided)
+        precondition(!collided.cityCatalogComplete && !collided.places.contains {$0.city=="Tail" || $0.city=="HIDDEN_DUPLICATE_PARENT"} && collisionContext.indexComplete==false)
+        precondition(!String(data:try! JSONEncoder().encode(collisionContext),encoding:.utf8)!.contains("HIDDEN_DUPLICATE_PARENT"))
+        for i in 0..<210 {visible.insert(city("City \(i) "+String(repeating:"界",count:180)).id!)}
+        try context.save()
+        let citiesPlanner=LargeCollectionPlanner(),cityProvider=AskAgentProvider(remote:citiesPlanner,fallback:NeverLibraryRemote(),adapter:adapter,engine:engine,searchMaps:{_ in []})
+        _ = try await cityProvider.answer(discovery,tools:AskReadTools(request:discovery,index:adapter.index()))
+        let cityStep=await citiesPlanner.captured()[0]
+        precondition(cityStep.cities.count<=200 && (try! JSONEncoder().encode(cityStep.cities).count)<=8000 && cityStep.context.indexComplete==false)
+        let unicodePlaces=(0..<200).map {i in AskPersonalPlace(id:UUID().uuidString,name:String(repeating:"😀",count:100),status:nil,type:nil,cuisines:Array(repeating:String(repeating:"😀",count:50),count:20),city:"London",neighborhood:"")}
+        let unicodeContext=try AskSemanticContext.make(request,catalog:.init(places:unicodePlaces,totalCount:unicodePlaces.count))
+        precondition(unicodeContext.indexComplete==false && !unicodeContext.index.isEmpty && (try! JSONEncoder().encode(unicodeContext).count)<26_000)
+        print("PASS malformed/missing/duplicate rows and parent identities quarantine safely, unrelated city reads remain complete, public planner runs, actual Swift payload passes JavaScript validators, real data untouched")
     }
 }

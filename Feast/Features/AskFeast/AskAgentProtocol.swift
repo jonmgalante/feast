@@ -9,12 +9,14 @@ struct AskAgentTask:Codable,Equatable,Sendable {
     let sourcePolicy:String
     var privateSelection:Bool? = nil
     var outcomes:[AskAgentOutcome]? = nil
+    var selectionIDs:[String]? = nil // Full aggregate membership, on device only; never an ordinal list.
     var externalProjection:Self {
         let privateScope=privateSelection ?? (sourcePolicy=="local_only")
         return .init(action:action,fields:fields.filter {!["note","tags","status"].contains($0)},orderedIDs:privateScope ? [] : orderedIDs,sourcePolicy:sourcePolicy,privateSelection:privateScope,outcomes:privateScope ? nil : outcomes)
     }
     func checked()throws->Self {
         guard ["query","research","change"].contains(action),["stored_only","public_if_missing","local_only"].contains(sourcePolicy),fields.count<=11,orderedIDs.count<=200,Set(orderedIDs).count==orderedIDs.count,orderedIDs.allSatisfy({UUID(uuidString:$0) != nil}) else {throw AskError.invalidEvidence}
+        if let selectionIDs {guard orderedIDs.isEmpty,Set(selectionIDs).count==selectionIDs.count,selectionIDs.allSatisfy({UUID(uuidString:$0) != nil}) else{throw AskError.invalidEvidence}}
         return self
     }
 }
@@ -24,7 +26,7 @@ struct AskAgentResult:Codable,Equatable,Sendable {
     let status:String,complete:Bool,totalCount:Int
     let records:[AskAgentRecord],findings:[AskAgentFinding]
     let message:String,localOnly:Bool
-    static func localPrivate()->Self {.init(status:"local_only",complete:true,totalCount:0,records:[],findings:[],message:"private_result",localOnly:true)}
+    static func localPrivate(complete:Bool=true)->Self {.init(status:"local_only",complete:complete,totalCount:0,records:[],findings:[],message:"private_result",localOnly:true)}
 }
 struct AskAgentReply:Decodable,Sendable {
     struct Call:Decodable,Sendable {let name,callID,arguments:String}

@@ -149,6 +149,9 @@ struct AskConversationLoop:Sendable {
         let root=(AskProviderAttemptScope.lease?.attempt ?? request.performanceID ?? UUID()).uuidString,task=try request.agentTask?.checked().externalProjection
         var continuation:String?,result:AskConversationStep.Result?,latest:AskResponse?,ordered=request.agentTask?.orderedIDs ?? request.libraryContext?.ids ?? [],privateScope=(request.agentTask?.privateSelection==true || request.libraryContext?.excludesExternalReferences==true)
         var privateHistory=false,currentPrivateTool=false,taskFields:[String]=[]
+        var selectionIsOrdered=request.agentTask.map {$0.selectionIDs == nil} ?? (request.libraryContext?.selectionIDs == nil)
+        if let membership=request.agentTask?.selectionIDs ?? request.libraryContext?.selectionIDs {ordered=membership}
+        var available=availableCandidates
         var publicResearch=request.publicResearch
         let native=await planner.nativeResearchAvailable()
         var attemptedChange=false
@@ -162,8 +165,8 @@ struct AskConversationLoop:Sendable {
             response.operationRecords=operationRecords.isEmpty ? nil : operationRecords
             response.paragraphs.append(.init(id:"conversation-interrupted",spans:[.text("Earlier results were kept. "+AskHostedError.message(for:error))],sourceIDs:[]))
             if !durableActions.isEmpty {response.collectionActions=durableActions}
-            response.agentTask = .init(action:attemptedChange || !durableActions.isEmpty ? "change" : "query",fields:taskFields,orderedIDs:ordered,sourcePolicy:"public_if_missing",privateSelection:privateScope || privateHistory,outcomes:durableOutcomes.isEmpty ? nil : durableOutcomes)
-            response.publicConversationText=privateHistory || privateScope ? nil : "Unfinished task. Saved result IDs: "+ordered.joined(separator:",")+". "+String(response.summary.prefix(1000))
+            response.agentTask = .init(action:attemptedChange || !durableActions.isEmpty ? "change" : "query",fields:taskFields,orderedIDs:selectionIsOrdered ? ordered : [],sourcePolicy:"public_if_missing",privateSelection:privateScope || privateHistory,outcomes:durableOutcomes.isEmpty ? nil : durableOutcomes,selectionIDs:selectionIsOrdered ? nil : ordered)
+            response.publicConversationText=privateHistory || privateScope ? nil : "Unfinished task. "+(selectionIsOrdered ? "Saved result IDs: "+ordered.joined(separator:",")+". " : "The aggregate selection remains on device. ")+String(response.summary.prefix(1000))
             return response
         }
         for step in 0..<12 {
@@ -252,6 +255,7 @@ struct AskConversationLoop:Sendable {
                         if let fields=value.presentation?.requestedFields {taskFields=fields}
                     }
                     if let response=value.response {
+                        for candidate in response.candidates {available[candidate.id]=candidate}
                         // A successful mutation invalidates earlier read snapshots. Keep
                         // durable receipts, but require fresh reads for current details.
                         if (response.collectionActions ?? []).contains(where:{$0.state == .applied || $0.state == .undone}) {latest=nil}
@@ -260,17 +264,17 @@ struct AskConversationLoop:Sendable {
                     }
                     for outcome in value.outcomes ?? [] {if let i=durableOutcomes.firstIndex(where:{$0.id==outcome.id}) {durableOutcomes[i]=outcome}else{durableOutcomes.append(outcome)}}
                     if !durableActions.isEmpty {latest?.collectionActions=durableActions}
-                    ordered=value.orderedIDs;privateScope=value.selectionIsPrivate;privateHistory = privateHistory || value.selectionIsPrivate || value.output.localOnly;currentPrivateTool = currentPrivateTool || value.selectionIsPrivate || value.output.localOnly
+                    ordered=value.orderedIDs;selectionIsOrdered=value.selectionIsOrdered;privateScope=value.selectionIsPrivate;privateHistory = privateHistory || value.selectionIsPrivate || value.output.localOnly;currentPrivateTool = currentPrivateTool || value.selectionIsPrivate || value.output.localOnly
                     var output=AskConversationToolResult(value.output)
                     output.presentation=value.presentation
                     if output.presentation==nil,call.name=="propose_changes" {output.presentation = .init(kind:"action",requestedFields:[],returnedFields:[],complete:value.output.complete,renderedLocally:true)}
                     result = .init(callID:call.callID,output:output)
-                    if ["budget_stopped","needs_confirmation","conflict","unavailable"].contains(value.output.status),!(call.name=="propose_changes" && ["conflict","unavailable"].contains(value.output.status)),!(call.name=="search_maps" && value.output.status=="unavailable"),var response=latest {response.publicResearch=Array(publicResearch.suffix(4));response.operationRecords=operationRecords.isEmpty ? nil : operationRecords;response.agentTask = .init(action:attemptedChange ? "change" : "query",fields:taskFields,orderedIDs:ordered,sourcePolicy:"public_if_missing",privateSelection:privateScope || privateHistory,outcomes:durableOutcomes.isEmpty ? nil : durableOutcomes);return response}
+                    if ["budget_stopped","needs_confirmation","conflict","unavailable"].contains(value.output.status),!(call.name=="propose_changes" && ["conflict","unavailable"].contains(value.output.status)),!(call.name=="search_maps" && value.output.status=="unavailable"),var response=latest {response.publicResearch=Array(publicResearch.suffix(4));response.operationRecords=operationRecords.isEmpty ? nil : operationRecords;response.agentTask = .init(action:attemptedChange ? "change" : "query",fields:taskFields,orderedIDs:selectionIsOrdered ? ordered : [],sourcePolicy:"public_if_missing",privateSelection:privateScope || privateHistory,outcomes:durableOutcomes.isEmpty ? nil : durableOutcomes,selectionIDs:selectionIsOrdered ? nil : ordered);return response}
                 }
                 if let lease=AskProviderAttemptScope.lease {
                     var checkpoint=latest ?? AskResponse(summary:"Completed research retained.",candidates:[],listedCandidateIDs:[],usesLocalCatalog:true)
                     checkpoint.publicResearch=Array(publicResearch.suffix(4))
-                    checkpoint.agentTask = .init(action:"query",fields:taskFields,orderedIDs:ordered,sourcePolicy:"public_if_missing",privateSelection:privateScope || privateHistory)
+                    checkpoint.agentTask = .init(action:"query",fields:taskFields,orderedIDs:selectionIsOrdered ? ordered : [],sourcePolicy:"public_if_missing",privateSelection:privateScope || privateHistory,selectionIDs:selectionIsOrdered ? nil : ordered)
                     try await AskProviderAttempts.shared.keepReadContext(checkpoint,lease:lease)
                 }
                 continue
@@ -281,7 +285,7 @@ struct AskConversationLoop:Sendable {
             response.publicResearch=Array(publicResearch.suffix(4))
             response.operationRecords=operationRecords.isEmpty ? nil : operationRecords
             let finalText = !unresolvedChanges.isEmpty ? "" : reply.text
-            var rendered=Self.paragraph(finalText,catalog:context.index,available:availableCandidates,candidates:&response.candidates,citations:citations)
+            var rendered=Self.paragraph(finalText,catalog:context.index,available:available,candidates:&response.candidates,citations:citations)
             if native {rendered.citationsAreResearchPool=false}
             if !finalText.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty {
                 // Tool-attempt failures are fallback presentation, not final facts.
@@ -291,8 +295,8 @@ struct AskConversationLoop:Sendable {
                 if latest==nil {response.paragraphs=[rendered]}else{response.paragraphs.insert(rendered,at:0)}
             }
             let references=rendered.spans.compactMap {span->String? in if case .place(let id)=span{return id};return nil}
-            if !references.isEmpty {ordered=references.reduce(into:[]) {if !$0.contains($1){$0.append($1)}}}
-            response.agentTask = .init(action:attemptedChange || !durableActions.isEmpty ? "change" : "query",fields:taskFields,orderedIDs:ordered,sourcePolicy:"public_if_missing",privateSelection:privateScope || privateHistory,outcomes:durableOutcomes.isEmpty ? nil : durableOutcomes)
+            if !references.isEmpty {selectionIsOrdered=true;ordered=references.reduce(into:[]) {if !$0.contains($1){$0.append($1)}}}
+            response.agentTask = .init(action:attemptedChange || !durableActions.isEmpty ? "change" : "query",fields:taskFields,orderedIDs:selectionIsOrdered ? ordered : [],sourcePolicy:"public_if_missing",privateSelection:privateScope || privateHistory,outcomes:durableOutcomes.isEmpty ? nil : durableOutcomes,selectionIDs:selectionIsOrdered ? nil : ordered)
             let acknowledgements=durableActions.map {"action \($0.id.uuidString) \($0.entity) \($0.operation) \($0.state.rawValue) targets \($0.targetIDs.joined(separator:","))"}.joined(separator:"; ")
             response.publicConversationText=privateHistory || privateScope ? nil : (!unresolvedChanges.isEmpty ? "The requested change was not completed. Check its execution result before retrying." : reply.text)+(acknowledgements.isEmpty ? "" : "\nApp outcomes: "+acknowledgements)
             return response
@@ -307,9 +311,9 @@ struct AskConversationLoop:Sendable {
         for match in matches {
             if match.range.location>cursor {spans.append(.text(source.substring(with:NSRange(location:cursor,length:match.range.location-cursor))))}
             let raw=source.substring(with:match.range(at:1)),id=UUID(uuidString:raw)?.uuidString
-            if let record=catalog.first(where:{$0.id==id}),let candidate=available[record.id] {
-                if !candidates.contains(where:{$0.id==record.id}) {candidates.append(candidate)}
-                spans.append(.place(record.id))
+            if let id,let candidate=available[id] {
+                if !candidates.contains(where:{$0.id==id}) {candidates.append(candidate)}
+                spans.append(.place(id))
             }else{spans.append(.text("a place that is no longer available"))}
             cursor=NSMaxRange(match.range)
         }

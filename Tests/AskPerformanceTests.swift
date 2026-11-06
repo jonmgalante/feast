@@ -73,10 +73,12 @@ import CoreData
         fail=false
         for i in 0..<200 {_ = try repo.createSavedPlace(from:.init(applePlaceID:"timing-\(i)",displayNameSnapshot:"Bounded fixture \(i)",status:.wantToTry,placeType:.restaurant,cuisines:[],tags:[],note:nil,websiteURL:nil,instagramURL:nil,feastList:city,listSection:nil))}
         let large=try adapter.readView()
-        precondition(large.snapshot.totalCount==201 && large.snapshot.places.count==200 && !large.snapshot.complete && large.index.records.count==200 && !large.index.catalogComplete)
-        print("PASS operation-local read reuse preserves stored values, ordering, permission freshness, errors and incomplete catalog bounds")
+        precondition(large.snapshot.totalCount==201 && large.snapshot.places.count==201 && large.snapshot.complete && large.index.records.count==201 && large.index.catalogComplete)
+        let projected=try AskSemanticContext.make(.init(mode:.collection,text:"Count saved places",fromOCR:false),catalog:large.snapshot)
+        precondition(projected.index.count<=200 && projected.indexComplete==false)
+        print("PASS operation-local read reuse preserves stored values, ordering, permission freshness and errors; full 201-place local catalog has explicitly bounded model context")
 
-        // Offline microbenchmark only. Same local store, same content and caps;
+        // Offline microbenchmark only. Same complete local store and content;
         // not an estimate of live model/network savings. Both shapes warmed first.
         for _ in 0..<3 {_ = try adapter.librarySnapshot();_ = try adapter.index();_ = try adapter.readView()}
         var separateMS:[Double]=[],combinedMS:[Double]=[]

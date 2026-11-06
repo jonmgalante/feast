@@ -8,6 +8,9 @@ struct AskSemanticContext: Codable, Equatable, Sendable {
     struct Record:Codable,Equatable,Sendable { let id:String;let name:String;let city:String;let cuisines:[String] }
     let index:[Record]
     let recent:[AskRecentUserQuestion]
+    // Omitted by older clients, whose catalogs were necessarily complete.
+    var indexComplete:Bool? = nil
+    static let maximumIndexBytes = 24_000
     static func recentQuestions(_ turns:[AskTurn]) -> [AskRecentUserQuestion] {
         turns.filter {$0.status == .complete && $0.readContextMode == .collection && !$0.request.fromOCR && $0.request.attachment == nil && ($0.response?.collectionActions ?? []).isEmpty && $0.response?.agentTask?.fields.contains(where:{["note","tags","status"].contains($0)}) != true}.suffix(2).map { turn in
             let filter=turn.response?.libraryContext?.filters
@@ -18,13 +21,22 @@ struct AskSemanticContext: Codable, Equatable, Sendable {
         }
     }
     static func make(_ request:AskRequest,catalog:AskLibrarySnapshot) throws -> Self {
-        guard catalog.complete,catalog.places.count <= 200,request.recentQuestions.count <= 2 else {throw AskError.incompleteCollection}
-        let records=catalog.places.map {Record(id:$0.id,name:$0.name,city:$0.city,cuisines:$0.cuisines)}
+        guard request.recentQuestions.count <= 2,request.recentQuestions.allSatisfy({$0.question.utf16.count <= 4000 && $0.recordIDs.count <= 6 && Set($0.recordIDs).count == $0.recordIDs.count}) else {throw AskError.inputLimit}
+        let safe = catalog.sanitized()
+        let recentBytes=try JSONEncoder().encode(request.recentQuestions).count
+        var records:[Record]=[],bytes=2+recentBytes
+        // Stable public metadata only: private filters/selections never choose the sample.
+        for place in safe.places.sorted(by:{$0.id < $1.id}) {
+            guard records.count < 200 else {break}
+            let record=Record(id:place.id,name:place.name,city:place.city,cuisines:place.cuisines)
+            let size=try JSONEncoder().encode(record).count + 1
+            guard bytes+size <= maximumIndexBytes else {continue}
+            records.append(record);bytes+=size
+        }
         let ids=Set(records.map(\.id))
-        guard ids.count == records.count,records.allSatisfy({UUID(uuidString:$0.id) != nil && !$0.name.isEmpty && $0.name.count <= 200 && $0.city.count <= 200 && $0.cuisines.count <= 20 && $0.cuisines.allSatisfy({$0.count <= 100})}),request.recentQuestions.allSatisfy({$0.question.count <= 4000 && $0.recordIDs.count <= 6}) else {throw AskError.inputLimit}
         // Deleted/revoked references are omitted from model input; the local tool still detects stale scope.
         let recent=request.recentQuestions.map {AskRecentUserQuestion(question:$0.question,recordIDs:$0.recordIDs.filter {ids.contains($0)})}
-        return .init(index:records,recent:recent)
+        return .init(index:records,recent:recent,indexComplete:safe.complete && safe.cityCatalogComplete && records.count == safe.places.count ? nil : false)
     }
 }
 
@@ -82,12 +94,35 @@ struct AskLibrarySnapshot: Sendable {
     let places: [AskPersonalPlace]
     let totalCount: Int
     var cityNames: [String]? = nil
+    // One entry per excluded persisted row; nil city means its scope is unknown.
+    // Absent for legacy/injected snapshots whose unread rows cannot be scoped.
+    var unavailableCities: [String?]? = nil
+    var cityCatalogComplete=true
     var complete: Bool { totalCount == places.count }
     var cities: [String] { Array(Set(cityNames ?? places.map(\.city))).sorted() }
     static let availableFields = ["name","city","neighborhood","cuisine","type","status","website","instagram"]
+    static func valid(_ place:AskPersonalPlace)->Bool {
+        UUID(uuidString:place.id) != nil && !place.name.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty && place.name.utf16.count <= 200 && place.city.utf16.count <= 200 && place.neighborhood.utf16.count <= 200 && place.cuisines.count <= 20 && place.cuisines.allSatisfy {!$0.isEmpty && $0.utf16.count <= 100} && [place.status,place.type].allSatisfy {$0 == nil || $0!.utf16.count <= 200} && [place.websiteURL,place.instagramURL].allSatisfy {$0 == nil || $0!.utf16.count <= 2000} && (place.applePlaceID?.utf16.count ?? 0) <= 300
+    }
+    func sanitized()->Self {
+        let counts=Dictionary(grouping:places,by:{UUID(uuidString:$0.id)?.uuidString ?? $0.id}).mapValues(\.count)
+        let valid=places.filter {Self.valid($0) && counts[UUID(uuidString:$0.id)?.uuidString ?? $0.id] == 1}
+        let rejected=places.filter { !Self.valid($0) || counts[UUID(uuidString:$0.id)?.uuidString ?? $0.id] != 1 }
+        let known=unavailableCities ?? (totalCount == places.count ? [] : nil)
+        return .init(places:valid,totalCount:max(totalCount,places.count),cityNames:cityNames?.filter {$0.utf16.count <= 200},unavailableCities:known.map {$0 + rejected.map {!$0.city.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty && $0.city.utf16.count <= 200 ? $0.city : nil}},cityCatalogComplete:cityCatalogComplete)
+    }
+    func complete(in city:String?)->Bool {
+        if complete {return true}
+        guard let city,let unavailableCities,unavailableCities.count == totalCount-places.count else {return false}
+        return unavailableCities.allSatisfy {value in
+            guard let value else {return false}
+            let stub=AskPersonalPlace(id:"",name:"",status:nil,type:nil,cuisines:[],city:value,neighborhood:"")
+            return !AskQueryPlan.sameRegion(stub,city)
+        }
+    }
 }
 struct AskLibraryToolResult: Sendable {
-    enum Status: String, Sendable { case success, ambiguous, stale, partial, unsupported }
+    enum Status: String, Sendable { case success, ambiguous, stale, partial, limited, unsupported }
     let status: Status
     let records: [AskPersonalPlace]
     let appliedFilters: AskLibraryPlan
@@ -100,19 +135,18 @@ struct AskLibraryToolResult: Sendable {
 enum AskLibraryReadTools {
     static func execute(_ supplied: AskLibraryPlan, snapshot: AskLibrarySnapshot, context: AskLibraryContext?,requireUniqueDetails:Bool=true) throws -> AskLibraryToolResult {
         var plan = try supplied.validated()
-        let all = snapshot.places
-        guard all.count <= 200, snapshot.totalCount >= all.count, Set(all.map(\.id)).count == all.count else { throw AskError.invalidEvidence }
+        let snapshot=snapshot.sanitized(),all = snapshot.places
         if let context {
             let selection = context.selectionIDs ?? context.ids
-            guard context.ids.count <= 200,Set(context.ids).count == context.ids.count,selection.count <= 200,Set(selection).count == selection.count,Set(context.ids).isSubset(of:Set(selection)) else { throw AskError.invalidEvidence }
+            guard context.ids.count <= 200,Set(context.ids).count == context.ids.count,Set(selection).count == selection.count,Set(context.ids).isSubset(of:Set(selection)) else { throw AskError.invalidEvidence }
         }
         func result(_ status: AskLibraryToolResult.Status, _ records: [AskPersonalPlace]) -> AskLibraryToolResult {
-            var value=AskLibraryToolResult(status: status, records: records, appliedFilters: plan, totalCount: records.count, complete: snapshot.complete, cities: snapshot.cities)
+            var value=AskLibraryToolResult(status: status, records: records, appliedFilters: plan, totalCount: records.count, complete: snapshot.complete(in:plan.city), cities: snapshot.cities)
             value.excludesExternalReferences = plan.status != nil || plan.neighborhood != nil || plan.placeType != nil || (plan.operation != .lookup && plan.fields.contains { ["status","neighborhood","type","address"].contains($0) }) || ["status","neighborhood","type"].contains(plan.groupBy ?? "") || (plan.scope == .previous && context?.excludesExternalReferences == true)
             return value
         }
         guard plan.operation != .unsupported else { return result(.unsupported,[]) }
-        if plan.operation == .catalog { return .init(status: snapshot.complete ? .success : .partial, records: [], appliedFilters: plan, totalCount: snapshot.totalCount, complete: snapshot.complete, cities: snapshot.cities) }
+        if plan.operation == .catalog {let complete=snapshot.complete && snapshot.cityCatalogComplete;return .init(status: complete ? .success : .partial, records: [], appliedFilters: plan, totalCount: snapshot.totalCount, complete: complete, cities: snapshot.cities)}
         var records = all.sorted { $0.name == $1.name ? $0.id < $1.id : $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         if plan.scope == .previous {
             guard let context else { return result(.stale,[]) }
@@ -162,10 +196,11 @@ enum AskLibraryReadTools {
             guard plan.positions.allSatisfy({$0 <= shown.count}) else { return result(.stale,[]) }
             records=plan.positions.map {shown[$0-1]}
         }
-        if !snapshot.complete { return result(.partial,records) }
+        if !snapshot.complete(in:plan.city) { return result(.partial,records) }
+        if ![.count,.group].contains(plan.operation),records.count > 200 {return result(.limited,records)}
         if requireUniqueDetails && plan.operation == .details && records.count > 1 { return result(.ambiguous, records) }
         if plan.operation == .compare && !(2...(requireUniqueDetails ? 6 : 200)).contains(records.count) { return result(.ambiguous, records) }
-        return result(snapshot.complete ? .success : .partial, records)
+        return result(.success, records)
     }
     static func response(_ result: AskLibraryToolResult, tools: AskReadTools) throws -> AskResponse {
         let plan = result.appliedFilters
@@ -181,6 +216,7 @@ enum AskLibraryReadTools {
         case .stale: return plain("Those results have changed. Please ask for the list again.")
         case .unsupported: return plain("I don’t have the saved details needed to answer that.")
         case .partial: return plain("I couldn’t check the complete collection. Open a city to review its saved places.")
+        case .limited: return plain("\(result.records.count) saved places match. That is too many to show in one answer. Narrow the request by city, cuisine, or name.")
         case .ambiguous:
             let text = plan.operation == .compare || plan.operation == .answer ? "Which saved places do you mean?" : "More than one saved place matches. Which one do you mean?"
             guard (1...6).contains(result.records.count) else { return plain(text) }
@@ -188,7 +224,8 @@ enum AskLibraryReadTools {
         case .success: break
         }
         if plan.operation == .catalog {
-            return plain(result.totalCount == 0 ? "You haven’t saved any places yet." : "You have \(result.totalCount) saved places across \(result.cities.joined(separator: ", ")).")
+            let cities=result.cities.joined(separator:", ")
+            return plain(result.totalCount == 0 ? "You haven’t saved any places yet." : cities.count>2500 ? "You have \(result.totalCount) saved places across \(result.cities.count) cities." : "You have \(result.totalCount) saved places across \(cities).")
         }
         if result.status == .success && (plan.operation == .count || plan.operation == .group) {
             let text:String
@@ -272,6 +309,10 @@ enum AskLibraryReadTools {
             }
         }
         if let cityHeading {paragraphs.insert(.init(id:"library-city-heading",spans:[.text(cityHeading)],sourceIDs:[]),at:0)}
+        let characters=paragraphs.flatMap(\.spans).reduce(0) {total,span in
+            switch span {case .text(let text):return total+text.count;case .place(let id):return total+(result.records.first {$0.id==id}?.name.count ?? 0)}
+        }
+        guard characters<=60_000 else {return plain("Those saved details are too long to show in one answer. Narrow the request by city, cuisine, or name.")}
         var response = AskResponse(summary:"\(candidates.count) saved \(candidates.count == 1 ? "place" : "places").",candidates:candidates,paragraphs:paragraphs,listedCandidateIDs:[],usesLocalCatalog:true)
         response.libraryContext = .init(ids:result.records.map(\.id),filters:plan,excludesExternalReferences:result.excludesExternalReferences)
         return response

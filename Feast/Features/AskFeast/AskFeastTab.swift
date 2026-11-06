@@ -20,9 +20,8 @@ struct AskFeastTab: View {
     @Environment(\.colorScheme) private var colorScheme
     @ObservedObject var state: AskFeastTabState
     @AppStorage(AskPrivacy.onlineKey) private var onlineAllowed = false
-    @State private var showingHistory = false
     @State private var onlineConfigured = false
-    @State private var showingActivation = false
+    @State private var accessPresentation = AskAccessPresentation()
     private var phoneActivationAvailable:Bool {
         AskProductionAccess.configuration(info:Bundle.main.infoDictionary ?? [:]) != nil &&
         !(AskOwnerValidationAccess.configuration(info:Bundle.main.infoDictionary ?? [:]) != nil && AskOwnerValidationAccess.credentialAvailable)
@@ -32,30 +31,52 @@ struct AskFeastTab: View {
         NavigationStack {
             Group {
                 if state.savedCollection != nil, let session = state.session {
-                    AskSavedCollectionPanel(state: state, session: session,showHistory:{showingHistory=true},invitationRequired:phoneActivationAvailable && !AskProductionAccess.credentialAvailable,enterInvitation:{showingActivation=true})
+                    AskSavedCollectionPanel(state: state, session: session,showHistory:{accessPresentation.present(.history)},invitationRequired:phoneActivationAvailable && !AskProductionAccess.credentialAvailable,enterInvitation:{accessPresentation.present(.access)})
                 } else if let error = state.error {
                     ContentUnavailableView("Ask Feast", systemImage: "exclamationmark.triangle", description: Text(error))
                 } else { ProgressView("Preparing Ask Feast") }
             }
+            .safeAreaInset(edge:.top,spacing:0) {
+                if accessPresentation.showsActivationConfirmation {
+                    HStack(spacing:FeastTheme.Spacing.small) {
+                        Label("Ask Feast activated. You’re ready to ask.",systemImage:"checkmark.circle")
+                            .font(.subheadline).frame(maxWidth:.infinity,alignment:.leading)
+                            .accessibilityIdentifier("ask.activation.confirmation")
+                        Button {accessPresentation.dismissConfirmation()} label: {Image(systemName:"xmark").frame(minWidth:44,minHeight:44)}
+                            .accessibilityLabel("Dismiss activation confirmation")
+                    }
+                    .padding(.horizontal,FeastTheme.Spacing.large)
+                    .background(FeastTheme.AdaptiveColors.surfaceBackground)
+                }
+            }
             .navigationTitle("Ask Feast").navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                if phoneActivationAvailable && AskProductionAccess.credentialAvailable {
-                    ToolbarItem(placement:.bottomBar){Button(onlineConfigured ? "Ask Feast access" : "Activate Ask Feast"){showingActivation=true}.accessibilityIdentifier("ask.activate")}
-                }
-                ToolbarItem(placement:.topBarLeading) { Button("History",systemImage:"clock.arrow.circlepath") { showingHistory = true }.accessibilityIdentifier("ask.history") }
+                ToolbarItem(placement:.topBarLeading) { Button("History",systemImage:"clock.arrow.circlepath") { accessPresentation.present(.history) }.accessibilityIdentifier("ask.history") }
                 ToolbarItem(placement:.topBarTrailing) { Button("New chat",systemImage:"square.and.pencil") { _ = state.session?.newChat() }.accessibilityIdentifier("ask.newChat") }
                 ToolbarItem(placement: .principal) { Text("Ask Feast").font(FeastTheme.Typography.listTitle).foregroundStyle(FeastTheme.AdaptiveColors.primaryText) }
             }
             .toolbarBackground(FeastTheme.AdaptiveColors.groupedBackground, for: .navigationBar)
             .toolbarColorScheme(colorScheme, for: .navigationBar)
         }
-        .sheet(isPresented:$showingHistory) { if let session = state.session { AskChatHistoryView(session:session,onlineConfigured:onlineConfigured) } }
-        .sheet(isPresented:$showingActivation,onDismiss:{onlineConfigured=AskProductionAccess.credentialAvailable;if !onlineConfigured {state.disableOnline()}}) {
-            if let configuration=AskProductionAccess.configuration(info:Bundle.main.infoDictionary ?? [:]) {
-                AskActivationView(configuration:configuration,onActivated:{
-                    guard state.connectActivatedPhone(configuration) else{return false}
-                    onlineConfigured=true;return true
-                })
+        .sheet(item:$accessPresentation.sheet,onDismiss:{
+            if accessPresentation.didDismissSheet() == .access {
+                onlineConfigured=AskProductionAccess.credentialAvailable
+                if !onlineConfigured {accessPresentation.dismissConfirmation();state.disableOnline()}
+            }
+        }) { sheet in
+            switch sheet {
+            case .history:
+                if let session = state.session {
+                    AskChatHistoryView(session:session,onlineConfigured:onlineConfigured,accessAvailable:phoneActivationAvailable,showAccess:{accessPresentation.present(.access)})
+                }
+            case .access:
+                if let configuration=AskProductionAccess.configuration(info:Bundle.main.infoDictionary ?? [:]) {
+                    AskActivationView(configuration:configuration,onActivated:{ newActivation in
+                        let connected=state.connectActivatedPhone(configuration)
+                        if connected {onlineConfigured=true}
+                        return accessPresentation.connected(connected,newActivation:newActivation)
+                    })
+                }
             }
         }
         .foregroundStyle(FeastTheme.AdaptiveColors.primaryText)
@@ -398,6 +419,8 @@ private struct AskChatHistoryView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var session: AskSession
     let onlineConfigured:Bool
+    let accessAvailable:Bool
+    let showAccess:()->Void
     @State private var renaming:UUID?
     @State private var title = ""
     @State private var deleting:UUID?
@@ -426,10 +449,14 @@ private struct AskChatHistoryView: View {
     }
     private var historyList: some View {
         List {
-            ForEach(orderedChats) { chat in historyRow(chat) }
             Section {
                 NavigationLink { AskPrivacyView(onlineConfigured:onlineConfigured) } label: { Label("Settings",systemImage:"gearshape") }
+                if accessAvailable {
+                    Button(action:showAccess) {Label("Ask Feast access",systemImage:"key")}
+                        .accessibilityIdentifier("ask.activate")
+                }
             }
+            ForEach(orderedChats) { chat in historyRow(chat) }
             if let error = session.error { Text(error).font(.footnote).foregroundStyle(.secondary) }
         }
     }

@@ -12,7 +12,9 @@ import CryptoKit
     private var conversationalReplacement=false
     private var conversationalExecution=false
     private var selection:[String]
+    private var selectionIsOrdered:Bool
     private let humanReferenceSelection:[String]
+    private let humanReferenceIsOrdered:Bool
     private var selectionIsPrivate:Bool
     private var findings:[AskVerifiedFinding]
     private var maps:[String:ApplePlaceMatch]=[:]
@@ -30,7 +32,9 @@ import CryptoKit
     private var readContexts:[NSManagedObjectContext]=[]
     init(adapter:AskSavedCollection,engine:AskCollectionChangeEngine,request:AskRequest,researcher:any AskBusinessResearching,searchMaps:@escaping (String)async throws->[ApplePlaceMatch],resolveMaps:@escaping @MainActor @Sendable (String)async throws->ApplePlaceMatch? = {_ in nil}) {
         self.adapter=adapter;self.engine=engine;self.request=request;self.researcher=researcher;self.searchMaps=searchMaps;self.resolveMaps=resolveMaps
-        humanReferenceSelection=request.agentTask?.orderedIDs ?? request.libraryContext?.selectionIDs ?? request.libraryContext?.ids ?? []
+        humanReferenceSelection=request.agentTask?.selectionIDs ?? request.agentTask?.orderedIDs ?? request.libraryContext?.selectionIDs ?? request.libraryContext?.ids ?? []
+        humanReferenceIsOrdered=request.agentTask.map {$0.selectionIDs == nil} ?? (request.libraryContext?.selectionIDs == nil)
+        selectionIsOrdered=humanReferenceIsOrdered
         selection=humanReferenceSelection;selectionIsPrivate=(request.agentTask?.privateSelection ?? (request.agentTask?.sourcePolicy=="local_only")) || request.libraryContext?.excludesExternalReferences==true;findings=request.verifiedFindings
         maps=Dictionary(request.mapChoices.map {($0.id,$0.match)},uniquingKeysWith:{$1})
         mapsQuery=request.mapChoices.first?.query
@@ -67,17 +71,30 @@ import CryptoKit
     func cities()throws->[AskAgentCity] {
         let ids=try adapter.visibleCities(),fetch=FeastList.fetchRequest()
         let reader=try adapter.makeSaveContext();readContexts.append(reader)
-        return try reader.fetch(fetch).filter {$0.id.map(ids.contains)==true}.compactMap {city in guard let id=city.id else{return nil};return .init(id:id.uuidString,name:city.displayName)}
+        let values=try reader.fetch(fetch).filter {$0.id.map(ids.contains)==true}
+        let groups=Dictionary(grouping:values,by:{$0.id})
+        return values.compactMap {city in guard let id=city.id,groups[id]?.count==1,let name=city.name,!name.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty,name.utf16.count<=200 else{return nil};return .init(id:id.uuidString,name:name)}.sorted {$0.id<$1.id}
     }
     private func objects(_ entity:String)throws->[NSManagedObject] {
         let ids=try adapter.visibleCities(),name=entity=="city" ? "FeastList" : entity=="neighborhood" ? "ListSection" : "SavedPlace"
         let query=NSFetchRequest<NSManagedObject>(entityName:name);query.includesPendingChanges=false
         query.predicate=entity=="city" ? NSPredicate(format:"id IN %@",Array(ids) as NSArray) : NSPredicate(format:"feastList.id IN %@",Array(ids) as NSArray)
         let reader=try adapter.makeSaveContext();readContexts.append(reader)
-        return try reader.fetch(query)
+        let values=try reader.fetch(query),keys=values.compactMap {($0.value(forKey:"id") as? UUID)?.uuidString}
+        // Mutation/reference resolution must never pick one duplicate, omit a missing
+        // identity, or feed collisions into Dictionary(uniqueKeysWithValues:).
+        guard keys.count==values.count,Set(keys).count==keys.count else {throw AskChangeError.missing}
+        let parentIDs=Set(try cities().map(\.id))
+        guard values.allSatisfy({object in
+            let parent=(entity=="city" ? object.value(forKey:"id") as? UUID : (object.value(forKey:"feastList") as? FeastList)?.id)?.uuidString
+            guard let parent,parentIDs.contains(parent),let name=object.value(forKey:entity=="place" ? "displayNameSnapshot" : "name") as? String else{return false}
+            return !name.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty && name.utf16.count<=200
+        }) else {throw AskChangeError.missing}
+        return values
     }
     private func resolved(_ permission:AskAgentPermission,reference:[String]?=nil)throws->[String] {
         let selection=reference ?? self.selection
+        if permission.selector?.positions?.isEmpty == false {guard reference == nil ? selectionIsOrdered : humanReferenceIsOrdered else {throw AskChangeError.missing}}
         let all=try objects(permission.entity)
         if permission.operations==["undo"],let positions=permission.selector?.positions,!positions.isEmpty {
             guard positions.allSatisfy({$0>0&&$0<=selection.count}),Set(positions).count==positions.count else {throw AskChangeError.invalid}
@@ -114,7 +131,7 @@ import CryptoKit
         if let name=selector.name {values=values.filter {AskCityIdentity.key(($0.value(forKey:permission.entity=="place" ? "displayNameSnapshot" : "name") as? String) ?? "")==AskCityIdentity.key(name)}}
         if permission.entity=="place" {
             values=values.filter {object in guard let place=object as? SavedPlace else{return false}
-                return (selector.neighborhood==nil||AskCityIdentity.key(place.listSection?.name ?? "")==AskCityIdentity.key(selector.neighborhood!)) && (selector.cuisine==nil||place.cuisines.contains(where:{$0.caseInsensitiveCompare(selector.cuisine!) == .orderedSame})) && (selector.status==nil||(selector.status=="untried" ? [.wantToTry,.justOpened].contains(place.placeStatus) : place.placeStatus.rawValue==selector.status)) && (selector.placeType==nil||place.placeTypeValue.rawValue==selector.placeType)
+                return (selector.neighborhood==nil||AskCityIdentity.key(place.listSection?.name ?? "")==AskCityIdentity.key(selector.neighborhood!)) && (selector.cuisine==nil||place.cuisines.contains(where:{$0.caseInsensitiveCompare(selector.cuisine!) == .orderedSame})) && (selector.status==nil||(selector.status=="untried" ? ["Want to try","Just opened"].contains(place.status ?? "") : place.status==selector.status)) && (selector.placeType==nil||place.placeType==selector.placeType)
             }
         }else if [selector.neighborhood,selector.cuisine,selector.status,selector.placeType].contains(where:{$0 != nil}) {throw AskChangeError.invalid}
         guard !values.isEmpty,values.count<=200 else {throw AskChangeError.invalid}
@@ -156,7 +173,7 @@ import CryptoKit
             }
             // Pending previews can contain local-only values: never project their contents.
             selectionIsPrivate=true
-            return .init(output:.init(status:failure==nil ? "applied" : "unavailable",complete:failure==nil,totalCount:0,records:[],findings:[],message:failure==nil ? "changed" : "unavailable",localOnly:false),response:plain(failure ?? "Saved.",actions:applied,statusOnly:failure==nil),orderedIDs:selection,appendPreviousResults:true,selectionIsPrivate:true,outcomes:applied.flatMap {action in action.targetIDs.map {.init(id:$0,state:action.state.rawValue)}})
+            return .init(output:.init(status:failure==nil ? "applied" : "unavailable",complete:failure==nil,totalCount:0,records:[],findings:[],message:failure==nil ? "changed" : "unavailable",localOnly:false),response:plain(failure ?? "Saved.",actions:applied,statusOnly:failure==nil),orderedIDs:selection,appendPreviousResults:true,selectionIsPrivate:true,outcomes:applied.flatMap {action in action.targetIDs.map {.init(id:$0,state:action.state.rawValue)}},selectionIsOrdered:selectionIsOrdered)
         }
         if call.name=="propose_changes" {
             var proposal=try JSONDecoder().decode(AskChangeProposal.self,from:Data(call.arguments.utf8))
@@ -166,7 +183,7 @@ import CryptoKit
                 guard let fresh=try await resolveMaps(choice.applePlaceID),fresh.applePlaceID==choice.applePlaceID,AskCityIdentity.key(fresh.displayName)==AskCityIdentity.key(choice.name),(choice.address.isEmpty || AskCityIdentity.key(fresh.secondaryText)==AskCityIdentity.key(choice.address)) else {
                     var response=plain("That Maps choice is no longer available. Search again before saving it.")
                     response.mapChoices=request.mapChoices;response.pendingProposal=proposal;response.executionStatus="unresolved"
-                    return .init(output:.init(status:"stale",complete:false,totalCount:0,records:[],findings:[],message:"unavailable",localOnly:false),response:response,orderedIDs:selection)
+                    return .init(output:.init(status:"stale",complete:false,totalCount:0,records:[],findings:[],message:"unavailable",localOnly:false),response:response,orderedIDs:selection,selectionIsOrdered:selectionIsOrdered)
                 }
                 maps[choice.id]=fresh
             }
@@ -180,7 +197,7 @@ import CryptoKit
                     (object.value(forKey:"feastList") as? FeastList)?.id?.uuidString==parent && AskCityIdentity.key((object.value(forKey:"name") as? String) ?? "")==AskCityIdentity.key(supplied)
                 }
                 guard let parent,matches.count==1,let section=matches[0].value(forKey:"id") as? UUID else {
-                    return .init(output:.init(status:"needs_confirmation",complete:true,totalCount:0,records:[],findings:[],message:"needs_review",localOnly:false),response:plain("Please specify one existing destination city and neighborhood."),orderedIDs:selection,selectionIsPrivate:selectionIsPrivate)
+                    return .init(output:.init(status:"needs_confirmation",complete:true,totalCount:0,records:[],findings:[],message:"needs_review",localOnly:false),response:plain("Please specify one existing destination city and neighborhood."),orderedIDs:selection,selectionIsPrivate:selectionIsPrivate,selectionIsOrdered:selectionIsOrdered)
                 }
                 // The model/auth check sees its own requested name, not private IDs.
                 // Persistence receives the unique fresh native identity.
@@ -236,7 +253,7 @@ import CryptoKit
             let authorizationStarted=DispatchTime.now().uptimeNanoseconds
             let decision:AskHumanAuthorization
             do {defer {AskPipelineScope.record(.authorization,since:authorizationStarted)};decision=try await planner.authorizeConversationChange(authorizationProposal,question:request.text,history:AskConversationProjection.authorizationHistory(request.dialogue,recent:request.recentQuestions),targets:usesPrivateSelection ? [] : targets)}
-            guard decision.approved else {return .init(output:.init(status:"needs_confirmation",complete:true,totalCount:0,records:[],findings:[],message:"needs_review",localOnly:false),response:plain(decision.reason=="ambiguous" ? "Which change would you like me to make?" : "Tell me what you’d like changed before I save anything."),orderedIDs:selection,selectionIsPrivate:selectionIsPrivate)}
+            guard decision.approved else {return .init(output:.init(status:"needs_confirmation",complete:true,totalCount:0,records:[],findings:[],message:"needs_review",localOnly:false),response:plain(decision.reason=="ambiguous" ? "Which change would you like me to make?" : "Tell me what you’d like changed before I save anything."),orderedIDs:selection,selectionIsPrivate:selectionIsPrivate,selectionIsOrdered:selectionIsOrdered)}
             try Task.checkCancellation()
             guard try authorizationState(proposal)==pinnedSource else{throw AskChangeError.conflict}
             if let city=destinationCity {guard try cities().contains(where:{$0.id==city.id && $0.name==city.name}) else{throw AskChangeError.conflict}}
@@ -258,17 +275,17 @@ import CryptoKit
             if proposal.operation != "create",let selector=decision.targetSelector {
                 let scope=AskAgentPermission(entity:proposal.entity,operations:[proposal.operation],fields:proposal.changes.map(\.field),targetIDs:[],instructionQuote:request.text,selector:selector)
                 if !(selector.positions ?? []).isEmpty,let context=request.libraryContext,[AskLibraryPlan.Operation.count,.group,.catalog].contains(context.filters.operation),context.ids.isEmpty {
-                    return .init(output:.init(status:"needs_confirmation",complete:true,totalCount:0,records:[],findings:[],message:"needs_review",localOnly:false),response:plain("Those results weren’t displayed in an order. Show a list before choosing an item by position."),orderedIDs:selection,selectionIsPrivate:selectionIsPrivate)
+                    return .init(output:.init(status:"needs_confirmation",complete:true,totalCount:0,records:[],findings:[],message:"needs_review",localOnly:false),response:plain("Those results weren’t displayed in an order. Show a list before choosing an item by position."),orderedIDs:selection,selectionIsPrivate:selectionIsPrivate,selectionIsOrdered:selectionIsOrdered)
                 }
                 let permitted:[String]
                 do {permitted=try resolved(scope,reference:humanReferenceSelection)}
                 catch AskChangeError.invalid {
-                    return .init(output:.init(status:"conflict",complete:true,totalCount:0,records:[],findings:[],message:"target_mismatch",localOnly:false),response:plain("No change was applied: the requested record or relationship does not match the saved details."),orderedIDs:selection,appendPreviousResults:true,selectionIsPrivate:selectionIsPrivate,presentation:.init(kind:"action",requestedFields:proposal.changes.map(\.field),returnedFields:[],complete:true,renderedLocally:true))
+                    return .init(output:.init(status:"conflict",complete:true,totalCount:0,records:[],findings:[],message:"target_mismatch",localOnly:false),response:plain("No change was applied: the requested record or relationship does not match the saved details."),orderedIDs:selection,appendPreviousResults:true,selectionIsPrivate:selectionIsPrivate,presentation:.init(kind:"action",requestedFields:proposal.changes.map(\.field),returnedFields:[],complete:true,renderedLocally:true),selectionIsOrdered:selectionIsOrdered)
                 }
 
                 guard !proposal.targetIDs.isEmpty,Set(proposal.targetIDs).isSubset(of:Set(permitted)) else{throw AskChangeError.permission}
             }else if usesPrivateSelection {
-                return .init(output:.init(status:"needs_confirmation",complete:true,totalCount:0,records:[],findings:[],message:"needs_review",localOnly:false),response:plain("Which of the displayed places should I change?"),orderedIDs:selection,selectionIsPrivate:true)
+                return .init(output:.init(status:"needs_confirmation",complete:true,totalCount:0,records:[],findings:[],message:"needs_review",localOnly:false),response:plain("Which of the displayed places should I change?"),orderedIDs:selection,selectionIsPrivate:true,selectionIsOrdered:selectionIsOrdered)
             }
             conversationalReplacement=decision.replaceExisting
             let expected=proposal.changes.map {change in AskAgentExpectedChange(field:change.field,source:change.source ?? (change.findingID==nil ? "user" : "verified_finding"),value:change.value,values:change.values)}
@@ -327,7 +344,14 @@ import CryptoKit
         .init(summary:text,candidates:[],paragraphs:[.init(id:"agent-message",spans:[.text(text)],sourceIDs:[],operationStatus:statusOnly)],listedCandidateIDs:[],usesLocalCatalog:true,collectionActions:actions)
     }
     private func output(_ status:String,_ records:[AskPersonalPlace],complete:Bool=true,publicFindings:[AskVerifiedFinding]=[],message:String="ok")->AskAgentResult {
-        .init(status:status,complete:complete,totalCount:records.count,records:records.map {.init(id:$0.id,name:$0.name,city:$0.city,cuisines:$0.cuisines,kind:"place")},findings:publicFindings.map {.init(id:$0.id.uuidString,recordID:$0.recordID,field:$0.field,value:$0.value,sourceURL:$0.evidenceURL)},message:message,localOnly:false)
+        var projected:[AskAgentRecord]=[],bytes=2
+        for record in records {
+            let value=AskAgentRecord(id:record.id,name:record.name,city:record.city,cuisines:record.cuisines,kind:"place")
+            let size=(try? JSONEncoder().encode(value).count) ?? AskSemanticContext.maximumIndexBytes
+            guard projected.count<200,bytes+size+1<=AskSemanticContext.maximumIndexBytes else{continue}
+            projected.append(value);bytes+=size+1
+        }
+        return .init(status:status,complete:complete && projected.count==records.count,totalCount:records.count,records:projected,findings:publicFindings.map {.init(id:$0.id.uuidString,recordID:$0.recordID,field:$0.field,value:$0.value,sourceURL:$0.evidenceURL)},message:message,localOnly:false)
     }
     func execute(_ call:AskAgentReply.Call,intent:AskAgentInterpretation)async throws->AskAgentExecution {
         let started=DispatchTime.now().uptimeNanoseconds
@@ -352,7 +376,7 @@ import CryptoKit
                 let failure=error as NSError
                 guard ["MKErrorDomain",NSURLErrorDomain].contains(failure.domain) else{throw error}
                 maps=[:];mapsQuery=nil
-                return .init(output:.init(status:"unavailable",complete:false,totalCount:0,records:[],findings:[],message:"unavailable",localOnly:false),response:plain("Apple Maps couldn’t complete that search. Earlier changes remain saved."),orderedIDs:selection,appendPreviousResults:true,selectionIsPrivate:selectionIsPrivate)
+                return .init(output:.init(status:"unavailable",complete:false,totalCount:0,records:[],findings:[],message:"unavailable",localOnly:false),response:plain("Apple Maps couldn’t complete that search. Earlier changes remain saved."),orderedIDs:selection,appendPreviousResults:true,selectionIsPrivate:selectionIsPrivate,selectionIsOrdered:selectionIsOrdered)
             }
             try Task.checkCancellation()
             let namespace=UUID(uuidString:"00000000-0000-4000-8000-000000000001")!
@@ -365,7 +389,7 @@ import CryptoKit
             let records=choices.map {AskAgentRecord(id:$0.id,name:$0.name,city:$0.city,cuisines:[],kind:"maps",detail:$0.address)}
             var response=plain(records.isEmpty ? "No Maps match was found." : "")
             response.mapChoices=choices
-            return .init(output:.init(status:records.isEmpty ? "empty" : "success",complete:results.count<=6,totalCount:results.count,records:records,findings:[],message:records.isEmpty ? "not_found" : "ok",localOnly:false),response:response,orderedIDs:selection)
+            return .init(output:.init(status:records.isEmpty ? "empty" : "success",complete:results.count<=6,totalCount:results.count,records:records,findings:[],message:records.isEmpty ? "not_found" : "ok",localOnly:false),response:response,orderedIDs:selection,selectionIsOrdered:selectionIsOrdered)
         case "propose_changes":return try change(Data(call.arguments.utf8),intent:intent)
         default:throw AskError.invalidEvidence
         }
@@ -376,38 +400,57 @@ import CryptoKit
         if supplied.entity != "place" {
             guard ["city","neighborhood"].contains(supplied.entity) else {throw AskError.invalidEvidence}
             var records=try objects(supplied.entity)
+            if let selected=supplied.selectionIDs {
+                let available=Set(records.compactMap {($0.value(forKey:"id") as? UUID)?.uuidString})
+                guard Set(selected).count==selected.count,Set(selected).isSubset(of:available) else {
+                    selection=[];selectionIsOrdered=false
+                    return .init(output:.init(status:"stale",complete:false,totalCount:0,records:[],findings:[],message:"target_mismatch",localOnly:false),response:plain("Those saved items could not be identified safely. Ask for the list again."),orderedIDs:[],selectionIsOrdered:false)
+                }
+            }
             if supplied.query.scope == .previous {
                 let byID=Dictionary(uniqueKeysWithValues:records.compactMap {object->(String,NSManagedObject)? in guard let id=object.value(forKey:"id") as? UUID else{return nil};return (id.uuidString,object)})
                 guard !selection.isEmpty,selection.allSatisfy({byID[$0] != nil}) else {throw AskChangeError.missing}
                 records=selection.compactMap {byID[$0]}
             }else {records.sort {a,b in let left=(a.value(forKey:"name") as? String) ?? "",right=(b.value(forKey:"name") as? String) ?? "";return left==right ? (a.value(forKey:"id") as? UUID)?.uuidString ?? "" < (b.value(forKey:"id") as? UUID)?.uuidString ?? "" : left.localizedCaseInsensitiveCompare(right) == .orderedAscending}}
-            if !supplied.query.positions.isEmpty {guard supplied.query.scope == .previous,supplied.query.positions.allSatisfy({$0>0&&$0<=records.count}) else {throw AskChangeError.invalid};records=supplied.query.positions.map {records[$0-1]}}
+            if !supplied.query.positions.isEmpty {guard selectionIsOrdered,supplied.query.scope == .previous,supplied.query.positions.allSatisfy({$0>0&&$0<=records.count}) else {throw AskChangeError.invalid};records=supplied.query.positions.map {records[$0-1]}}
             if let city=supplied.query.city {guard case .matched(let name)=AskCityIdentity.resolve(city,available:try cities().map(\.name)) else {return .init(output:.localPrivate(),response:plain("No saved city matches that request."),orderedIDs:[])};records=records.filter {supplied.entity=="city" ? ($0.value(forKey:"name") as? String)==name : ($0.value(forKey:"feastList") as? FeastList)?.name==name}}
             if let name=supplied.query.name {records=records.filter {AskCityIdentity.key(($0.value(forKey:"name") as? String) ?? "")==AskCityIdentity.key(name)}}
             if let ids=supplied.selectionIDs {records=records.filter {($0.value(forKey:"id") as? UUID).map {ids.contains($0.uuidString)} == true}}
             let names=records.compactMap {$0.value(forKey:"name") as? String},ids=records.compactMap {($0.value(forKey:"id") as? UUID)?.uuidString}
             selection=ids
-            let text=supplied.query.operation == .count ? "\(records.count) saved \(supplied.entity == "city" ? "cities" : "neighborhoods")." : names.isEmpty ? "No saved \(supplied.entity == "city" ? "cities" : "neighborhoods") match that request." : names.joined(separator:"\n")
+            selectionIsPrivate = supplied.entity=="neighborhood" || (supplied.query.scope == .previous && selectionIsPrivate)
+            let aggregate=supplied.query.operation == .count,limited = !aggregate && (records.count>200 || names.joined(separator:"\n").count>3000)
+            selectionIsOrdered = !aggregate && !limited
+            let text=aggregate ? "\(records.count) saved \(supplied.entity == "city" ? "cities" : "neighborhoods")." : limited ? "\(records.count) saved items match. Narrow the request by city or name to show the complete list." : names.isEmpty ? "No saved \(supplied.entity == "city" ? "cities" : "neighborhoods") match that request." : names.joined(separator:"\n")
             // Neighborhood names/membership are not part of the approved uploaded compact index.
-            let presentation=AskToolPresentation(kind:supplied.query.operation == .count ? "count" : "rows",requestedFields:supplied.query.fields,returnedFields:supplied.query.operation == .count ? [] : ["name"],complete:true,renderedLocally:true)
-            if supplied.entity=="neighborhood" {return .init(output:.localPrivate(),response:plain(text),orderedIDs:ids,selectionIsPrivate:true,presentation:presentation)}
-            let cloud=records.compactMap {object->AskAgentRecord? in guard let id=object.value(forKey:"id") as? UUID,let name=object.value(forKey:"name") as? String else{return nil};return .init(id:id.uuidString,name:name,city:name,cuisines:[],kind:"city")}
-            return .init(output:.init(status:cloud.isEmpty ? "empty" : "success",complete:true,totalCount:cloud.count,records:cloud,findings:[],message:cloud.isEmpty ? "not_found" : "ok",localOnly:false),response:plain(text),orderedIDs:ids,presentation:presentation)
+            let presentation=AskToolPresentation(kind:aggregate ? "count" : "rows",requestedFields:supplied.query.fields,returnedFields:aggregate || limited ? [] : ["name"],complete:!limited,renderedLocally:!limited)
+            if selectionIsPrivate {return .init(output:.localPrivate(complete:!limited),response:plain(text),orderedIDs:ids,selectionIsPrivate:true,presentation:presentation,selectionIsOrdered:selectionIsOrdered)}
+            let cloud=aggregate || limited ? [] : records.compactMap {object->AskAgentRecord? in guard let id=object.value(forKey:"id") as? UUID,let name=object.value(forKey:"name") as? String else{return nil};return .init(id:id.uuidString,name:name,city:name,cuisines:[],kind:"city")}
+            return .init(output:.init(status:limited ? "partial" : ids.isEmpty ? "empty" : "success",complete:!limited,totalCount:ids.count,records:cloud,findings:[],message:ids.isEmpty ? "not_found" : "ok",localOnly:false),response:plain(text),orderedIDs:ids,presentation:presentation,selectionIsOrdered:selectionIsOrdered)
         }
         let view=try adapter.readView(),catalog=view.snapshot
         var plan=supplied.query
         let privateFields=Set(plan.fields).intersection(["note","tags"])
         plan.fields.removeAll {privateFields.contains($0)}
         let selected=supplied.selectionIDs ?? (plan.scope == .previous ? selection : nil)
-        var context=selected.map {AskLibraryContext(ids:$0,filters:plan)}
+        if let selected {
+            guard Set(selected).count==selected.count,Set(selected).isSubset(of:Set(catalog.places.map(\.id))) else {
+                selection=[];selectionIsOrdered=false
+                return .init(output:.init(status:"stale",complete:false,totalCount:0,records:[],findings:[],message:"target_mismatch",localOnly:false),response:plain("Those saved places could not be identified safely. Ask for the list again."),orderedIDs:[],selectionIsOrdered:false)
+            }
+        }
+        let hasOrder=selected.map {$0.count<=200} == true && (supplied.selectionIDs != nil || selectionIsOrdered)
+        var context=selected.map {AskLibraryContext(ids:hasOrder ? $0 : [],filters:plan,selectionIDs:hasOrder ? nil : $0)}
         if selectionIsPrivate,plan.scope == .previous || (supplied.selectionIDs != nil && plan.name==nil && plan.names==nil && plan.city==nil) {context?.excludesExternalReferences=true}
         let filtered=selected.map {ids in AskLibrarySnapshot(places:catalog.places.filter {ids.contains($0.id)},totalCount:catalog.places.filter {ids.contains($0.id)}.count,cityNames:catalog.cityNames)} ?? catalog
         var result=try AskLibraryReadTools.execute(plan,snapshot:filtered,context:context,requireUniqueDetails:false)
         if result.excludesExternalReferences,plan.fields.allSatisfy(AskBusinessRequest.allowedFields.contains),plan.status==nil,plan.placeType==nil,plan.neighborhood==nil,context?.excludesExternalReferences != true {result.excludesExternalReferences=false}
-        selection=result.records.map(\.id);selectionIsPrivate=result.excludesExternalReferences || !privateFields.isEmpty
+        let aggregate=plan.operation == .count || plan.operation == .group || plan.operation == .catalog
+        selection=result.status == .success || result.status == .limited ? result.records.map(\.id) : []
+        selectionIsOrdered = !aggregate && result.status == .success
+        selectionIsPrivate=result.excludesExternalReferences || !privateFields.isEmpty
         let tools=try AskReadTools(request:request.collectionReadVersion(),index:view.index)
         var response=try AskLibraryReadTools.response(result,tools:tools)
-        let aggregate=plan.operation == .count || plan.operation == .group || plan.operation == .catalog
         if !privateFields.isEmpty && !aggregate {
             let visible=try objects("place").compactMap {$0 as? SavedPlace}
             response.paragraphs=response.paragraphs.map {paragraph in
@@ -421,20 +464,25 @@ import CryptoKit
             }
         }
         let kind=plan.operation == .catalog ? "count" : plan.operation == .count ? (plan.groupBy==nil ? "count" : "groups") : plan.operation == .group ? "groups" : plan.operation == .details || plan.operation == .compare ? "details" : "rows"
-        let presentation=AskToolPresentation(kind:kind,requestedFields:supplied.query.fields,returnedFields:aggregate ? plan.groupBy.map {[$0]} ?? [] : supplied.query.fields,complete:result.complete,renderedLocally:true)
+        let rendered=result.status == .success && (plan.operation == .catalog || (aggregate ? response.libraryContext?.selectionIDs != nil : response.candidates.count == result.records.count))
+        if !rendered {selectionIsOrdered=false}
+        let presentation=AskToolPresentation(kind:kind,requestedFields:supplied.query.fields,returnedFields:rendered ? (aggregate ? plan.groupBy.map {[$0]} ?? [] : supplied.query.fields) : [],complete:rendered,renderedLocally:rendered)
         if plan.groupBy != nil,plan.operation != .group,plan.operation != .count {
             selection=response.paragraphs.flatMap(\.spans).compactMap {span->String? in if case .place(let id)=span{return id};return nil}.reduce(into:[]) {if !$0.contains($1){$0.append($1)}}
         }
-        let storedFindings=result.records.flatMap {record in plan.fields.compactMap {field->AskVerifiedFinding? in
+        let storedFindings=aggregate || !rendered ? [] : result.records.flatMap {record in plan.fields.compactMap {field->AskVerifiedFinding? in
             let value=field=="instagram" ? record.instagramURL.flatMap(InstagramWebsiteParser.profileURL) : field=="website" ? record.websiteURL.flatMap {InstagramWebsiteClient.websiteURL($0)?.absoluteString} : nil
             guard let value else{return nil};return .init(id:UUID(),recordID:record.id,identity:.init(record),field:field,value:value,evidenceURL:value,verification:"saved",originatingTurn:request.performanceID ?? UUID())
         }}
         response.verifiedPublicFindings=storedFindings.isEmpty ? nil : storedFindings
-        if result.excludesExternalReferences || !privateFields.isEmpty {response.verifiedPublicFindings=nil;return .init(output:.localPrivate(),response:response,orderedIDs:selection,selectionIsPrivate:true,presentation:presentation)}
+        if result.excludesExternalReferences || !privateFields.isEmpty {response.verifiedPublicFindings=nil;return .init(output:.localPrivate(complete:rendered),response:response,orderedIDs:selection,selectionIsPrivate:true,presentation:presentation,selectionIsOrdered:selectionIsOrdered)}
         let count=plan.operation == .catalog ? result.totalCount : result.records.count
-        let cloud=output(result.status == .success ? (count==0 ? "empty" : "success") : result.status == .ambiguous ? "ambiguous" : "partial",result.records,complete:result.complete,publicFindings:storedFindings)
+        // Aggregates are computed over the full local membership. Do not serialize
+        // that membership or silently present a bounded prefix as a complete list.
+        let transport=aggregate || !rendered ? [] : result.records
+        let cloud=output(rendered ? (count==0 ? "empty" : "success") : result.status == .ambiguous ? "ambiguous" : "partial",transport,complete:rendered,publicFindings:storedFindings)
         let measured=AskAgentResult(status:cloud.status,complete:cloud.complete,totalCount:count,records:cloud.records,findings:cloud.findings,message:cloud.message,localOnly:false)
-        return .init(output:measured,response:response,orderedIDs:selection,presentation:presentation)
+        return .init(output:measured,response:response,orderedIDs:selection,presentation:presentation,selectionIsOrdered:selectionIsOrdered)
     }
     /// Releasing a privately selected identity requires the user's complete business name,
     /// never a substring of another word. This does not determine conversational intent.
@@ -459,7 +507,7 @@ import CryptoKit
         guard (1...6).contains(value.targetIDs.count),Set(value.targetIDs).count==value.targetIDs.count,(1...4).contains(value.fields.count),value.fields.allSatisfy(AskBusinessRequest.allowedFields.contains),intent.sourcePolicy != "local_only",value.sourcePolicy=="stored_only" || intent.sourcePolicy=="public_if_missing" else {throw AskError.invalidEvidence}
         let all=try adapter.personalPlaces(),records=try value.targetIDs.map {id in guard let record=all.first(where:{$0.id==id}) else {throw AskChangeError.missing};return record}
         if selectionIsPrivate,!Set(value.targetIDs).isDisjoint(with:Set(selection)) {
-            guard records.allSatisfy({Self.explicitlyNames($0.name,in:request.text)}) else {return .init(output:.localPrivate(),response:plain("Please name the places you’d like me to look up online."),orderedIDs:selection,selectionIsPrivate:true)}
+            guard records.allSatisfy({Self.explicitlyNames($0.name,in:request.text)}) else {return .init(output:.localPrivate(),response:plain("Please name the places you’d like me to look up online."),orderedIDs:selection,selectionIsPrivate:true,selectionIsOrdered:selectionIsOrdered)}
         }
         selectionIsPrivate=false
         let requestedKeys=Set(value.targetIDs.flatMap {id in value.fields.map {id+":"+$0}})
@@ -509,10 +557,10 @@ import CryptoKit
             }
         }
         for id in value.targetIDs where !researchOrder.contains(id) {researchOrder.append(id)}
-        selection=researchOrder
+        selection=researchOrder;selectionIsOrdered=true
         let merged=Self.merge(researchFieldOrder.compactMap {researchResults[$0]})
         let current=findings.filter {value.targetIDs.contains($0.recordID)&&value.fields.contains($0.field)}
-        return .init(output:output(stopped ? stopStatus : "success",records,complete:!stopped,publicFindings:current,message:stopped ? "budget_limit" : "ok"),response:merged,orderedIDs:selection,appendPreviousResults:false)
+        return .init(output:output(stopped ? stopStatus : "success",records,complete:!stopped,publicFindings:current,message:stopped ? "budget_limit" : "ok"),response:merged,orderedIDs:selection,appendPreviousResults:false,selectionIsOrdered:selectionIsOrdered)
     }
     private func change(_ data:Data,intent:AskAgentInterpretation)throws->AskAgentExecution {
         var p=try JSONDecoder().decode(AskChangeProposal.self,from:data)
@@ -545,7 +593,7 @@ import CryptoKit
             sectionIDs=Set(try objects("neighborhood").filter {AskCityIdentity.key(($0.value(forKey:"name") as? String) ?? "")==AskCityIdentity.key(name) && ($0.value(forKey:"feastList") as? FeastList)?.id?.uuidString==cityID}.compactMap {($0.value(forKey:"id") as? UUID)?.uuidString})
         }
         guard p.sectionID==nil ? permission.destinationNeighborhood==nil : sectionIDs.contains(p.sectionID!) else {throw AskChangeError.permission}
-        if p.operation=="create",p.entity=="place" {guard permission.mapQuery==mapsQuery,let id=p.mapMatchID,maps[id] != nil,(conversationalExecution || maps.count==1) else {return .init(output:.init(status:"needs_confirmation",complete:true,totalCount:0,records:[],findings:[],message:"needs_review",localOnly:false),response:plain("Choose the exact Maps result before adding this place."),orderedIDs:selection)}}
+        if p.operation=="create",p.entity=="place" {guard permission.mapQuery==mapsQuery,let id=p.mapMatchID,maps[id] != nil,(conversationalExecution || maps.count==1) else {return .init(output:.init(status:"needs_confirmation",complete:true,totalCount:0,records:[],findings:[],message:"needs_review",localOnly:false),response:plain("Choose the exact Maps result before adding this place."),orderedIDs:selection,selectionIsOrdered:selectionIsOrdered)}}
         var actions:[AskCollectionAction]=[]
         var failure:String?,failedTarget:String?
         // One leaf executor, including per-target finding values and independently undoable outcomes.
@@ -609,7 +657,7 @@ import CryptoKit
         for id in actions.flatMap(\.targetIDs) where !mutationOrder.contains(id) {mutationOrder.append(id)}
         for action in actions {for id in action.targetIDs {mutationStates[id]=action.state == .needsConfirmation ? "needs_confirmation" : action.state.rawValue}}
         if let failedTarget {mutationStates[failedTarget]="failed"}
-        selection=mutationOrder
+        selection=mutationOrder;selectionIsOrdered=true
         // Only a bounded execution acknowledgement returns to the model. No changed field values,
         // private-derived IDs, counts, before-images or action previews leave the device.
         let createdRecords:[AskAgentRecord] = ["city","neighborhood"].contains(p.entity) && p.operation=="create" ? actions.filter {$0.state == .applied}.flatMap(\.targetIDs).compactMap {id in
@@ -653,7 +701,7 @@ import CryptoKit
             response.candidates=retained.compactMap {seen.insert($0.recordID).inserted ? tools.localCandidate($0.recordID) : nil}
         }
         }
-        let execution=AskAgentExecution(output:ack,response:response,orderedIDs:selection,appendPreviousResults:true,selectionIsPrivate:selectionIsPrivate,outcomes:selection.compactMap {id in mutationStates[id].map {.init(id:id,state:$0)}},effectiveTargetIDs:p.targetIDs)
+        let execution=AskAgentExecution(output:ack,response:response,orderedIDs:selection,appendPreviousResults:true,selectionIsPrivate:selectionIsPrivate,outcomes:selection.compactMap {id in mutationStates[id].map {.init(id:id,state:$0)}},effectiveTargetIDs:p.targetIDs,selectionIsOrdered:selectionIsOrdered)
         return execution
     }
     private static func trace(_ root:UUID,_ id:String)->UUID {

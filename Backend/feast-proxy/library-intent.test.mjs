@@ -61,3 +61,19 @@ test('v6 context requires explicit capability before ledger/provider and preserv
  const expanded={...plan,neighborhood:null,groupBy:null,names:null};globalThis.fetch=async()=>{calls++;return result(expanded)};
  try {assert.equal((await worker.fetch(request(p),e.env)).status,503);assert.equal(calls,0);assert.equal(e.ledgerCalls,0);const r=await worker.fetch(request(p),{...e.env,ALLOW_LIBRARY_CONTEXT:'true'});assert.equal(r.status,200);assert.equal((await r.json()).version,2);assert.equal(calls,1);assert.equal(e.values.get('total'),RESERVATION)}finally{globalThis.fetch=original}
 });
+
+test('bounded catalog coverage is explicit and backward compatible; sampling never changes local query scope',()=>{
+ const record={id:crypto.randomUUID(),name:'😀'.repeat(100),city:'London',cuisines:['French']};
+ const p={...payload(),version:6,context:{index:[record],recent:[]}};
+ assert.ok(validLibraryIntent(p));
+ assert.equal(JSON.parse(JSON.parse(libraryIntentBody(p)).input[0].content).catalogComplete,true);
+ p.context.indexComplete=false;assert.ok(validLibraryIntent(p));
+ const body=JSON.parse(libraryIntentBody(p));assert.equal(JSON.parse(body.input[0].content).catalogComplete,false);
+ assert.match(body.instructions,/bounded sample/);assert.match(body.instructions,/never proof of absence/);
+ for(const value of [null,'false',0,{},[]])assert.equal(validLibraryIntent({...p,context:{...p.context,indexComplete:value}}),false);
+ assert.equal(validLibraryIntent({...p,context:{...p.context,index:[{...record,name:'😀'.repeat(101)}]}}),false);
+ assert.equal(validLibraryIntent({...p,context:{...p.context,index:[{...record,name:'  '}]}}),false);
+ assert.equal(validLibraryIntent({...p,context:{...p.context,index:[record,{...record,id:record.id.toUpperCase()}]}}),false);
+ assert.equal(validLibraryIntent({...p,context:{...p.context,selectionIDs:[record.id]}}),false);
+ assert.equal(validLibraryIntent({...p,context:{...p.context,index:Array.from({length:201},()=>({...record,id:crypto.randomUUID()}))}}),false);
+});

@@ -122,7 +122,10 @@ enum AskChangeError:LocalizedError {
         if let city=object as? FeastList,city.sortedSections.contains(where:{$0.parent != nil || !$0.sortedChildren.isEmpty}) {throw AskChangeError.recoveryUnavailable}
     }
     private func snapshots(_ objects:[NSManagedObject])throws->[AskChangeSnapshot] {
-        try objects.map {object in
+        // Match the existing journal reload contract before preparing/applying a
+        // cascade. A large or colliding snapshot could not provide reliable Undo.
+        guard objects.count<=1000 else {throw AskChangeError.recoveryUnavailable}
+        let images:[AskChangeSnapshot]=try objects.map {object in
             guard let name=object.entity.name,["FeastList","ListSection","SavedPlace"].contains(name),let id=object.value(forKey:"id") as? UUID else {throw AskChangeError.invalid}
             var strings:[String:String]=[:],dates:[String:Date]=[:],links:[String:String]=[:]
             for (key,attribute) in object.entity.attributesByName where key != "id" {
@@ -134,6 +137,8 @@ enum AskChangeError:LocalizedError {
             }
             return .init(entity:name,id:id.uuidString,store:object.objectID.persistentStore?.identifier,strings:strings,dates:dates,links:links)
         }.sorted {$0.entity==$1.entity ? $0.id<$1.id : $0.entity<$1.entity}
+        guard Set(images.map {$0.entity+":"+$0.id}).count==images.count else {throw AskChangeError.recoveryUnavailable}
+        return images
     }
     private func affected(_ targets:[NSManagedObject],deleting:Bool)->[NSManagedObject] {
         var values=targets

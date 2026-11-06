@@ -2,14 +2,26 @@ import Foundation
 
 @MainActor private final class ActivationMemoryStore:AskActivationStoring {
     var saved:AskPendingActivation?,credential:String?
-    var failSave=false,failCommit=false
+    var failSave=false,failCommit=false,failCleanup=false
     func active()->Bool{credential != nil}
     func pending()throws->AskPendingActivation?{saved}
     func savePending(_ value:AskPendingActivation)throws{if failSave{throw AskActivationError.keychain};saved=value}
-    func commit(_ value:AskPendingActivation)throws{if failCommit{throw AskActivationError.keychain};precondition(saved==value);credential=value.deviceToken;saved=nil}
+    func commit(_ value:AskPendingActivation)throws{if failCommit{throw AskActivationError.keychain};precondition(saved==value);credential=value.deviceToken;if failCleanup{throw AskActivationError.keychain};saved=nil}
     func removeRejectedPending()throws{saved=nil}
     func activeToken()throws->String{guard let credential else{throw AskActivationError.keychain};return credential}
     func removeRevokedCredential(_ token:String)throws{precondition(credential==token);credential=nil;if saved?.deviceToken==token{saved=nil}}
+}
+private actor ActivationGateProvider:AskFeastProvider {
+    nonisolated let label="Offline activation flow fixture"
+    private var gate:CheckedContinuation<Void,Never>?
+    private var started=false
+    func answer(_ request:AskRequest,tools:AskReadTools)async throws->AskResponse {
+        started=true
+        await withCheckedContinuation{gate=$0}
+        return .init(summary:"Retained answer",candidates:[])
+    }
+    func hasStarted()->Bool{started}
+    func release(){gate?.resume();gate=nil}
 }
 @MainActor enum AskPhoneActivationTests {
     private static let code=String(repeating:"i",count:43),fakeToken=String(repeating:"t",count:43)
@@ -49,7 +61,7 @@ import Foundation
         // A new controller simulates relaunch. A changed text value cannot replace an uncertain attempt.
         let restored=AskPhoneActivation(store:store,send:{r in requests.append(r.httpBody!);return try reply(r,store.saved!)},makeToken:{preconditionFailure("New credential after uncertainty")})
         await restored.activate(code:String(repeating:"z",count:43),configuration:config)
-        precondition(requests.count==2&&requests[0]==requests[1]&&restored.activated&&store.saved==nil&&store.credential==fakeToken)
+        precondition(requests.count==2&&requests[0]==requests[1]&&restored.activated&&restored.didActivate&&restored.verifiedRole==nil&&store.saved==nil&&store.credential==fakeToken)
         precondition(AskPrivacy.onlineAllowed==initialConsent)
         await restored.activate(code:code,configuration:config);precondition(requests.count==2)
         print("PASS phone activation persists before dispatch, sends no collection/runtime secret, preserves consent and resumes the exact attempt after network failure/relaunch")
@@ -72,6 +84,11 @@ import Foundation
         let expired=ActivationMemoryStore();expired.saved=persisted
         let rejected=AskPhoneActivation(store:expired,send:{r in(Data(#"{"error":"invitation_unavailable"}"#.utf8),HTTPURLResponse(url:r.url!,statusCode:403,httpVersion:nil,headerFields:["Content-Type":"application/json"])!)},makeToken:{preconditionFailure()})
         await rejected.activate(code:"",configuration:config);precondition(expired.saved==nil && !rejected.activated)
+        let partial=ActivationMemoryStore();partial.failCleanup=true
+        let interruptedCleanup=AskPhoneActivation(store:partial,send:{r in try reply(r,partial.saved!)},makeToken:{fakeToken})
+        await interruptedCleanup.activate(code:code,configuration:config)
+        precondition(interruptedCleanup.activated && !interruptedCleanup.didActivate && interruptedCleanup.hasPending && partial.credential==fakeToken && partial.saved != nil)
+        precondition(interruptedCleanup.message==AskActivationError.keychain.localizedDescription)
         print("PASS phone activation rejects mismatched/oversized/unverified replies, retains uncertain and failed-Keychain attempts, and never replaces an existing credential")
 
         let duplicate=ActivationMemoryStore();var continuation:CheckedContinuation<Void,Never>?,entered=false,calls=0
@@ -90,10 +107,71 @@ import Foundation
             precondition(r.httpBody==nil&&r.url?.path=="/v1/access/status")
             return(Data(#"{"error":"unauthorized"}"#.utf8),HTTPURLResponse(url:r.url!,statusCode:401,httpVersion:nil,headerFields:["Content-Type":"application/json"])!)
         },makeToken:{preconditionFailure()})
-        await check.checkAccess(configuration:config);precondition(!check.activated&&revoked.credential==nil)
+        await check.checkAccess(configuration:config);precondition(!check.activated&&check.verifiedRole==nil&&revoked.credential==nil)
         revoked.credential=fakeToken
         let uncertain=AskPhoneActivation(store:revoked,send:{_ in throw URLError(.timedOut)},makeToken:{preconditionFailure()})
-        await uncertain.checkAccess(configuration:config);precondition(uncertain.activated&&revoked.credential==fakeToken)
+        await uncertain.checkAccess(configuration:config)
+        precondition(uncertain.activated&&revoked.credential==fakeToken&&uncertain.verifiedRole==nil&&uncertain.message==AskActivationError.statusUnavailable.localizedDescription)
         print("PASS explicit access check enables replacement only after authoritative revocation and preserves credentials on network uncertainty; no AI call")
+
+        var roleReply="owner",statusCalls=0,failStatus=false
+        let verified=AskPhoneActivation(store:revoked,send:{r in
+            statusCalls+=1
+            precondition(r.httpMethod=="GET"&&r.httpBody==nil&&r.url?.path=="/v1/access/status")
+            precondition(r.value(forHTTPHeaderField:"Authorization")=="Bearer "+fakeToken)
+            if failStatus{throw URLError(.notConnectedToInternet)}
+            let data=try JSONSerialization.data(withJSONObject:["version":1,"deviceID":UUID().uuidString.lowercased(),"role":roleReply])
+            return(data,HTTPURLResponse(url:r.url!,statusCode:200,httpVersion:nil,headerFields:["Content-Type":"application/json"])!)
+        },makeToken:{preconditionFailure("A status check must not mint activation credentials")})
+        precondition(verified.activated && !verified.didActivate && !verified.isOwner && verified.verifiedRole==nil && statusCalls==0)
+        await verified.checkAccess(configuration:config)
+        precondition(verified.isOwner && verified.verifiedRole == .owner && verified.message==nil)
+        failStatus=true
+        await verified.checkAccess(configuration:config)
+        precondition(!verified.isOwner && verified.verifiedRole==nil && verified.activated && revoked.credential==fakeToken)
+        precondition(verified.message==AskActivationError.statusUnavailable.localizedDescription)
+        failStatus=false;roleReply="member"
+        await verified.checkAccess(configuration:config)
+        precondition(!verified.isOwner && verified.verifiedRole == .member && verified.message==nil)
+        roleReply="unexpected"
+        await verified.checkAccess(configuration:config)
+        precondition(!verified.isOwner && verified.verifiedRole==nil && verified.activated && revoked.credential==fakeToken)
+        precondition(verified.message==AskActivationError.statusUnavailable.localizedDescription && statusCalls==4)
+        print("PASS only verified status responses establish owner/member roles; failed or malformed status clears stale role, retains access and offers Check access")
+
+        var presentation=AskAccessPresentation()
+        presentation.present(.history)
+        precondition(presentation.sheet == .history)
+        presentation.present(.access)
+        precondition(presentation.sheet==nil) // Access waits for History's dismissal completion.
+        precondition(presentation.didDismissSheet() == .history && presentation.sheet == .access)
+        precondition(!presentation.showsActivationConfirmation)
+        precondition(presentation.didDismissSheet() == .access && presentation.sheet==nil)
+        presentation.present(.access) // Returning to saved access is not a new activation.
+        precondition(presentation.connected(true,newActivation:verified.didActivate) && !presentation.showsActivationConfirmation)
+        _=presentation.didDismissSheet()
+
+        let gate=ActivationGateProvider()
+        let inFlight=AskSession(index:AskLocalIndex(records:[],visibleCityIDs:[],visibleNoteIDs:[]),provider:gate)
+        inFlight.input="A question already in progress";inFlight.run()
+        while !(await gate.hasStarted()){await Task.yield()}
+        inFlight.input="Keep this next draft"
+        let activeChat=inFlight.activeChatID,turnIDs=inFlight.turns.map(\.id)
+        presentation.present(.access)
+        let blockedAttachment=inFlight.replaceProviderWhenIdle(AskUnavailableProvider())
+        precondition(!presentation.connected(blockedAttachment,newActivation:restored.didActivate))
+        precondition(presentation.sheet == .access && !presentation.showsActivationConfirmation)
+        precondition(inFlight.input=="Keep this next draft" && inFlight.activeChatID==activeChat && inFlight.turns.map(\.id)==turnIDs)
+        await gate.release();while inFlight.isLoading{await Task.yield()}
+        let attached=inFlight.replaceProviderWhenIdle(AskUnavailableProvider())
+        precondition(presentation.connected(attached,newActivation:restored.didActivate) && presentation.showsActivationConfirmation)
+        _=presentation.didDismissSheet()
+        precondition(presentation.sheet==nil && presentation.showsActivationConfirmation)
+        precondition(inFlight.input=="Keep this next draft" && inFlight.activeChatID==activeChat && inFlight.turns.map(\.id)==turnIDs && inFlight.turns.first?.response?.summary=="Retained answer")
+        presentation.present(.history);_=presentation.didDismissSheet()
+        precondition(presentation.showsActivationConfirmation) // Closing History never resets the confirmation or chat.
+        presentation.dismissConfirmation()
+        precondition(!presentation.showsActivationConfirmation && AskPrivacy.onlineAllowed==initialConsent)
+        print("PASS History dismisses before access opens; successful new activation and idle attachment leave a durable Ask confirmation; busy Continue preserves draft/history, then succeeds without consent or AI dispatch")
     }
 }

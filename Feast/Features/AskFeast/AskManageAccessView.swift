@@ -47,7 +47,7 @@ struct AskManageAccessView: View {
             if model.working {ProgressView("Checking access…")}
             if let message=model.message {Section{Text(message).foregroundStyle(.secondary)}}
             Section {Text("If you lose this owner phone, recover access through your existing Cloudflare administration. Owner replacement is managed there so an invitation cannot grant owner authority.")}
-        }.navigationTitle("Manage Access")
+        }.navigationTitle("Manage Access").navigationBarTitleDisplayMode(.inline)
         .task{await model.refresh(configuration:configuration)}
         .alert("Clear local pending operation?",isPresented:$discard) {
             Button("Clear",role:.destructive){model.discardRejectedPending()}

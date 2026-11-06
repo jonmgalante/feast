@@ -40,9 +40,16 @@ struct AskAgentProvider:AskFeastProvider {
               let planner=remote as? any AskAgentPlanning,await planner.agentAvailable(),let researcher=remote as? any AskBusinessResearching else {return try await localOrConsent(request,tools:tools)}
         let contextStarted=DispatchTime.now().uptimeNanoseconds
         let reading=request.collectionReadVersion(),snapshot=try await adapter.librarySnapshot()
-        let context=try AskSemanticContext.make(reading,catalog:snapshot)
+        var context=try AskSemanticContext.make(reading,catalog:snapshot)
         let executor=await AskAgentExecutor(adapter:adapter,engine:engine,request:reading,researcher:researcher,searchMaps:{query in try await searchMaps(query)},resolveMaps:resolveMaps)
-        let cities=try await executor.cities()
+        let allCities=try await executor.cities()
+        var cities:[AskAgentCity]=[],cityBytes=2
+        for city in allCities {
+            let size=try JSONEncoder().encode(city).count+1
+            guard cities.count<200,cityBytes+size<=8000 else{continue}
+            cities.append(city);cityBytes+=size
+        }
+        if cities.count != allCities.count {context.indexComplete=false}
         let identities=Dictionary(uniqueKeysWithValues:snapshot.places.map {($0.id,AskFindingIdentity($0))})
         let approvedFindings=reading.verifiedFindings.filter {$0.externallyReusable==true || (reading.agentTask?.privateSelection != true && reading.libraryContext?.excludesExternalReferences != true)}
         let findings=try approvedFindings.filter {identities[$0.recordID]==$0.identity}.map {finding->AskAgentFinding in

@@ -39,3 +39,9 @@ test('authenticated owner RPC preserves compacted evidence completeness and nume
  const response=await owner.fetch(new Request('https://owner/v1/answer',{method:'POST',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json','X-Feast-Agent-Protocol':'10'},body:JSON.stringify({version:10,mode:'conversationStep'})}),env);
  assert.equal(response.status,200);assert.deepEqual(await response.json(),body);
 });
+
+test('partial catalog cannot produce a server-only answer claiming complete saved matches',async()=>{
+ const e=environment(),p=payload(),mock=provider({...plan,operation:'answer'});p.context.indexComplete=false;
+ const response=await brokerAnswer(p,user,e.env,mock.send),body=await response.json();
+ assert.equal(response.status,200);assert.equal(body.plan.operation,'unsupported');assert.equal(body.answer,undefined);assert.equal(mock.calls,1);
+});

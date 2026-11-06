@@ -16,6 +16,7 @@ export const json=(v,status=200)=>Response.json(v,{status,headers:{'Cache-Contro
 export async function digest(value){return [...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value)))].map(x=>x.toString(16).padStart(2,'0')).join('')}
 const key=s=>s.normalize('NFD').replace(/\p{M}/gu,'').toLowerCase().replace(/[^\p{L}\p{N}]/gu,'');
 function selectMetadata(p,plan){
+ if(p.context.indexComplete===false)return null;
  if(plan.status!==null||plan.neighborhood!==null||plan.placeType!==null||plan.fields.some(x=>!['name','city','cuisine'].includes(x)))return null;
  let records=p.context.index;
  if(plan.scope==='previous'){

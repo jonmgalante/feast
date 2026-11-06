@@ -4,11 +4,12 @@ import CryptoKit
 import Security
 
 enum AskActivationError: LocalizedError {
-    case invalidCode, unavailable, keychain, rejected, pending, alreadyActive
+    case invalidCode, unavailable, statusUnavailable, keychain, rejected, pending, alreadyActive
     var errorDescription: String? {
         switch self {
         case .invalidCode: "Enter the complete activation code you received."
         case .unavailable: "Activation couldn't be verified. Retry activation to check the same attempt; your saved places are unchanged."
+        case .statusUnavailable: "Access status couldn't be checked. Your saved access is still on this device. Tap Check access to try again."
         case .keychain: "Feast couldn't read or securely store access on this device. Any pending activation is retained for checking; your saved places are unchanged."
         case .rejected: "This activation code is unavailable, expired or already used. Ask for a new code."
         case .pending: "An activation is already waiting to be checked. Retry that activation first."
@@ -16,6 +17,48 @@ enum AskActivationError: LocalizedError {
         }
     }
 }
+
+/// Keeps History-to-access navigation sequential and the activation receipt visible after dismissal.
+/// This state never owns a conversation or changes online consent.
+struct AskAccessPresentation {
+    enum Sheet: Hashable, Identifiable {
+        case history, access
+        var id: Self { self }
+    }
+    var sheet: Sheet?
+    private var presentedSheet: Sheet?
+    private var nextSheet: Sheet?
+    private(set) var showsActivationConfirmation = false
+
+    mutating func present(_ target: Sheet) {
+        guard presentedSheet != target else { return }
+        if presentedSheet != nil {
+            nextSheet = target
+            sheet = nil
+        } else {
+            presentedSheet = target
+            sheet = target
+        }
+    }
+    @discardableResult mutating func didDismissSheet() -> Sheet? {
+        let dismissed = presentedSheet
+        presentedSheet = nil
+        sheet = nil
+        if let next = nextSheet {
+            nextSheet = nil
+            present(next)
+        }
+        return dismissed
+    }
+    @discardableResult mutating func connected(_ attached: Bool, newActivation: Bool) -> Bool {
+        if attached && newActivation { showsActivationConfirmation = true }
+        return attached
+    }
+    mutating func dismissConfirmation() { showsActivationConfirmation = false }
+}
+
+enum AskVerifiedAccessRole: String { case owner, member }
+
 struct AskPendingActivation: Codable, Equatable {
     let invitation: String
     let deviceToken: String
@@ -120,15 +163,17 @@ struct AskPendingActivation: Codable, Equatable {
     @Published private(set) var working=false
     @Published private(set) var hasPending=false
     @Published private(set) var activated=false
-    @Published private(set) var isOwner=false
+    @Published private(set) var didActivate=false
+    @Published private(set) var verifiedRole:AskVerifiedAccessRole?
     @Published private(set) var message:String?
+    var isOwner:Bool { verifiedRole == .owner }
     private let store:any AskActivationStoring
     private let send:(URLRequest)async throws->(Data,HTTPURLResponse)
     private let makeToken:()throws->String
     init(store:(any AskActivationStoring)?=nil,send:@escaping(URLRequest)async throws->(Data,HTTPURLResponse)={try await AskHostedHTTP.shared.send($0)},makeToken:@escaping()throws->String=AskPhoneActivation.randomToken){
         self.store=store ?? AskActivationKeychain();self.send=send;self.makeToken=makeToken;refresh()
     }
-    func refresh(){activated=store.active();do{hasPending=try store.pending() != nil}catch{message=AskActivationError.keychain.localizedDescription}}
+    func refresh(){activated=store.active();if !activated {verifiedRole=nil;didActivate=false};do{hasPending=try store.pending() != nil}catch{message=AskActivationError.keychain.localizedDescription}}
     nonisolated static func randomToken()throws->String {
         var bytes=[UInt8](repeating:0,count:32)
         guard SecRandomCopyBytes(kSecRandomDefault,bytes.count,&bytes)==errSecSuccess else {throw AskActivationError.keychain}
@@ -136,7 +181,7 @@ struct AskPendingActivation: Codable, Equatable {
     }
     /// Explicit free access check, not AI consent and not an automatic credential reset.
     func checkAccess(configuration:AskHostedConfiguration)async {
-        guard !working else{return};working=true;message=nil;isOwner=false;defer{working=false;refresh()}
+        guard !working else{return};working=true;message=nil;verifiedRole=nil;defer{working=false;refresh()}
         do {
             try configuration.validate();guard !configuration.ownerValidation,configuration.environment == .production else{throw AskActivationError.unavailable}
             let token=try store.activeToken(),endpoint=configuration.endpoint.deletingLastPathComponent().appendingPathComponent("access/status")
@@ -146,11 +191,11 @@ struct AskPendingActivation: Codable, Equatable {
             if response.statusCode==401,value["error"] as? String=="unauthorized" {
                 try store.removeRevokedCredential(token);message="This device no longer has Ask Feast access. You can enter a new activation code."
             } else {
-                guard response.statusCode==200,value["version"] as? Int==1,let id=value["deviceID"] as? String,UUID(uuidString:id) != nil else{throw AskActivationError.unavailable}
-                isOwner=value["role"] as? String == "owner"
-                message="Ask Feast access is active."
+                guard response.statusCode==200,value["version"] as? Int==1,let id=value["deviceID"] as? String,UUID(uuidString:id) != nil,
+                      let rawRole=value["role"] as? String,let role=AskVerifiedAccessRole(rawValue:rawRole) else{throw AskActivationError.statusUnavailable}
+                verifiedRole=role
             }
-        }catch{message=AskActivationError.unavailable.localizedDescription}
+        }catch{message=AskActivationError.statusUnavailable.localizedDescription}
     }
     func activate(code:String,configuration:AskHostedConfiguration)async {
         guard !working else{return};working=true;message=nil;defer{working=false;refresh()}
@@ -176,7 +221,7 @@ struct AskPendingActivation: Codable, Equatable {
                 try store.removeRejectedPending();throw AskActivationError.rejected
             }
             guard response.statusCode==200,pending.accepts(data) else {throw AskActivationError.unavailable}
-            try store.commit(pending);activated=true
+            try store.commit(pending);activated=true;didActivate=true
         } catch let error as AskActivationError {message=error.localizedDescription}
         catch {message=AskActivationError.unavailable.localizedDescription}
     }

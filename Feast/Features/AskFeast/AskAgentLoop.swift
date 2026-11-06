@@ -30,6 +30,7 @@ struct AskAgentExecution:Sendable {
     var outcomes:[AskAgentOutcome]? = nil
     var presentation:AskToolPresentation? = nil
     var effectiveTargetIDs:[String]? = nil
+    var selectionIsOrdered=true
 }
 /// One sequential tool loop for any cardinality. The app owns tool execution and writes;
 /// the model chooses the next tool from the actual previous result, never an English routing gate.
@@ -68,6 +69,7 @@ struct AskAgentLoop:Sendable {
         var continuation:String?,result:AskAgentStep.Result?,interpretation:AskAgentInterpretation?
         var outcomes=request.agentTask?.outcomes
         var shownIsPrivate=request.agentTask?.privateSelection ?? (request.agentTask?.sourcePolicy=="local_only")
+        var shownIsOrdered=true
         var latest:AskResponse?,shown:[String]=[],acceptedFindingIDs=Set(findings.map(\.id))
         let visibleIDs=Set(context.index.map(\.id)+cities.map(\.id)+(acceptedTask?.orderedIDs ?? []))
         for index in 0..<6 {
@@ -114,13 +116,13 @@ struct AskAgentLoop:Sendable {
                     response.summary="Some requested changes are still unfinished."
                     response.paragraphs.insert(.init(id:"agent-incomplete-actions",spans:[.text("Some requested changes are still unfinished.")],sourceIDs:[],citations:[]),at:0)
                 }
-                response.agentTask = .init(action:interpretation.goal=="mixed" ? "research" : interpretation.goal,fields:interpretation.fields,orderedIDs:shown,sourcePolicy:interpretation.sourcePolicy,privateSelection:shownIsPrivate,outcomes:outcomes)
+                response.agentTask = .init(action:interpretation.goal=="mixed" ? "research" : interpretation.goal,fields:interpretation.fields,orderedIDs:shownIsOrdered ? shown : [],sourcePolicy:interpretation.sourcePolicy,privateSelection:shownIsPrivate,outcomes:outcomes,selectionIDs:shownIsOrdered ? nil : shown)
                 return response
             }
             let execution=try await execute(reply.call,interpretation)
             try Task.checkCancellation()
             if let response=execution.response {latest=execution.appendPreviousResults ? Self.merged(latest,response) : response}
-            shown=execution.orderedIDs;shownIsPrivate=execution.selectionIsPrivate;outcomes=execution.outcomes
+            shown=execution.orderedIDs;shownIsOrdered=execution.selectionIsOrdered;shownIsPrivate=execution.selectionIsPrivate;outcomes=execution.outcomes
             // A fresh field result supersedes an older turn's evidence for that same
             // business/field. Do not append duplicate/stale facts during final synthesis.
             let freshKeys=Set(execution.output.findings.map {$0.recordID+":"+$0.field})
@@ -129,18 +131,18 @@ struct AskAgentLoop:Sendable {
             result = .init(callID:reply.call.callID,output:execution.output)
             if execution.output.localOnly {
                 guard var response=latest else {throw AskError.invalidEvidence}
-                response.agentTask = .init(action:interpretation.goal=="mixed" ? "research" : interpretation.goal,fields:interpretation.fields,orderedIDs:shown,sourcePolicy:interpretation.sourcePolicy,privateSelection:shownIsPrivate,outcomes:outcomes)
+                response.agentTask = .init(action:interpretation.goal=="mixed" ? "research" : interpretation.goal,fields:interpretation.fields,orderedIDs:shownIsOrdered ? shown : [],sourcePolicy:interpretation.sourcePolicy,privateSelection:shownIsPrivate,outcomes:outcomes,selectionIDs:shownIsOrdered ? nil : shown)
                 return response
             }
             if ["budget_stopped","needs_confirmation","conflict","unavailable"].contains(execution.output.status),var response=latest {
-                response.agentTask = .init(action:interpretation.goal=="mixed" ? "research" : interpretation.goal,fields:interpretation.fields,orderedIDs:shown,sourcePolicy:interpretation.sourcePolicy,privateSelection:shownIsPrivate,outcomes:outcomes)
+                response.agentTask = .init(action:interpretation.goal=="mixed" ? "research" : interpretation.goal,fields:interpretation.fields,orderedIDs:shownIsOrdered ? shown : [],sourcePolicy:interpretation.sourcePolicy,privateSelection:shownIsPrivate,outcomes:outcomes,selectionIDs:shownIsOrdered ? nil : shown)
                 return response
             }
         }
         // Do not spend on an automatic fallback or replay completed actions.
         if var latest,let interpretation {
             if outcomes?.contains(where:{$0.state=="pending" || $0.state=="failed"})==true {latest.summary="Some requested changes are still unfinished.";latest.paragraphs.insert(.init(id:"agent-incomplete-actions",spans:[.text("Some requested changes are still unfinished.")],sourceIDs:[],citations:[]),at:0)}
-            latest.agentTask = .init(action:interpretation.goal=="mixed" ? "research" : interpretation.goal,fields:interpretation.fields,orderedIDs:shown,sourcePolicy:interpretation.sourcePolicy,privateSelection:shownIsPrivate,outcomes:outcomes)
+            latest.agentTask = .init(action:interpretation.goal=="mixed" ? "research" : interpretation.goal,fields:interpretation.fields,orderedIDs:shownIsOrdered ? shown : [],sourcePolicy:interpretation.sourcePolicy,privateSelection:shownIsPrivate,outcomes:outcomes,selectionIDs:shownIsOrdered ? nil : shown)
             return latest
         }
         throw AskHostedError.answerRejected

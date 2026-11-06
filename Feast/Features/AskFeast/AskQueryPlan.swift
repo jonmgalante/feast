@@ -87,18 +87,25 @@ enum AskQueryPlan {
         text.range(of: "\\b" + NSRegularExpression.escapedPattern(for: phrase) + "\\b", options: [.regularExpression, .caseInsensitive]) != nil
     }
     static func matches(_ place: AskPersonalPlace, text: String, all: [AskPersonalPlace]) -> Bool {
+        matcher(text:text,all:all)(place)
+    }
+    /// Query-wide clues are computed once, then applied to each local record.
+    static func matcher(text:String,all:[AskPersonalPlace])->(AskPersonalPlace)->Bool {
         let query = text.lowercased().replacingOccurrences(of: "\\bues\\b", with: "upper east side", options: .regularExpression).replacingOccurrences(of: "\\buws\\b", with: "upper west side", options: .regularExpression)
-        let cuisines = Set((commonCuisines + all.flatMap(\.cuisines)).filter { query.contains($0.lowercased()) }.map { $0.lowercased() })
-        if !cuisines.isEmpty && cuisines.isDisjoint(with: place.cuisines.map { $0.lowercased() }) { return false }
-        var regions = Set((AskPublicCriteria.regions + all.map(\.city)).filter { !$0.isEmpty && containsPhrase(query, $0) })
+        let cuisines = Set(Set(commonCuisines + all.flatMap(\.cuisines)).filter { query.contains($0.lowercased()) }.map { $0.lowercased() })
+        var regions = Set(Set(AskPublicCriteria.regions + all.map(\.city)).filter { !$0.isEmpty && containsPhrase(query, $0) })
         if query.contains("nyc") || query.contains("new york") { regions.insert("New York City") }
-        for region in regions where !sameRegion(place, region) { return false }
-        let neighborhoods = Set((all.map(\.neighborhood) + ["Upper East Side", "Upper West Side"]).filter { !$0.isEmpty && containsPhrase(query, $0) })
-        if !neighborhoods.isEmpty && !neighborhoods.contains(where: { $0.caseInsensitiveCompare(place.neighborhood) == .orderedSame }) { return false }
+        let neighborhoods = Set(Set(all.map(\.neighborhood) + ["Upper East Side", "Upper West Side"]).filter { !$0.isEmpty && containsPhrase(query, $0) })
         let types = ["Cafe", "Bakery", "Bar", "Restaurant", "Dessert", "Market"].filter { query.contains($0.lowercased()) }
-        if !types.isEmpty && !types.contains(where: { $0.caseInsensitiveCompare(place.type ?? "") == .orderedSame }) { return false }
-        if query.contains("coffee") && place.type != "Cafe" { return false }
-        return true
+        let coffee=query.contains("coffee")
+        return { place in
+            if !cuisines.isEmpty && cuisines.isDisjoint(with:place.cuisines.map {$0.lowercased()}) {return false}
+            for region in regions where !sameRegion(place,region) {return false}
+            if !neighborhoods.isEmpty && !neighborhoods.contains(where:{$0.caseInsensitiveCompare(place.neighborhood) == .orderedSame}) {return false}
+            if !types.isEmpty && !types.contains(where:{$0.caseInsensitiveCompare(place.type ?? "") == .orderedSame}) {return false}
+            if coffee && place.type != "Cafe" {return false}
+            return true
+        }
     }
     static func sameRegion(_ place: AskPersonalPlace, _ region: String) -> Bool {
         if place.city.caseInsensitiveCompare(region) == .orderedSame { return true }
@@ -181,10 +188,16 @@ struct AskCollectionListingPlan {
         return .init(filterText:filter,region:region ?? (followUp ? prior?.region : nil),placeType:selectedType)
     }
     func matches(_ place: AskPersonalPlace, all: [AskPersonalPlace]) -> Bool {
-        if let region, !AskQueryPlan.sameRegion(place, region.capitalized), place.neighborhood.caseInsensitiveCompare(region) != .orderedSame { return false }
-        if let status = AskQueryPlan.status(filterText), place.status != status { return false }
-        if let placeType,place.type != placeType { return false }
-        return AskQueryPlan.matches(place, text: filterText, all: all)
+        matcher(all:all)(place)
+    }
+    func matcher(all:[AskPersonalPlace])->(AskPersonalPlace)->Bool {
+        let matches=AskQueryPlan.matcher(text:filterText,all:all),status=AskQueryPlan.status(filterText)
+        return { place in
+            if let region,!AskQueryPlan.sameRegion(place,region.capitalized),place.neighborhood.caseInsensitiveCompare(region) != .orderedSame {return false}
+            if let status,place.status != status {return false}
+            if let placeType,place.type != placeType {return false}
+            return matches(place)
+        }
     }
 }
 
@@ -349,12 +362,16 @@ struct AskLibraryProvider: AskFeastProvider {
                 }
             }
             if let plan = AskCollectionListingPlan.make(request, places: all) {
-                guard tools.completeLocalCatalog,current.complete else { throw AskError.incompleteCollection }
-                let matches = all.filter { plan.matches($0, all: all) }.sorted {
+                guard current.complete(in:plan.region) else { throw AskError.incompleteCollection }
+                let matches = all.filter(plan.matcher(all:all)).sorted {
                     let order = $0.name.localizedCaseInsensitiveCompare($1.name)
                     return order == .orderedSame ? $0.id < $1.id : order == .orderedAscending
                 }
                 guard tools.localRecordsMatch(matches) else { throw AskError.invalidEvidence }
+                if matches.count>200 {
+                    let filter=AskLibraryPlan(operation:.list,scope:.library,city:plan.region,positions:[],fields:[])
+                    return try AskLibraryReadTools.response(.init(status:.limited,records:matches,appliedFilters:filter,totalCount:matches.count,complete:true,cities:current.cities),tools:tools)
+                }
                 let candidates = matches.compactMap { tools.localCandidate($0.id) }
                 guard candidates.count == matches.count else { throw AskError.invalidEvidence }
                 let statusLabel = AskQueryPlan.status(plan.filterText).map { " marked " + $0 } ?? ""
@@ -421,8 +438,9 @@ struct AskLibraryProvider: AskFeastProvider {
         }
         if request.attachment == nil, let status = AskQueryPlan.status(request.text), request.mode == .collection {
             let all = try await places()
+            let matchesQuery=AskQueryPlan.matcher(text:request.text,all:all)
             let matches = all.filter { place in
-                (!request.referenceOnly || request.referencedIDs.contains(place.id)) && place.status == status && AskQueryPlan.matches(place, text: request.text, all: all)
+                (!request.referenceOnly || request.referencedIDs.contains(place.id)) && place.status == status && matchesQuery(place)
             }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }.prefix(6)
             let candidates = matches.compactMap { tools.localCandidate($0.id) }
             var spans: [AskAnswerSpan] = []

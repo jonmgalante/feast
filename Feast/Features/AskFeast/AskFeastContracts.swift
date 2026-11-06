@@ -65,7 +65,7 @@ struct AskLocalIndex: Sendable {
         self.scope = scope
         self.catalogComplete = catalogComplete
         self.personalPlaces = personalPlaces
-        self.records = records.filter { visibleCityIDs.contains($0.cityID) }.prefix(200).map { record in
+        self.records = records.filter { visibleCityIDs.contains($0.cityID) }.map { record in
             AskCollectionRecord(id: record.id, cityID: record.cityID, city: scope == .savedMetadata ? "" : record.city, name: record.name,
                 neighborhood: scope == .savedMetadata ? "" : record.neighborhood, cuisine: record.cuisine, status: scope == .savedMetadata ? "" : record.status,
                 notes: (scope == .savedMetadata ? [] : record.notes).filter { visibleNoteIDs.contains($0.id) }.prefix(10).map {
@@ -81,9 +81,13 @@ struct AskLocalIndex: Sendable {
             $0.count > 2 && (scope != .savedMetadata || !conversationalWords.contains($0))
         })
         var scored: [(record: AskCollectionRecord, score: Int)] = []
+        let localByID = scope == .savedMetadata ? Dictionary(grouping:personalPlaces,by:\.id) : [:]
+        let matches = scope == .savedMetadata ? AskQueryPlan.matcher(text:text,all:personalPlaces) : nil
         for record in records {
             if !referencedIDs.isEmpty && !referencedIDs.contains(record.id) { continue }
-            if scope == .savedMetadata, let local = personalPlaces.first(where: { $0.id == record.id }), !AskQueryPlan.matches(local, text: text, all: personalPlaces) { continue }
+            if let matches,let local=localByID[record.id] {
+                guard local.count==1,matches(local[0]) else{continue}
+            }
             let fields = scope == .savedMetadata ? [record.name, record.cuisine, record.address ?? ""] : [record.name, record.city, record.neighborhood, record.cuisine, record.status] + record.notes.map { $0.author + " " + $0.text }
             let haystack = fields.joined(separator: " ").lowercased()
             // Whole clue words avoid matching "the" or fragments of unrelated names.
@@ -397,11 +401,11 @@ struct AskReadTools: Sendable {
         if let context = response.libraryContext {
             guard context.ids.count <= 200, Set(context.ids).count == context.ids.count, context.ids == response.candidates.map(\.id) else { throw AskError.invalidEvidence }
             if let selection=context.selectionIDs {
-                guard response.usesLocalCatalog,[AskLibraryPlan.Operation.count,.group].contains(context.filters.operation),selection.count <= 200,Set(selection).count == selection.count,Set(selection).isSubset(of:Set(index.personalCatalog.map(\.id))) else { throw AskError.invalidEvidence }
+                guard response.usesLocalCatalog,[AskLibraryPlan.Operation.count,.group].contains(context.filters.operation),Set(selection).count == selection.count,Set(selection).isSubset(of:Set(index.personalCatalog.map(\.id))) else { throw AskError.invalidEvidence }
             }
         }
         if let listing, !localTool {
-            let expected = Set(index.personalCatalog.filter { listing.matches($0, all: index.personalCatalog) }.map(\.id))
+            let expected = Set(index.personalCatalog.filter(listing.matcher(all:index.personalCatalog)).map(\.id))
             guard Set(response.candidates.map(\.id)) == expected else { throw AskError.invalidEvidence }
         }
         if response.requestsFieldSave == true {
@@ -476,8 +480,15 @@ struct AskReadTools: Sendable {
     }
     func collectionReadTools() throws -> Self {try AskReadTools(request:request.collectionReadVersion(),index:index)}
     var completeLocalCatalog: Bool { index.catalogComplete }
-    func localCandidate(_ id: String) -> AskCandidate? { localEvidence.candidates.first { $0.id == id } }
-    func source(_ id: String) -> AskSource? { evidence.sources.first { $0.id == id } ?? localEvidence.sources.first { $0.id == id } }
+    func localCandidate(_ id: String) -> AskCandidate? {
+        guard let record=index.records.first(where:{$0.id==id}) else{return nil}
+        return AskSavedMetadataEvidence.build([record]).candidates.first
+    }
+    func source(_ id: String) -> AskSource? {
+        if let source=evidence.sources.first(where:{$0.id==id}) {return source}
+        guard let record=index.records.first(where:{"metadata-"+$0.id==id}) else{return nil}
+        return AskSavedMetadataEvidence.build([record]).sources.first
+    }
 }
 
 protocol AskFeastProvider: Sendable {
