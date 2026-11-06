@@ -1,7 +1,6 @@
 import CoreData
 import Foundation
 import Combine
-import SwiftUI
 
 struct SavedPlaceSearchFilters: Equatable {
     var selectedListURIString: String?
@@ -52,14 +51,6 @@ struct SavedPlaceSearchFilters: Equatable {
         selectedListURIString = city
     }
 
-}
-
-enum SavedPlaceFilterApplication: Equatable {
-    case onDone, immediately
-
-    func binding(committed: Binding<SavedPlaceSearchFilters>, draft: Binding<SavedPlaceSearchFilters>) -> Binding<SavedPlaceSearchFilters> {
-        self == .immediately ? committed : draft
-    }
 }
 
 enum SavedPlaceSearchEngine {

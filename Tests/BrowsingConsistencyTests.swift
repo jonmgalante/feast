@@ -1,6 +1,5 @@
 import CoreData
 import Foundation
-import SwiftUI
 
 @MainActor enum BrowsingConsistencyTests {
     static func run(model: NSManagedObjectModel) async throws {
@@ -75,44 +74,13 @@ import SwiftUI
 
         let committed = browse.filters
         var draft = committed
-        let committedBinding = Binding(get: { browse.filters }, set: { browse.filters = $0 })
-        let draftBinding = Binding(get: { draft }, set: { draft = $0 })
-        let staged = SavedPlaceFilterApplication.onDone.binding(committed: committedBinding, draft: draftBinding)
-        staged.queryText.wrappedValue = "Different"
-        staged.selectedStatuses.wrappedValue = [.been]
-        precondition(browse.filters == committed) // Cancel/swipe leaves only this uncommitted draft.
-        browse.filters = staged.wrappedValue // Done commits the complete value once.
-        precondition(browse.filters.queryText == "Different" && browse.filters.selectedStatuses == [.been])
+        draft.queryText = "Different"; draft.selectedStatuses = [.been]
+        precondition(browse.filters == committed) // Cancel/dismiss discards this uncommitted value.
+        browse.filters = draft // Done commits the complete value once.
         browse.filters.selectedListURIString = london.objectURIString
         browse.filters.reset()
         precondition(!browse.filters.hasCriteria && browse.filters.selectedListURIString == london.objectURIString)
         print("PASS staged filter cancellation, atomic Done and Reset preserving city scope")
-
-        let abandonedDraft = draft
-        let live = SavedPlaceFilterApplication.immediately.binding(committed: committedBinding, draft: draftBinding)
-        for query in ["c", "ca", "café", "café soho"] {
-            live.queryText.wrappedValue = query
-            precondition(browse.filters.queryText == query) // No debounce/close flush owns typed text.
-        }
-        live.selectedStatuses.wrappedValue = [.love, .regulars]
-        live.selectedTags.wrappedValue = ["Quiet"]
-        live.selectedPlaceType.wrappedValue = .cafe
-        live.selectedCuisine.wrappedValue = "French"
-        precondition(SavedPlaceSearchEngine.matchingPlaceIDs(from: places, filters: browse.filters) == [cafe.objectID])
-        precondition(draft == abandonedDraft)
-        // The open live editor observes external validation immediately instead
-        // of restoring its opening city/draft on the next field edit.
-        browse.filters.selectedListURIString = "deleted-city"
-        browse.validateCities([london.objectURIString, nyc.objectURIString])
-        precondition(live.selectedListURIString.wrappedValue == nil)
-        live.queryText.wrappedValue = "café"
-        precondition(browse.filters.selectedListURIString == nil)
-        live.selectedListURIString.wrappedValue = nyc.objectURIString
-        live.wrappedValue.reset()
-        precondition(!browse.filters.hasCriteria && browse.filters.selectedListURIString == nyc.objectURIString)
-        precondition(SavedPlaceSearchEngine.matchingPlaceIDs(from: places, filters: browse.filters) == [otherCity.objectID])
-        precondition(!context.hasChanges && places.count == 3)
-        print("PASS live filter binding retains every typed edit, filters immediately, observes city validation and resets criteria without changing saved data or city")
 
         let viewport = SavedMapViewport(latitude: 1, longitude: 2, latitudeDelta: 3, longitudeDelta: 4)
         browse.viewports[london.objectURIString] = viewport
