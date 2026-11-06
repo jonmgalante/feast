@@ -253,11 +253,26 @@ struct SavedMapViewport: Equatable {
     @Published var citiesPath: [SavedPlaceBrowseRoute] = []
     var scrollAnchors: [String: String] = [:]
     var viewports: [String: SavedMapViewport] = [:]
+    private var hasEnteredMap = false
+
+    /// Consume before requesting permission, so task restarts and denied fixes
+    /// cannot repeat the first-entry request. A remembered map camera wins.
+    func consumeInitialNearbyRequest() -> Bool {
+        guard selectedTab == 1, !hasEnteredMap else { return false }
+        hasEnteredMap = true
+        return viewports[scopeKey] == nil
+    }
     /// A location fix may change only the current map viewport, never content scope.
     @discardableResult func rememberNearbyViewport(_ viewport: SavedMapViewport, requestedScope: String) -> Bool {
         guard selectedTab == 1, scopeKey == requestedScope else { return false }
         viewports[scopeKey] = viewport
         return true
+    }
+    /// Native map initialization can report a region before any camera intent.
+    /// Only the currently displayed scope may turn such callbacks into memory.
+    @discardableResult func rememberDisplayedMapViewport(_ viewport: SavedMapViewport, displayedScope: String?) -> Bool {
+        guard displayedScope == scopeKey else { return false }
+        return rememberNearbyViewport(viewport, requestedScope: scopeKey)
     }
     var scopeKey: String { filters.selectedListURIString ?? "all-cities" }
 

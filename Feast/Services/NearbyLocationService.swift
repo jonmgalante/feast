@@ -20,8 +20,8 @@ import Foundation
         super.init()
     }
 
-    /// Opening the map uses an already granted permission only. Explicit Nearby
-    /// retains the existing permission prompt and error explanation.
+    /// Optional silent lookup for callers that already have permission. First Map
+    /// entry and explicit Nearby use request() so either can request permission.
     func requestIfAuthorized() {
         let status = makeManager().authorizationStatus
         switch status {

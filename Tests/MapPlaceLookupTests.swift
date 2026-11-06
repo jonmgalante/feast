@@ -95,6 +95,83 @@ import MapKit
         planTests()
         try await cityAnchors()
         try await cancellationAdapter()
+        await connectionRecovery()
+        try await unavailableRecovery()
+    }
+
+    static func connectionRecovery() async {
+        let recovery = MapConnectionRecovery(monitorsNetwork: false, settlingDelay: .zero)
+        recovery.receive(isSatisfied: false); recovery.receive(isSatisfied: true)
+        await Task.yield()
+        precondition(recovery.restoration == 0 && !recovery.claim(hasConnectionFailure: true))
+        recovery.setActive(true)
+        recovery.receive(isSatisfied: true) // Initial path snapshot is not a restoration.
+        await Task.yield()
+        precondition(recovery.restoration == 0)
+        recovery.receive(isSatisfied: false); recovery.receive(isSatisfied: true)
+        recovery.receive(isSatisfied: true)
+        await spin { recovery.restoration == 1 }
+        precondition(!recovery.claim(hasConnectionFailure: false)) // An in-flight batch may report failure later.
+        precondition(recovery.claim(hasConnectionFailure: true))
+        precondition(!recovery.claim(hasConnectionFailure: true))
+        recovery.receive(isSatisfied: true)
+        await Task.yield()
+        precondition(recovery.restoration == 1)
+        // A later genuine outage can recover even if the earlier retry failed.
+        recovery.receive(isSatisfied: false); recovery.receive(isSatisfied: true)
+        await spin { recovery.restoration == 2 }
+        precondition(recovery.claim(hasConnectionFailure: true))
+        // Rapid flaps cancel the unsettled event and coalesce to one allowance.
+        recovery.receive(isSatisfied: false); recovery.receive(isSatisfied: true)
+        recovery.receive(isSatisfied: false); recovery.receive(isSatisfied: true)
+        await spin { recovery.restoration == 3 }
+        precondition(recovery.claim(hasConnectionFailure: true) && !recovery.claim(hasConnectionFailure: true))
+        recovery.receive(isSatisfied: false); recovery.receive(isSatisfied: true)
+        recovery.setActive(false)
+        await Task.yield()
+        precondition(recovery.restoration == 3 && !recovery.claim(hasConnectionFailure: true))
+        recovery.receive(isSatisfied: false); recovery.receive(isSatisfied: true)
+        recovery.setActive(true); recovery.receive(isSatisfied: true)
+        await Task.yield()
+        precondition(recovery.restoration == 3 && !recovery.claim(hasConnectionFailure: true))
+        recovery.receive(isSatisfied: false); recovery.receive(isSatisfied: true)
+        await spin { recovery.restoration == 4 }
+        recovery.receive(isSatisfied: false) // New outage invalidates an unclaimed older restoration.
+        precondition(!recovery.claim(hasConnectionFailure: true))
+        recovery.receive(isSatisfied: true)
+        await spin { recovery.restoration == 5 }
+        recovery.discardRestoration()
+        precondition(!recovery.claim(hasConnectionFailure: true)) // Healthy/idle event cannot recover an unrelated future failure.
+        recovery.setActive(false)
+        print("PASS connection recovery requires active settled offline-to-online transition, coalesces flaps, grants once, rearms after later outage and rejects inactive/stale events")
+    }
+
+    static func unavailableRecovery() async throws {
+        let clock = Clock()
+        let lookup = MapPlaceLookup(capacity: 2, ttl: 10, now: { clock.time }, sleep: { try await clock.sleep($0) }, emit: { _,_,_ in })
+        _ = try await lookup.resolve(placeID: "loaded") { pin($0) }
+        _ = try await lookup.resolve(placeID: "missing") { _ in nil }
+        do { _ = try await lookup.resolve(placeID: "offline") { _ in throw MapPlaceLookupFailure.connection }; preconditionFailure() }
+        catch { precondition(MapPlaceLookupFailure.classify(error) == .connection) }
+        precondition(lookup.recentlyUnavailableIDs == ["missing"])
+        let records = ["loaded", "missing", "offline"].map { SavedMapPlan.Place(id: $0, appleID: $0, cityID: "city") }
+        let recoverable = records.filter { !lookup.recentlyUnavailableIDs.contains($0.appleID) }
+        let ids = SavedMapPlan.lookupIDs(places: recoverable, selectedCity: "city", viewport: .overview,
+                                        cityHints: [:], known: lookup.recentlyResolvedIDs)
+        precondition(ids == ["offline"])
+        let calls = lookup.metrics.calls
+        for id in ids { _ = try await lookup.resolve(placeID: id) { pin($0) } }
+        precondition(lookup.metrics.calls == calls + 1 && lookup.cachedPlace("loaded") != nil)
+        precondition(clock.delays == [1]) // Recovery still observes the shared connection cooldown.
+        for index in 0..<12 { _ = try await lookup.resolve(placeID: "missing-\(index)") { _ in nil } }
+        precondition(lookup.recentlyUnavailableIDs.count <= 8)
+        clock.time += 11
+        precondition(lookup.recentlyUnavailableIDs.isEmpty)
+        _ = try await lookup.resolve(placeID: "missing") { _ in nil }
+        _ = try await lookup.resolve(placeID: "missing") { pin($0) }
+        precondition(!lookup.recentlyUnavailableIDs.contains("missing"))
+        lookup.clear(); precondition(lookup.recentlyUnavailableIDs.isEmpty)
+        print("PASS connectivity recovery skips successful/unavailable IDs, preserves pins/cooldown, and unavailable metadata is bounded, expiring and cleared")
     }
     static func capacityAndLifecycle() async throws {
         let clock = Clock()

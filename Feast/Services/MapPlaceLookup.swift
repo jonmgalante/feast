@@ -1,6 +1,7 @@
 import Foundation
 import MapKit
 import Combine
+import Network
 import os
 
 /// Lookup failures never describe whether the user's saved record still exists.
@@ -30,6 +31,73 @@ enum MapPlaceLookupFailure: Error, Equatable {
     }
 }
 
+/// Passive connectivity observation. A settled offline-to-online transition grants
+/// one recovery; repeated online callbacks and cancelled observers grant none.
+@MainActor final class MapConnectionRecovery: ObservableObject {
+    @Published private(set) var restoration = 0
+    private var claimedRestoration = 0
+    private var active = false
+    private var wasOffline = false
+    private var settledOnline = false
+    private var generation = UUID()
+    private var monitor: NWPathMonitor?
+    private var settling: Task<Void, Never>?
+    private let monitorsNetwork: Bool
+    private let settlingDelay: Duration
+
+    init(monitorsNetwork: Bool = true, settlingDelay: Duration = .seconds(1)) {
+        self.monitorsNetwork = monitorsNetwork
+        self.settlingDelay = settlingDelay
+    }
+
+    func setActive(_ value: Bool) {
+        guard active != value else { return }
+        active = value; generation = UUID()
+        settling?.cancel(); settling = nil
+        monitor?.cancel(); monitor = nil
+        wasOffline = false; settledOnline = false
+        claimedRestoration = restoration
+        guard value, monitorsNetwork else { return }
+        let token = generation
+        let observer = NWPathMonitor()
+        observer.pathUpdateHandler = { [weak self] path in
+            let satisfied = path.status == .satisfied
+            Task { @MainActor in
+                guard let self, self.generation == token else { return }
+                self.receive(isSatisfied: satisfied)
+            }
+        }
+        monitor = observer
+        observer.start(queue: DispatchQueue(label: "com.jongalante.Feast.map-connectivity"))
+    }
+
+    func receive(isSatisfied: Bool) {
+        guard active else { return }
+        if !isSatisfied {
+            wasOffline = true; settledOnline = false
+            claimedRestoration = restoration
+            settling?.cancel(); settling = nil
+            return
+        }
+        guard wasOffline, settling == nil else { return }
+        let token = generation
+        settling = Task { [weak self] in
+            guard let self else { return }
+            do { try await Task.sleep(for: settlingDelay) } catch { return }
+            guard !Task.isCancelled, active, generation == token else { return }
+            wasOffline = false; settledOnline = true; settling = nil; restoration += 1
+        }
+    }
+
+    func claim(hasConnectionFailure: Bool) -> Bool {
+        guard active, settledOnline, hasConnectionFailure, restoration > claimedRestoration else { return false }
+        claimedRestoration = restoration
+        return true
+    }
+
+    func discardRestoration() { claimedRestoration = restoration }
+}
+
 /// Shared by map and detail, not by AI research. Only demand-driven Apple results;
 /// at most 2,048 successes, five minutes from retrieval, RAM only. Background clears
 /// entries and subscribers. No coordinates, names or IDs are logged or persisted.
@@ -39,7 +107,9 @@ enum MapPlaceLookupFailure: Error, Equatable {
     @Published private(set) var expiration = 0
     var visibleViewport: SavedMapViewport?
     private var resolvedAt: [String: TimeInterval] = [:]
+    private var unavailableAt: [String: TimeInterval] = [:]
     var recentlyResolvedIDs: Set<String> { Set(resolvedAt.filter { now() - $0.value < ttl }.keys) }
+    var recentlyUnavailableIDs: Set<String> { Set(unavailableAt.filter { now() - $0.value < ttl }.keys) }
     func retryEvictedLocations() { resolvedAt.removeAll() }
 
     enum Value { case place(ApplePlaceMatch), city(SavedMapViewport) }
@@ -159,7 +229,7 @@ enum MapPlaceLookupFailure: Error, Equatable {
     }
     /// Background/lifecycle deletion leaves cooldown intact; navigation cannot bypass backoff.
     func clear() {
-        expiry?.cancel(); expiry = nil; cache.removeAll(); resolvedAt.removeAll(); visibleViewport = nil; revision += 1; expiration += 1
+        expiry?.cancel(); expiry = nil; cache.removeAll(); resolvedAt.removeAll(); unavailableAt.removeAll(); visibleViewport = nil; revision += 1; expiration += 1
         wake?.cancel(); wake = nil
         let abandoned = Array(jobs.values); jobs.removeAll(); queue.removeAll()
         for job in abandoned {
@@ -171,6 +241,7 @@ enum MapPlaceLookupFailure: Error, Equatable {
         let previousCount = cache.count
         cache = cache.filter { $0.value.expires > now() }
         resolvedAt = resolvedAt.filter { now() - $0.value < ttl }
+        unavailableAt = unavailableAt.filter { now() - $0.value < ttl }
         if cache.count != previousCount { revision += 1; expiration += 1 }
     }
     private func cached(_ key: String, countHit: Bool = true) -> Value? {
@@ -184,6 +255,7 @@ enum MapPlaceLookupFailure: Error, Equatable {
         if case .place = value {
             // Requested identity stays authoritative even if Apple returns a new canonical ID.
             resolvedAt[String(key.dropFirst("place:".count))] = now()
+            unavailableAt.removeValue(forKey: String(key.dropFirst("place:".count)))
             resolvedAt = resolvedAt.filter { now() - $0.value < ttl }
             if resolvedAt.count > capacity * 4, let oldest = resolvedAt.min(by: {$0.value < $1.value})?.key { resolvedAt.removeValue(forKey: oldest) }
         }
@@ -237,16 +309,25 @@ enum MapPlaceLookupFailure: Error, Equatable {
         active -= 1
         guard jobs[job.key] === job, !job.subscribers.isEmpty else { emit("cancelled", elapsed, active); pump(); return }
         var outcome = "success"
+        func rememberUnavailable() {
+            guard job.key.hasPrefix("place:") else { return }
+            unavailableAt = unavailableAt.filter { now() - $0.value < ttl }
+            unavailableAt[String(job.key.dropFirst("place:".count))] = now()
+            if unavailableAt.count > capacity * 4, let oldest = unavailableAt.min(by: { $0.value < $1.value })?.key {
+                unavailableAt.removeValue(forKey: oldest)
+            }
+        }
         switch result {
         case .success(let value):
             if let value { store(value, key: job.key); metrics.successes += 1 }
-            else { metrics.unavailable += 1; outcome = "unavailable" }
+            else { metrics.unavailable += 1; outcome = "unavailable"; rememberUnavailable() }
             healthyCompletions += 1
             if healthyCompletions >= 6 { concurrency = min(maximumConcurrent, concurrency + 1); consecutiveFailures = 0; healthyCompletions = 0 }
         case .failure(let error):
             if error is CancellationError { outcome = "cancelled" }
             else {
                 let failure = MapPlaceLookupFailure.classify(error); outcome = String(describing: failure)
+                if failure == .unavailable { rememberUnavailable() }
                 switch failure { case .throttled: metrics.throttled += 1; case .connection: metrics.connection += 1; case .service: metrics.service += 1; case .unavailable: metrics.unavailable += 1 }
                 if failure.pausesBatch {
                     healthyCompletions = 0; consecutiveFailures = min(consecutiveFailures + 1, 5)

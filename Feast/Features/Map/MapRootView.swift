@@ -27,11 +27,17 @@ struct MapRootView: View {
     @State private var viewportRevision = 0
     @State private var automaticNearby = false
     @State private var nearbyRevision = 0
+    @State private var cameraFallbackRevision = 0
+    @State private var mapInteractionInProgress = false
     @StateObject private var markerLookup = MapPlaceLookup.shared
+    @StateObject private var connectionRecovery: MapConnectionRecovery
     @State private var markerGeneration = UUID()
     @State private var markerRetry = 0
+    @State private var connectionRecoveryRevision: Int?
+    @State private var connectionRecoveryDemand: String?
+    @State private var hasConnectionFailure = false
+    @State private var failureDemand: String?
     @State private var refreshAfterLoading = false
-    @State private var failedIDs: Set<String> = []
     @State private var loadingCount = 0
     @State private var completedCount = 0
     @State private var clusterIDs: [String] = []
@@ -43,6 +49,10 @@ struct MapRootView: View {
     @State private var showingExploreSearch = false
     @State private var showingSavedPlaceFilters = false
     private var savedPlaceFilters: SavedPlaceSearchFilters { browse.filters }
+
+    init(connectionRecovery: MapConnectionRecovery? = nil) {
+        _connectionRecovery = StateObject(wrappedValue: connectionRecovery ?? MapConnectionRecovery())
+    }
 
     private static let loadLogger = Logger(subsystem: "com.jongalante.Feast", category: "SavedMapLoad")
 
@@ -66,7 +76,7 @@ struct MapRootView: View {
 
     private var lifecycleContent: some View {
         content
-            .onDisappear { markerLookup.visibleViewport = nil; nearby.cancel(); markerGeneration = UUID(); isResolvingMarkers = false }
+            .onDisappear { markerLookup.visibleViewport = nil; nearby.cancel(); connectionRecovery.setActive(false); markerGeneration = UUID(); isResolvingMarkers = false }
             .onChange(of: scenePhase) { _, phase in if phase == .background { nearby.cancel() } }
             .onChange(of: browse.selectedTab) { _, tab in if tab != 1 { nearby.cancel() } }
             .onChange(of: browse.scopeKey) { _, _ in nearby.cancel() }
@@ -77,6 +87,14 @@ struct MapRootView: View {
                 displayedScope = browse.scopeKey
                 setCamera(.nearby(fix.coordinate))
             }
+            .onChange(of: nearby.errorMessage) { _, message in
+                guard message != nil, automaticNearby,
+                      SavedMapPlan.acceptsCameraResult(requestedScope: nearbyScope ?? "", currentScope: browse.scopeKey,
+                          requestedRevision: nearbyRevision, currentRevision: viewportRevision, active: mapIsActive) else { return }
+                // A denied/failed opening request quietly falls back to the city
+                // or existing viewport, without requesting location again.
+                displayedScope = nil; cameraFallbackRevision += 1
+            }
             .alert("Location Unavailable", isPresented: Binding(get: { !automaticNearby && nearby.errorMessage != nil }, set: { if !$0 { nearby.errorMessage = nil } })) {
                 Button("OK") { nearby.errorMessage = nil }
             } message: { Text(nearby.errorMessage ?? "") }
@@ -84,6 +102,7 @@ struct MapRootView: View {
                 guard mapIsActive else { return }
                 if isResolvingMarkers { refreshAfterLoading = true } else { markerRetry += 1 }
             }
+            .onChange(of: connectionRecovery.restoration) { _, _ in recoverConnectionIfNeeded() }
             .onChange(of: feastLists.map(\.objectURIString)) { _, values in browse.validateCities(Set(values)) }
     }
 
@@ -96,11 +115,16 @@ struct MapRootView: View {
                 do { try await Task.sleep(for: .milliseconds(400)) } catch { return }
                 if !Task.isCancelled { showLoadingIndicator = true }
             }
-            .task(id: "camera|\(cameraResolutionKey)|\(markerRetry)|\(mapIsActive)") {
+            .task(id: mapIsActive) { connectionRecovery.setActive(mapIsActive) }
+            .task(id: "camera|\(cameraResolutionKey)|\(cameraFallbackRevision)|\(mapIsActive)") {
                 if mapIsActive { await prepareCamera() }
             }
             .task(id: markerResolutionKey + "|\(markerRetry)|\(mapIsActive)") {
-                if mapIsActive { await resolveMarkers() }
+                if mapIsActive {
+                    let recovering = connectionRecoveryRevision == markerRetry && connectionRecoveryDemand == cameraResolutionKey
+                    connectionRecoveryRevision = nil; connectionRecoveryDemand = nil
+                    await resolveMarkers(recoveringConnection: recovering)
+                }
             }
             .navigationDestination(item: $presentedPlaceID) { placeID in
                 if let savedPlace = savedPlace(for: placeID) {
@@ -201,6 +225,7 @@ struct MapRootView: View {
             .overlay(alignment: .bottomTrailing) {
                 Button {
                     automaticNearby = false
+                    mapInteractionInProgress = false
                     viewportRevision += 1
                     nearbyScope = browse.scopeKey; nearbyRevision = viewportRevision
                     nearby.request()
@@ -247,10 +272,6 @@ struct MapRootView: View {
     private var filteredMarkerItems: [SavedPlaceMapMarker] {
         markerItems.filter { viewport.contains($0.coordinate) }
     }
-    private var capacityDeferredCount: Int {
-        let cached = Set(markerItems.map(\.applePlaceID)), attempted = markerLookup.recentlyResolvedIDs
-        return placePlan.filter { !cached.contains($0.appleID) && attempted.contains($0.appleID) }.count
-    }
     private var placePlan: [SavedMapPlan.Place] {
         filteredCitySavedPlaces.map { .init(id: $0.objectID.uriRepresentation().absoluteString, appleID: $0.applePlaceIDValue ?? "", cityID: $0.feastList?.objectURIString ?? "") }
     }
@@ -262,7 +283,7 @@ struct MapRootView: View {
         savedPlaceFilters.hasCriteria
     }
 
-    private var mapIsActive: Bool { browse.selectedTab == 1 && scenePhase != .background && presentedPlaceID == nil }
+    private var mapIsActive: Bool { browse.selectedTab == 1 && scenePhase != .background && presentedPlaceID == nil && !feastLists.isEmpty }
 
     private var markerResolutionKey: String {
         browse.scopeKey + "|" + SavedMapPlan.identity(placePlan) + "|" + viewport.queryKey
@@ -338,13 +359,18 @@ struct MapRootView: View {
                 title: $0.markerLabel, coordinate: $0.coordinate) },
             location: nearby.location.map { .init(latitude: $0.coordinate.latitude, longitude: $0.coordinate.longitude) },
             interactionBegan: {
+                guard mapIsActive else { return }
+                mapInteractionInProgress = true
                 viewportRevision += 1; nearby.cancel(); displayedScope = browse.scopeKey
             }, moved: { next, userInitiated in
+                guard mapIsActive else { return }
                 guard viewport != next else { return }
                 viewport = next; markerLookup.visibleViewport = next
-                if userInitiated {
+                // During a pending fix, native region normalization is not a
+                // user gesture. Actual pan/cluster intent is reported at start.
+                if userInitiated && (mapInteractionInProgress || !nearby.isRequesting),
+                   browse.rememberDisplayedMapViewport(next, displayedScope: displayedScope) {
                     viewportRevision += 1; nearby.cancel(); displayedScope = browse.scopeKey
-                    browse.viewports[browse.scopeKey] = next
                 }
                 // User panning takes precedence over a late automatic fix/city lookup.
             }, clusterSelected: { clusterIDs = $0 }, selected: { uri in
@@ -364,14 +390,6 @@ struct MapRootView: View {
                         .feastMapOverlayCard(cornerRadius: FeastTheme.CornerRadius.medium)
                         .padding(.leading, 12).padding(.bottom, 70)
                         .accessibilityLabel("Loading saved places")
-                } else if !isResolvingMarkers && needsRetry {
-                    Button {
-                        markerLookup.retryEvictedLocations(); markerRetry += 1
-                    } label: { Label("Retry", systemImage: "arrow.clockwise") }
-                        .buttonStyle(FeastQuietChipButtonStyle())
-                        .padding(.leading, 12).padding(.bottom, 70)
-                        .accessibilityLabel("Retry loading saved places")
-                        .accessibilityHint(markerFailure?.message ?? "Reload missing map pins.")
                 }
             }
     }
@@ -382,20 +400,24 @@ struct MapRootView: View {
             .feastMapOverlayCard(cornerRadius: FeastTheme.CornerRadius.medium)
     }
 
-    private var needsRetry: Bool {
-        markerFailure != nil || !failedIDs.isEmpty || capacityDeferredCount > 0
-    }
-
     private var emptyReason: SavedPlaceEmptyReason {
         SavedPlaceEmptyReason.evaluate(places: Array(savedPlaces), filters: savedPlaceFilters)
     }
 
     @MainActor private func setCamera(_ next: SavedMapViewport) {
         guard next.isValid else { return }
+        mapInteractionInProgress = false
         viewport = next; markerLookup.visibleViewport = next; cameraRevision = UUID(); browse.viewports[browse.scopeKey] = next
     }
     @MainActor private func prepareCamera() async {
         let scope = browse.scopeKey
+        if browse.consumeInitialNearbyRequest() {
+            mapInteractionInProgress = false
+            displayedScope = scope; viewportRevision += 1
+            automaticNearby = true; nearbyScope = scope; nearbyRevision = viewportRevision
+            nearby.request()
+            return
+        }
         guard displayedScope != scope else { return }
         viewportRevision += 1
         if let remembered = browse.viewports[scope] { displayedScope = scope; setCamera(remembered); return }
@@ -413,18 +435,34 @@ struct MapRootView: View {
                 if !Task.isCancelled, requestedIdentity == cameraResolutionKey { markerFailure = MapPlaceLookupFailure.classify(error) }
             }
         } else {
-            automaticNearby = true; nearbyScope = scope; nearbyRevision = revision
-            nearby.requestIfAuthorized()
-            if !nearby.isRequesting { displayedScope = scope }
+            displayedScope = scope
+            setCamera(viewport)
         }
     }
 
-    @MainActor private func resolveMarkers() async {
+    @MainActor private func recoverConnectionIfNeeded() {
+        guard mapIsActive, !isResolvingMarkers else { return }
+        guard failureDemand == cameraResolutionKey, hasConnectionFailure else {
+            connectionRecovery.discardRestoration()
+            return
+        }
+        guard connectionRecovery.claim(hasConnectionFailure: true) else { return }
+        markerRetry += 1
+        connectionRecoveryRevision = markerRetry
+        connectionRecoveryDemand = cameraResolutionKey
+    }
+
+    @MainActor private func resolveMarkers(recoveringConnection: Bool) async {
         guard !Task.isCancelled else { return }
+        // Only a restoration during this pass may recover its future failure.
+        // A prior idle event must not become credit for an unrelated later outage.
+        connectionRecovery.discardRestoration()
         markerLookup.visibleViewport = viewport
         let start = ProcessInfo.processInfo.systemUptime
         let generation = UUID(); markerGeneration = generation
-        let plan = placePlan, scope = browse.scopeKey, requestedViewport = viewport
+        failureDemand = cameraResolutionKey
+        let unavailable = recoveringConnection ? markerLookup.recentlyUnavailableIDs : []
+        let plan = placePlan.filter { !unavailable.contains($0.appleID) }, scope = browse.scopeKey, requestedViewport = viewport
         let selected = browse.filters.selectedListURIString
         let cities = Dictionary(grouping: plan, by: \.cityID).map { id, places in
             let ids = places.map(\.appleID).filter { !$0.isEmpty }
@@ -433,13 +471,16 @@ struct MapRootView: View {
             }
             return (id: id, ids: ids, nearby: nearby)
         }.filter { !$0.ids.isEmpty }
-        isResolvingMarkers = true; loadingCount = 0; completedCount = 0; markerFailure = nil; failedIDs = []
+        isResolvingMarkers = true; loadingCount = 0; completedCount = 0; markerFailure = nil; hasConnectionFailure = false
         defer {
             if markerGeneration == generation {
                 isResolvingMarkers = false
                 let elapsed = Int((ProcessInfo.processInfo.systemUptime - start) * 1000)
                 Self.loadLogger.info("elapsed_ms=\(elapsed, privacy: .public) attempted=\(completedCount, privacy: .public) planned=\(loadingCount, privacy: .public) visible=\(filteredMarkerItems.count, privacy: .public) cancelled=\(Task.isCancelled, privacy: .public)")
                 if refreshAfterLoading { refreshAfterLoading = false; markerRetry += 1 }
+                if !Task.isCancelled {
+                    recoverConnectionIfNeeded()
+                }
             }
         }
         if let selected {
@@ -474,6 +515,7 @@ struct MapRootView: View {
             while let (id, hint, failure) = await group.next() {
                 guard !Task.isCancelled, markerGeneration == generation, scope == browse.scopeKey else { group.cancelAll(); break }
                 if let failure { markerFailure = failure }
+                if failure == .connection { hasConnectionFailure = true }
                 if let failure, failure.pausesBatch { group.cancelAll(); break }
                 if let hint {
                     let ids = SavedMapPlan.lookupIDs(places:plan.filter {$0.cityID == id},selectedCity:nil,
@@ -502,7 +544,8 @@ struct MapRootView: View {
             while let (id, success, failure) = await group.next() {
                 guard !Task.isCancelled, markerGeneration == generation else { group.cancelAll(); break }
                 completedCount += 1
-                if !success { failedIDs.insert(id); markerFailure = failure ?? .unavailable }
+                if !success { markerFailure = failure ?? .unavailable }
+                if failure == .connection { hasConnectionFailure = true }
                 if let failure, failure.pausesBatch { stopped = true }
                 add()
             }

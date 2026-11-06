@@ -6,10 +6,15 @@ container, stores, sharing, saved coordinates, Ask Feast, access, or accounting.
 
 ## Behavior and boundaries
 
-- Fresh All Cities map requests a one-shot location only when permission already
-  exists. Nearby remains the explicit permission entry point. Saved city/return
-  viewports take precedence. Pan start and newer Nearby requests invalidate late
-  camera results. Adding, expiring, or resolving pins never frames the camera.
+- First ordinary Map-tab entry requests the same one-shot location as Nearby,
+  including the normal When In Use permission prompt. The attempt is consumed once
+  per browse session, before requesting permission. Inherited city and content
+  filters remain unchanged. Remembered map/return viewports take precedence;
+  subsequent explicit city selection keeps its city camera behavior. A denied or
+  failed first request quietly falls back to city/current context. Explicit Nearby
+  retains its existing error explanation. Pan start and newer Nearby requests
+  invalidate late camera results. Adding, expiring, or resolving pins never frames
+  the camera.
 - Active saved filters apply before requests. An explicitly selected city loads
   its eligible records. All Cities resolves an exact saved Apple place ID per
   eligible city as a temporary anchor, including at wide zoom. A nearby anchor
@@ -29,9 +34,10 @@ container, stores, sharing, saved coordinates, Ask Feast, access, or accounting.
   concurrency first-stage cost. Cached points near the viewport take precedence.
 - The header is a compact city picker with Search and Filters controls. Routine
   loading counts and explanatory copy are removed. A small spinner appears only
-  after 400 ms of loading; actual requests begin immediately. Failures or capacity
-  deferral expose Retry on the map, without adding a navigation bar. Detail
-  navigation restores its own bar and pauses map demand while pushed.
+  after 400 ms of loading; actual requests begin immediately. The floating Retry
+  control is removed, with no replacement failure text. Detail navigation restores
+  its own bar and pauses map demand while pushed. Native grouping and pin delivery
+  remain unchanged from build 1.1 (12); no annotation batching is introduced.
 
 ## Scheduling and temporary reuse
 
@@ -39,10 +45,24 @@ One app-process map/detail service permits at most three active requests, joins
 identical requests, and cancels the underlying operation when its last subscriber
 leaves. Successful calls have no artificial inter-request delay. Throttling and
 service failures reduce concurrency to one and apply shared exponential cooldown;
-only the failed request retries, at most three attempts. Offline failures do not
-retry automatically. Six healthy completions permit a gradual increase back to
+only the failed request retries, at most three attempts. The lookup service does
+not immediately retry offline failures. Six healthy completions permit a gradual increase back to
 three. Each native item/search request has a 20-second cancellation deadline.
 Failures stop further batch dispatch; completed successes remain usable.
+
+While the Map root is active, a passive network-path observer detects an
+offline-to-online transition. After that path remains available for one second,
+one recovery pass can resume current demand that failed for connectivity. This
+settling period applies only to connection recovery, never normal successful pin
+delivery. Duplicate online callbacks do nothing, rapid transitions coalesce, and a
+later distinct outage can recover again. Existing provider concurrency and shared
+cooldown still apply. There is no periodic retry loop. Recovery neither clears
+successful entries nor changes the camera, filters, or grouping. Recently
+unavailable IDs are excluded from this recovery pass using bounded, temporary
+ID-only metadata; this does not mark or change saved records. Observation and
+pending transition work stop on tab/detail exit or backgrounding. Network-path
+availability is not a guarantee that Apple Maps is reachable, so recovery can
+still fail quietly.
 
 Apple-derived matches and their city anchors live only in RAM, for five minutes from
 retrieval, capped at 2,048 entries; reads do not extend expiry. Visible entries are
@@ -51,8 +71,10 @@ subscribers. Views read the shared entries rather than retaining a second result
 cache. Timed eviction refreshes active demand without canceling unrelated work.
 A bounded, same-TTL record of successful requested IDs prevents capacity churn;
 it contains no coordinates. This memo also prevents an evicted city anchor from
-being fetched on every pan. Capacity-deferred results have a Retry control. Collections exceeding capacity do not have guaranteed
-complete simultaneous pin coverage. No disk cache or coordinate migration exists.
+being fetched on every pan. Connectivity recovery does not reset this memo or
+force capacity-deferred results to reload. Collections exceeding capacity do not
+have guaranteed complete simultaneous pin coverage. No disk cache or coordinate
+migration exists.
 
 This implements a conservative temporary, limited performance cache under
 [Apple Developer Program License Agreement, Schedule 6 §2.5](https://developer.apple.com/support/terms/apple-developer-program-license-agreement/).
@@ -204,3 +226,38 @@ provider/request runtime log, tests/build logs, source-identity comparison,
 validation manifest, synthetic wrapper and screenshots of overview/London,
 detail/back return, offline/online Retry, and accessibility layouts. User-provided
 screenshots remain outside the public repository.
+
+## Nearby and quiet recovery validation recorded 2026-11-06
+
+- Local candidate only, relative to the build 1.1 (12) working-tree snapshot.
+  All 177 Swift regression groups passed, exit zero. The unsigned production
+  iPhone Release build and isolated simulator QA build succeeded. Independent
+  Astra extra-high review found no remaining blocking source finding.
+- `SavedMapPlan.swift`, including the native renderer and clustering, is byte
+  identical to build 12. Existing Ask/backend work, persistence, models, CloudKit,
+  app identity and project configuration are unchanged by this task.
+- Exact production Map root, browse state, lookup, location and renderer sources
+  ran in a separate simulator wrapper with 284 in-memory synthetic places. First
+  Cities-to-Map entry, without tapping Nearby, displayed the normal location
+  prompt and centered on simulated London after authorization. Inherited London
+  context did not suppress the prompt. Denying it, and launching again with
+  permission already denied, quietly retained London and loaded its places.
+- Injected connection restoration loaded 79 missing London places, taking the
+  displayed total from 20 to 99. The 80 additional provider calls included one
+  unavailable place; already loaded places were retained without refetching.
+  Camera center stayed fixed. Repeated offline/online events and duplicate online
+  callbacks caused no further calls after the available places had loaded.
+- Explicit Paris selection, native cluster selection, detail/back and tab return
+  retained the expected camera. Changing simulated location to New York while on
+  Cities did not recenter the returned Paris map. Cache expiry during this longer
+  check refreshed Paris demand normally; this is evidence of camera preservation,
+  not a claim that tab return never issues a request.
+- No Retry control or replacement failure text appeared. Connection events were
+  injected into the production recovery state machine; simulator UI checks used
+  a zero settling delay, while unit tests cover settling and cancellation. These
+  checks do not establish live Apple service latency or physical-device behavior.
+  Native drag input remained inconclusive. Pan-versus-delayed-location and
+  accessibility-only camera movement still require hands-on device acceptance.
+- No phone installation, upload, deployment or real saved-data mutation occurred.
+  Logs, source hashes, review, fixture wrapper and screenshots are in the sibling
+  `map-nearby-quiet-recovery-evidence` directory.

@@ -77,12 +77,41 @@ import Foundation
         browse.filters.selectedCuisine = "Synthetic"
         let criteria = browse.filters
         let viewport = SavedMapViewport(latitude: 40.725, longitude: -73.992, latitudeDelta: 0.02, longitudeDelta: 0.02)
+        precondition(browse.consumeInitialNearbyRequest()) // Inherited city/filters do not suppress Nearby.
+        precondition(browse.filters == criteria)
+        precondition(!browse.consumeInitialNearbyRequest()) // Permission is still pending, or may have failed.
         precondition(browse.rememberNearbyViewport(viewport, requestedScope: browse.scopeKey))
         precondition(browse.filters == criteria && browse.viewports[browse.scopeKey] == viewport)
         precondition(!browse.rememberNearbyViewport(viewport, requestedScope: "obsolete-city"))
         browse.selectedTab = 0
+        precondition(!browse.consumeInitialNearbyRequest())
         precondition(!browse.rememberNearbyViewport(viewport, requestedScope: browse.scopeKey))
+        browse.selectedTab = 1
+        precondition(!browse.consumeInitialNearbyRequest()) // Tab/detail return never starts a fresh request.
+        browse.filters.selectedListURIString = "another-city"
+        precondition(!browse.consumeInitialNearbyRequest()) // Explicit city choice remains a city camera intent.
+        browse.filters = criteria
         precondition(browse.filters == criteria)
+        let restored = SavedPlaceBrowseState()
+        precondition(!restored.consumeInitialNearbyRequest()) // Cities tab does not consume first entry.
+        restored.selectedTab = 1
+        restored.viewports[restored.scopeKey] = viewport
+        precondition(!restored.consumeInitialNearbyRequest() && restored.viewports[restored.scopeKey] == viewport)
+        restored.viewports.removeAll()
+        precondition(!restored.consumeInitialNearbyRequest()) // Restoring consumes the initial-entry decision too.
+        let initializing = SavedPlaceBrowseState()
+        precondition(!initializing.rememberDisplayedMapViewport(.overview, displayedScope: initializing.scopeKey))
+        initializing.selectedTab = 1
+        precondition(!initializing.rememberDisplayedMapViewport(.overview, displayedScope: nil))
+        precondition(initializing.viewports.isEmpty && initializing.consumeInitialNearbyRequest())
+        precondition(!initializing.rememberDisplayedMapViewport(viewport, displayedScope: "obsolete-city"))
+        precondition(initializing.rememberDisplayedMapViewport(viewport, displayedScope: initializing.scopeKey))
+        let earlyGesture = SavedPlaceBrowseState()
+        earlyGesture.selectedTab = 1
+        precondition(earlyGesture.rememberDisplayedMapViewport(viewport, displayedScope: earlyGesture.scopeKey))
+        precondition(!earlyGesture.consumeInitialNearbyRequest()) // A real interaction establishes displayedScope before its move.
+        print("PASS hidden/initial native map callbacks cannot manufacture remembered camera or suppress first Nearby; actual prior interaction still wins")
+        print("PASS first Map entry consumes one Nearby intent, preserves inherited filters, and respects remembered camera/tab/detail/city returns")
         print("PASS Nearby viewport retains exact city/query/status/tag/type/cuisine and rejects interrupted scope/tab requests")
         print("PASS nearby one-shot requests, duplicate authorization callbacks, cancellation/stale callbacks, stale fixes and denied/unavailable errors")
     }
