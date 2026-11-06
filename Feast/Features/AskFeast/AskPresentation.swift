@@ -161,9 +161,8 @@ enum AskHistoryPresentation {
             if !operations.isEmpty {return compact(operations.map {$0.title(names:[:])}.joined(separator:"; "),limit:120)}
             if last.response.publicConversationText != nil,last.response.agentTask?.privateSelection != true,last.response.libraryContext?.excludesExternalReferences != true {
                 for paragraph in last.response.substantiveParagraphs where paragraph.id != "library-city-heading" && paragraph.transientToolStatus != true {
-                    let text=paragraph.spans.map {span->String in switch span {case .text(let value):return value;case .place(let id):return last.response.candidates.first(where:{$0.id==id})?.name ?? "saved place"}}.joined()
-                    let clean=text.replacingOccurrences(of:#"\[([^\]]+)\]\(https?://[^)]+\)"#,with:"$1",options:.regularExpression)
-                    if !clean.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty {return compact(String(AskMarkdownPresentation.inline(AskMarkdownPresentation.readableBlocks(clean)).characters),limit:120)}
+                    let clean=String(AskMarkdownPresentation.inline(paragraph,candidates:last.response.candidates).characters)
+                    if !clean.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty {return compact(clean,limit:120)}
                 }
             }
         }

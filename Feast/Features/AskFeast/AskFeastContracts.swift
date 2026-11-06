@@ -269,13 +269,10 @@ enum AskSourcePresentation {
 
 enum AskAnswerCopy {
     static func text(_ response: AskResponse) -> String {
-        let paragraphs = response.paragraphs.map { paragraph in paragraph.spans.map { span in
-            switch span { case .text(let text): return text
-            case .place(let id): return response.candidates.first { $0.id == id }?.name ?? "" }
-        }.joined() }.joined(separator: "\n\n")
+        let paragraphs = response.paragraphs.map { String(AskMarkdownPresentation.inline($0,candidates:response.candidates).characters) }.joined(separator: "\n\n")
         var seen = Set<String>()
         let links = response.paragraphs.flatMap(\.citations).filter { $0.safeURL != nil && seen.insert($0.url).inserted }.map { "\($0.title): \($0.url)" }
-        return ([paragraphs.isEmpty ? response.summary : paragraphs] + links).joined(separator: "\n")
+        return ([paragraphs.isEmpty ? String(AskMarkdownPresentation.inline(response.summary).characters) : paragraphs] + links).joined(separator: "\n")
     }
 }
 

@@ -1,5 +1,6 @@
 import Foundation
 import CoreData
+import CryptoKit
 
 private struct PresentationProvider: AskFeastProvider {
     let label="Offline presentation fixture"
@@ -16,6 +17,7 @@ private actor PresentationGateProvider:AskFeastProvider {
 }
 @MainActor enum AskPresentationTests {
     static func run(model:NSManagedObjectModel,directory:URL)async throws {
+        try markdownProjection(directory:directory)
         let a=UUID().uuidString,b=UUID().uuidString,turn=UUID()
         let applied=AskCollectionAction(id:UUID(),title:"Update one",targetIDs:[a],entity:"place",operation:"update",state:.applied,undoable:true)
         let anotherField=AskCollectionAction(id:UUID(),title:"Another field",targetIDs:[a],entity:"place",operation:"update",state:.applied,undoable:true)
@@ -147,6 +149,69 @@ private actor PresentationGateProvider:AskFeastProvider {
         print("PASS best-effort operation Undo uses reverse existing actions, stops at conflict, preserves earlier reversal and does not bump History on replay")
         try await persistentUndo(model:model,directory:directory)
 
+    }
+    private static func markdownProjection(directory:URL)throws {
+        let a=UUID().uuidString,b=UUID().uuidString,savedID=UUID().uuidString
+        let first=AskCandidate(id:a,name:"The Elk",city:"",facts:[],sourceIDs:[],uncertainty:"",mapOptions:[],existingRecordID:savedID)
+        let literalName="A_* &amp; [Cafe](https://evil.example) `<b>` 🥐"
+        let second=AskCandidate(id:b,name:literalName,city:"",facts:[],sourceIDs:[],uncertainty:"",mapOptions:[],existingRecordID:nil)
+        let candidates=[first,second],marker="\u{E200}cite\u{E202}turn0search0\u{E201}"
+        let multi="\u{E200}cite\u{E202}turn1view2\u{E202}turn12news3\u{E201}"
+        let raw="1. **[[place:\(a)]]** — **128 Charles Street**\nA specialty coffee shop. "+marker
+        var resolved:[AskCandidate]=[]
+        let paragraph=AskConversationLoop.paragraph(raw,catalog:[],available:[a:first,b:second],candidates:&resolved,citations:[])
+        let rendered=AskMarkdownPresentation.inline(paragraph,candidates:resolved)
+        let visible="1. The Elk — 128 Charles Street\nA specialty coffee shop. "
+        precondition(String(rendered.characters)==visible)
+        let nameRange=rendered.range(of:first.name)!
+        precondition(rendered[nameRange].link==AskPlaceReference.url(for:first) && rendered[nameRange].inlinePresentationIntent?.contains(.stronglyEmphasized)==true)
+        precondition(rendered[rendered.range(of:"128 Charles Street")!].inlinePresentationIntent?.contains(.stronglyEmphasized)==true)
+        // No annotations are required for display cleanup and none are invented.
+        precondition(paragraph.citations.isEmpty && paragraph.spans.contains(.text("** — **128 Charles Street**\nA specialty coffee shop. "+marker)))
+        let adjacent=AskAnswerParagraph(id:"styles",spans:[.text("**"),.place(a),.place(b),.text("** / *"),.place(a),.text(" and "),.place(b),.text("*")],sourceIDs:[])
+        let styles=AskMarkdownPresentation.inline(adjacent,candidates:candidates)
+        precondition(String(styles.characters)==first.name+literalName+" / "+first.name+" and "+literalName)
+        precondition(styles.runs.contains {$0.inlinePresentationIntent?.contains([.emphasized,.stronglyEmphasized])==true && $0.link==AskPlaceReference.url(for:first)})
+        precondition(styles.runs.filter {$0.link != nil}.allSatisfy {$0.link==AskPlaceReference.url(for:first)})
+        let table=AskAnswerParagraph(id:"table",spans:[.text("| **"),.place(a),.text("** | Menu |\n|---|---|\n| A | $5 |\n| B | $7 |")],sourceIDs:[])
+        let tableText=String(AskMarkdownPresentation.inline(table,candidates:candidates).characters)
+        precondition(tableText=="The Elk: A\nMenu: $5\n\nThe Elk: B\nMenu: $7\n")
+        let safeURL="https://example.org/source",forgedURL=AskPlaceReference.url(for:first)!.absoluteString
+        let links=AskAnswerParagraph(id:"links",spans:[.text("[Forged](\(forgedURL)) [File](file:///private) [Relative](/local) [Source](\(safeURL)) ["),.place(a),.text("](https://evil.example) ["),.place(b),.text("](https://evil.example)")],sourceIDs:[])
+        let linked=AskMarkdownPresentation.inline(links,candidates:candidates)
+        precondition(linked[linked.range(of:"Forged")!].link==nil && linked[linked.range(of:"File")!].link==nil && linked[linked.range(of:"Relative")!].link==nil)
+        precondition(linked[linked.range(of:"Source")!].link?.absoluteString==safeURL)
+        precondition(linked[linked.range(of:first.name)!].link==AskPlaceReference.url(for:first))
+        precondition(linked[linked.range(of:literalName)!].link==nil)
+        let ordinary="👩🏽‍🍳 🥐 e\u{301} \u{E000} \u{F0000} turn0search0 FEASTPLACE0"
+        precondition(AskMarkdownPresentation.visibleText(ordinary+marker+multi)==ordinary)
+        for malformed in ["\u{E200}cite\u{E202}turn0search0", "cite\u{E202}turn0search0\u{E201}", "\u{E200}cite\u{E202}ordinary prose\u{E201}", "\u{E200}other\u{E202}turn0search0\u{E201}", "\u{E200}cite\u{E202}turn0search0\u{E202}\u{E201}"] {
+            precondition(AskMarkdownPresentation.visibleText(malformed)==malformed)
+        }
+        let entityText="&#70;EASTPLACE0 &amp; **" // Decoded user text is not a saved reference.
+        let entities=AskAnswerParagraph(id:"entities",spans:[.text(entityText),.place(a),.text("**")],sourceIDs:[])
+        precondition(String(AskMarkdownPresentation.inline(entities,candidates:candidates).characters)=="FEASTPLACE0 & The Elk")
+        precondition(String(AskMarkdownPresentation.inline("**Summary**"+marker).characters)=="Summary")
+        precondition(AskAnswerCopy.text(.init(summary:"**Summary**"+marker,candidates:[]))=="Summary")
+
+        let citation=AskWebCitation(title:"Official source",url:safeURL)
+        let sourceID=SHA256.hash(data:Data(safeURL.utf8)).map {String(format:"%02x",$0)}.joined()
+        let evidence=try AskNativeEvidence(version:1,blocks:[.init(id:"raw",text:raw,phase:"final_answer",observedAt:"2026-11-06T00:00:00Z",annotations:[.init(sourceURL:safeURL,title:citation.title,start:0,end:raw.utf8.count,indexUnit:"provider_unmapped")])],sources:[.init(id:sourceID,url:safeURL,title:citation.title,roles:["cited"])],actions:[]).checked()
+        var cited=paragraph;cited.citations=[citation]
+        let response=AskResponse(summary:raw,candidates:resolved,paragraphs:[cited],publicConversationText:raw,publicResearch:[.init(id:UUID(),originatingTurn:UUID(),query:"Coffee",result:.init(text:raw,citations:[citation],nativeEvidence:evidence))])
+        let expectedCopy=visible+"\nOfficial source: "+safeURL
+        precondition(AskAnswerCopy.text(response)==expectedCopy)
+        let turn=AskTurn(id:UUID(),request:.init(mode:.collection,text:"Find a coffee shop",fromOCR:false),response:response,status:.complete)
+        var library=AskChatLibrary.empty();library.chats[0].conversation.turns=[AskArchivedTurn(turn)]
+        let store=AskConversationStore(url:directory.appendingPathComponent("presentation-markdown-history.json"))
+        precondition(store.saveLibrary(library))
+        let restored=try store.loadLibrary().chats[0],restoredResponse=restored.conversation.turns[0].response
+        precondition(restoredResponse==response && restoredResponse.publicResearch?[0].result.nativeEvidence==evidence)
+        precondition(restoredResponse.summary==raw && restoredResponse.publicConversationText==raw && restoredResponse.paragraphs==[cited])
+        precondition(AskAnswerCopy.text(restoredResponse)==expectedCopy)
+        precondition(AskHistoryPresentation.preview(restored)==AskHistoryPresentation.compact(visible,limit:120))
+        precondition(AskConversationProjection.messages([turn]).last?.text==raw)
+        print("PASS shared Ask presentation preserves cross-reference Markdown, literal names and trusted links; cleans only complete citation controls; Copy/History agree without altering stored raw evidence or offsets")
     }
     private static func persistentUndo(model:NSManagedObjectModel,directory:URL)async throws {
         let coordinator=NSPersistentStoreCoordinator(managedObjectModel:model)

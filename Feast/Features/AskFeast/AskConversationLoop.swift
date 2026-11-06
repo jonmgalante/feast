@@ -1,6 +1,13 @@
 import Foundation
 
 enum AskMarkdownPresentation {
+    /// Provider control syntax is not prose or a source-to-claim association.
+    /// Remove only complete recognized citations in presentation; keep malformed
+    /// tokens, ordinary turn IDs, emoji and unrelated private-use characters.
+    private static let providerCitation = try! NSRegularExpression(pattern:"\u{E200}cite\u{E202}turn[0-9]+(?:search|view|news)[0-9]+(?:\u{E202}turn[0-9]+(?:search|view|news)[0-9]+)*\u{E201}")
+    static func visibleText(_ text:String)->String {
+        providerCitation.stringByReplacingMatches(in:text,range:NSRange(text.startIndex...,in:text),withTemplate:"")
+    }
     /// Text cannot lay out Markdown tables. Convert only structurally complete
     /// pipe tables to labelled rows, retaining every cell, number and link.
     static func readableBlocks(_ text:String)->String {
@@ -86,8 +93,40 @@ enum AskMarkdownPresentation {
         return false
     }
     static func inline(_ text:String)->AttributedString {
-        var value=(try? AttributedString(markdown:readableBlocks(text),options:.init(interpretedSyntax:.inlineOnlyPreservingWhitespace))) ?? AttributedString(text)
+        let visible=visibleText(text)
+        var value=(try? AttributedString(markdown:readableBlocks(visible),options:.init(interpretedSyntax:.inlineOnlyPreservingWhitespace))) ?? AttributedString(visible)
         for run in value.runs {if let url=run.link,AskWebCitation(title:"Link",url:url.absoluteString).safeURL==nil {value[run.range].link=nil}}
+        return value
+    }
+    static func inline(_ paragraph:AskAnswerParagraph,candidates:[AskCandidate])->AttributedString {
+        let text=paragraph.spans.compactMap {span->String? in if case .text(let value)=span {return value};return nil}.joined()
+        guard paragraph.spans.contains(where:{if case .place = $0 {return true};return false}) else{return inline(text)}
+        // Opaque, per-occurrence placeholders let Markdown span saved references.
+        // Names are inserted literally after parsing, never as Markdown or URLs.
+        var prefix:String
+        repeat {prefix="FEASTPLACE"+UUID().uuidString.replacingOccurrences(of:"-",with:"")} while text.contains(prefix) || candidates.contains(where:{$0.name.contains(prefix)})
+        var replacements:[(token:String,candidate:AskCandidate)]=[]
+        let markdown=paragraph.spans.map {span->String in
+            switch span {
+            case .text(let value): return value
+            case .place(let id):
+                guard let candidate=candidates.first(where:{$0.id==id}) else{return ""}
+                let token=prefix+"N\(replacements.count)END"
+                replacements.append((token,candidate));return token
+            }
+        }.joined()
+        var value=inline(markdown)
+        for replacement in replacements.reversed() {
+            // Table-to-row presentation can repeat a heading's placeholder.
+            // Names cannot contain this prefix, so inserted text is never matched.
+            while let range=value.range(of:replacement.token) {
+                var name=AttributedString(replacement.candidate.name,attributes:value[range].runs.first?.attributes ?? AttributeContainer())
+                name.inlinePresentationIntent=(name.inlinePresentationIntent ?? []).union(.stronglyEmphasized)
+                // All model-supplied internal links were removed by inline(_:).
+                name.link=AskPlaceReference.url(for:replacement.candidate)
+                value.replaceSubrange(range,with:name)
+            }
+        }
         return value
     }
 }

@@ -156,7 +156,7 @@ struct AskConversationAnswer: View {
                 }
             }
             if response.paragraphs.isEmpty && (response.fieldActions ?? []).isEmpty && operations.isEmpty {
-                Text(response.summary).font(FeastTheme.Typography.body)
+                Text(String(AskMarkdownPresentation.inline(response.summary).characters)).font(FeastTheme.Typography.body)
             }
             ForEach(response.substantiveParagraphs.filter { paragraph in !((response.fieldActions ?? []).isEmpty == false && paragraph.representedField == "instagram") }) { paragraph in
                 VStack(alignment: .leading, spacing: FeastTheme.Spacing.xSmall) {
@@ -312,18 +312,7 @@ struct AskConversationAnswer: View {
         return ids.compactMap { id in response.candidates.first { $0.id == id } }
     }
     private func attributed(_ paragraph: AskAnswerParagraph) -> AttributedString {
-        var result = AttributedString()
-        for span in paragraph.spans {
-            switch span {
-            case .text(let text): result.append(AskMarkdownPresentation.inline(text))
-            case .place(let id):
-                guard let candidate = response.candidates.first(where: { $0.id == id }) else { continue }
-                var name = AttributedString(candidate.name)
-                name.inlinePresentationIntent = .stronglyEmphasized
-                name.link = AskPlaceReference.url(for: candidate)
-                result.append(name)
-            }
-        }
+        var result = AskMarkdownPresentation.inline(paragraph,candidates:response.candidates)
         let allCitations = response.paragraphs.flatMap(\.citations).reduce(into: [AskWebCitation]()) { result, citation in
             if !result.contains(where: { $0.url == citation.url }) { result.append(citation) }
         }

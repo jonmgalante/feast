@@ -121,6 +121,8 @@ struct MapRootView: View {
             }
             .task(id: markerResolutionKey + "|\(markerRetry)|\(mapIsActive)") {
                 if mapIsActive {
+                    do { try await SavedMapPlan.waitForFilterSettling(isEditing: showingSavedPlaceFilters) }
+                    catch { return }
                     let recovering = connectionRecoveryRevision == markerRetry && connectionRecoveryDemand == cameraResolutionKey
                     connectionRecoveryRevision = nil; connectionRecoveryDemand = nil
                     await resolveMarkers(recoveringConnection: recovering)
@@ -159,7 +161,8 @@ struct MapRootView: View {
                         availableCuisines: SavedPlaceSearchEngine.availableCuisines(from: Array(savedPlaces), filters: .init()),
                         fixedFeastList: nil,
                         availableTags: availableTags,
-                        showsQuery: true
+                        showsQuery: true,
+                        application: .immediately
                     )
                 }
                 .presentationDetents([.medium, .large])
@@ -426,6 +429,7 @@ struct MapRootView: View {
         if selectedFeastList != nil {
             do {
                 let ids = placePlan.map(\.appleID)
+                try await SavedMapPlan.waitForFilterSettling(isEditing: showingSavedPlaceFilters)
                 let anchor = try await markerLookup.cityAnchor(placeIDs: ids) { try await applePlacesService.resolve(placeID: $0) }
                 guard !Task.isCancelled, let hint = anchor.viewport, requestedIdentity == cameraResolutionKey,
                       SavedMapPlan.acceptsCameraResult(requestedScope: scope, currentScope: browse.scopeKey,

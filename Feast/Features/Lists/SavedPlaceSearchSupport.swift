@@ -5,29 +5,41 @@ struct SavedPlaceFilterSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     @Binding private var committedFilters: SavedPlaceSearchFilters
-    @State private var filters: SavedPlaceSearchFilters
+    @State private var draftFilters: SavedPlaceSearchFilters
 
     let availableLists: [FeastList]
     let availableCuisines: [String]
     let fixedFeastList: FeastList?
     let availableTags: [String]
     let showsQuery: Bool
+    let application: SavedPlaceFilterApplication
 
-    init(filters: Binding<SavedPlaceSearchFilters>, availableLists: [FeastList], availableCuisines: [String], fixedFeastList: FeastList?, availableTags: [String] = [], showsQuery: Bool = false) {
+    init(filters: Binding<SavedPlaceSearchFilters>, availableLists: [FeastList], availableCuisines: [String], fixedFeastList: FeastList?, availableTags: [String] = [], showsQuery: Bool = false, application: SavedPlaceFilterApplication = .onDone) {
         _committedFilters = filters
-        _filters = State(initialValue: filters.wrappedValue)
+        _draftFilters = State(initialValue: filters.wrappedValue)
         self.availableLists = availableLists
         self.availableCuisines = availableCuisines
         self.fixedFeastList = fixedFeastList
         self.availableTags = availableTags
         self.showsQuery = showsQuery
+        self.application = application
+    }
+
+    // Map edits the shared value directly. There is no delayed commit or stale
+    // snapshot to restore on Close/swipe, including after city validation.
+    private var editingFilters: Binding<SavedPlaceSearchFilters> {
+        application.binding(committed: $committedFilters, draft: $draftFilters)
+    }
+    private var filters: SavedPlaceSearchFilters {
+        get { editingFilters.wrappedValue }
+        nonmutating set { editingFilters.wrappedValue = newValue }
     }
 
     var body: some View {
         List {
             if showsQuery {
                 Section("Search saved places") {
-                    TextField("Name, city, neighborhood, note, tag, cuisine or link", text: $filters.queryText)
+                    TextField("Name, city, neighborhood, note, tag, cuisine or link", text: editingFilters.queryText)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                 }
@@ -48,15 +60,15 @@ struct SavedPlaceFilterSheet: View {
                     filters.reset()
                 }
                 .disabled(!filters.hasCriteria)
-                Button("Cancel") { dismiss() }
+                if application == .onDone { Button("Cancel") { dismiss() } }
             }
 
             ToolbarItem(placement: .confirmationAction) {
                 Button {
-                    committedFilters = filters
+                    if application == .onDone { committedFilters = filters }
                     dismiss()
                 } label: {
-                    Text("Done")
+                    Text(application == .immediately ? "Close" : "Done")
                         .fontWeight(.semibold)
                 }
             }
@@ -91,7 +103,7 @@ struct SavedPlaceFilterSheet: View {
                         title: "City",
                         helper: "Choose which city to search."
                     ) {
-                        Picker("City", selection: $filters.selectedListURIString) {
+                        Picker("City", selection: editingFilters.selectedListURIString) {
                             Text("All Cities").tag(nil as String?)
 
                             ForEach(availableLists) { feastList in
@@ -150,7 +162,7 @@ struct SavedPlaceFilterSheet: View {
                     title: "Place Type",
                     helper: "Filter by the kind of place."
                 ) {
-                    Picker("Place Type", selection: $filters.selectedPlaceType) {
+                    Picker("Place Type", selection: editingFilters.selectedPlaceType) {
                         Text("Any Type").tag(nil as PlaceType?)
 
                         ForEach(PlaceType.allCases) { placeType in
@@ -188,7 +200,7 @@ struct SavedPlaceFilterSheet: View {
                         title: "Cuisine",
                         helper: "Use cuisine metadata to narrow the results."
                     ) {
-                        Picker("Cuisine", selection: $filters.selectedCuisine) {
+                        Picker("Cuisine", selection: editingFilters.selectedCuisine) {
                             Text("Any Cuisine").tag(nil as String?)
 
                             ForEach(Array(Set(availableCuisines + [filters.selectedCuisine].compactMap { $0 })).sorted(), id: \.self) { cuisine in
