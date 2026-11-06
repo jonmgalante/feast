@@ -390,37 +390,47 @@ struct ListsRootView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
 
-        ToolbarItem(placement: .topBarTrailing) {
-            FeastToolbarActionCluster {
-                if !isZeroCityState && !isZeroSavedPlacesState {
-                    Button { browse.showingCityFilters = true } label: {
-                        FeastToolbarSymbol(systemName: "slider.horizontal.3", isEmphasized: searchFilters.hasCriteria)
-                            .frame(width: 36, height: 36)
-                            .contentShape(Rectangle())
-                    }
-                    .accessibilityLabel("Filter places")
-                }
-                Button {
-                    showingAddPlace = true
-                } label: {
-                    FeastToolbarSymbol(systemName: "plus")
-                        .frame(width: 36, height: 36)
+        if !isZeroCityState && !isZeroSavedPlacesState {
+            cityToolbarItem {
+                Button { browse.showingCityFilters = true } label: {
+                    FeastToolbarSymbol(systemName: "slider.horizontal.3", isEmphasized: searchFilters.hasCriteria)
+                        .frame(width: 44, height: 44)
                         .contentShape(Rectangle())
                 }
-                .disabled(feastLists.isEmpty)
-                .accessibilityLabel("Add Place")
-                .accessibilityHint(feastLists.isEmpty ? "Create a city first" : "Choose a city in Add Place")
-
-                Menu {
-                    Button("Import from Notes", systemImage: "square.and.arrow.down") { presentImportFromNotes() }
-                    Button("Export library", systemImage: "square.and.arrow.up") { confirmingExport = true }
-                } label: {
-                    FeastToolbarSymbol(systemName: "ellipsis")
-                        .frame(width: 36, height: 36)
-                        .contentShape(Rectangle())
-                }
-                .accessibilityLabel("Library options")
+                .buttonStyle(.plain)
+                .accessibilityLabel("Filter places")
             }
+        }
+        cityToolbarItem {
+            Button(action: presentCreateCity) {
+                FeastToolbarSymbol(systemName: "plus")
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Add City")
+        }
+        cityToolbarItem {
+            Menu {
+                Button("Import from Notes", systemImage: "square.and.arrow.down") { presentImportFromNotes() }
+                Button("Export library", systemImage: "square.and.arrow.up") { confirmingExport = true }
+            } label: {
+                FeastToolbarSymbol(systemName: "ellipsis")
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Library options")
+        }
+    }
+
+    @ToolbarContentBuilder
+    private func cityToolbarItem<Content: View>(@ViewBuilder content: () -> Content) -> some ToolbarContent {
+        let item = ToolbarItem(placement: .topBarTrailing, content: content)
+        if #available(iOS 26.0, *) {
+            item.sharedBackgroundVisibility(.hidden)
+        } else {
+            item
         }
     }
 
