@@ -113,7 +113,11 @@ struct FeastListDetailView: View {
     private var content: some View {
         List {
             if isShowingSearchResults {
-                searchResultsSection
+                if searchFilters.hasContentFilters {
+                    groupedSearchResults
+                } else {
+                    searchResultsSection
+                }
             } else {
                 if citySavedPlaces.isEmpty {
                     emptyStateSection
@@ -122,7 +126,7 @@ struct FeastListDetailView: View {
                     ForEach(neighborhoodSections) { section in
                         neighborhoodSection(section)
                     }
-                    unsortedSection
+                    unsortedSection(unsortedSavedPlaces)
                 }
             }
         }
@@ -257,6 +261,52 @@ struct FeastListDetailView: View {
         .feastSectionSurface()
     }
 
+    @ViewBuilder
+    private var groupedSearchResults: some View {
+        let matches = filteredSavedPlaces
+        let groups = CityFilteredPlaceGroups(
+            matchingPlaces: matches,
+            neighborhoods: Array(neighborhoodSections)
+        )
+
+        Section("Places") {
+            if let searchSummaryText {
+                Text(searchSummaryText)
+                    .font(FeastTheme.Typography.rowUtility)
+                    .foregroundStyle(FeastTheme.Colors.tertiaryText)
+            }
+            Text(matchingPlaceCount(matches.count))
+                .font(FeastTheme.Typography.rowUtility)
+                .foregroundStyle(FeastTheme.Colors.secondaryText)
+
+            if matches.isEmpty {
+                SavedPlaceEmptyState(
+                    reason: SavedPlaceEmptyReason.evaluate(places: citySavedPlaces, filters: searchFilters, fixedCity: feastList),
+                    scopeName: feastList.displayName
+                )
+            }
+        }
+        .feastSectionSurface()
+
+        ForEach(groups.neighborhoods) { group in
+            neighborhoodSection(group.section, matchingPlaces: group.places)
+        }
+        unsortedSection(groups.unsorted, isFiltered: true)
+
+        if !groups.otherMatches.isEmpty {
+            Section("Other matching places") {
+                ForEach(groups.otherMatches) { place in
+                    SavedPlaceListRow(place: place, showsLocationContext: true)
+                }
+            }
+            .feastSectionSurface()
+        }
+    }
+
+    private func matchingPlaceCount(_ count: Int) -> String {
+        "\(count) matching \(count == 1 ? "place" : "places")"
+    }
+
     private var emptyStateSection: some View {
         Section {
             VStack(alignment: .leading, spacing: FeastTheme.Spacing.medium) {
@@ -275,17 +325,17 @@ struct FeastListDetailView: View {
     }
 
     @ViewBuilder
-    private var unsortedSection: some View {
-        if !unsortedSavedPlaces.isEmpty {
+    private func unsortedSection(_ places: [SavedPlace], isFiltered: Bool = false) -> some View {
+        if !places.isEmpty {
             Section {
-                ForEach(unsortedSavedPlaces) { place in
+                ForEach(places) { place in
                     SavedPlaceListRow(place: place)
                 }
             } header: {
                 NeighborhoodHeaderView(
                     title: "Unsorted",
                     kind: .unsorted,
-                    subtitle: "Places without a neighborhood"
+                    subtitle: isFiltered ? matchingPlaceCount(places.count) : "Places without a neighborhood"
                 ) {
                     EmptyView()
                 }
@@ -294,13 +344,14 @@ struct FeastListDetailView: View {
         }
     }
 
-    private func neighborhoodSection(_ neighborhood: ListSection) -> some View {
+    private func neighborhoodSection(_ neighborhood: ListSection, matchingPlaces: [SavedPlace]? = nil) -> some View {
         Section {
-            neighborhoodContent(neighborhood)
+            neighborhoodContent(neighborhood, matchingPlaces: matchingPlaces)
         } header: {
             NeighborhoodHeaderView(
                 title: neighborhood.displayName,
-                kind: .neighborhood
+                kind: .neighborhood,
+                subtitle: matchingPlaces.map { matchingPlaceCount($0.count) }
             ) {
                 Menu {
                     Button("Rename Neighborhood") {
@@ -324,8 +375,8 @@ struct FeastListDetailView: View {
     }
 
     @ViewBuilder
-    private func neighborhoodContent(_ neighborhood: ListSection) -> some View {
-        let places = savedPlacesByNeighborhoodID[neighborhood.objectID] ?? []
+    private func neighborhoodContent(_ neighborhood: ListSection, matchingPlaces: [SavedPlace]? = nil) -> some View {
+        let places = matchingPlaces ?? savedPlacesByNeighborhoodID[neighborhood.objectID] ?? []
 
         if places.isEmpty {
             EmptyNeighborhoodRow()

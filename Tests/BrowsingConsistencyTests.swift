@@ -3,6 +3,7 @@ import Foundation
 
 @MainActor enum BrowsingConsistencyTests {
     static func run(model: NSManagedObjectModel) async throws {
+        try CityFilteredPlaceGroupsTests.run(model: model)
         let coordinator = NSPersistentStoreCoordinator(managedObjectModel: model)
         try coordinator.addPersistentStore(ofType: NSInMemoryStoreType, configurationName: nil, at: nil)
         let context = NSManagedObjectContext(concurrencyType: .mainQueueConcurrencyType)
