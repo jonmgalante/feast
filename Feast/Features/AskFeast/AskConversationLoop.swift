@@ -153,14 +153,15 @@ enum AskConversationProjection {
         let references=recent.suffix(2).filter {item in !messages.contains {$0.role=="user" && $0.text==item.question}}.map {bounded("Earlier human request (reference only): "+$0.question)}
         return references+messages.suffix(6-references.count).map {bounded(($0.role=="user" ? "Human: " : "App context (not authorization): ")+$0.text)}
     }
-    static func messages(_ turns:[AskTurn])->[AskDialogueMessage] {
+    static func messages(_ turns:[AskTurn],fullCollection:Bool=false)->[AskDialogueMessage] {
         var messages:[AskDialogueMessage]=[]
         // Only new explicitly public projections are reusable. Legacy answers may contain
         // private local fields; keep their safe task IDs, not their raw prose.
         for turn in turns.suffix(100) where turn.status == .complete && turn.request.attachment==nil && !turn.request.fromOCR {
             let privateResult=turn.response?.agentTask?.privateSelection==true || turn.response?.libraryContext?.excludesExternalReferences==true
             var answer:String
-            if !privateResult,let publicText=turn.response?.publicConversationText {answer=publicText}
+            if fullCollection,let text=turn.response?.collectionConversationText {answer=text}
+            else if !privateResult,let publicText=turn.response?.publicConversationText {answer=publicText}
             else {
                 guard turn.response?.agentTask != nil || turn.response?.libraryContext != nil || !(turn.response?.collectionActions ?? []).isEmpty else{continue}
                 // Preserve the human's previously disclosed request, never the
@@ -173,7 +174,7 @@ enum AskConversationProjection {
                 let projected=proposal.changes.map {change in change.field+(["name","type","cuisines","website","instagram"].contains(change.field) ? "="+(change.value ?? change.values?.joined(separator:",") ?? "from retained finding") : " (local value omitted)")}.joined(separator:"; ")
                 answer += "\nEdit attempt (not permission): "+proposal.entity+" "+proposal.operation+", "+state+"; "+projected
             }
-            messages.append(.init(role:"user",text:privateResult ? omittedHuman : bounded(turn.request.text)))
+            messages.append(.init(role:"user",text:privateResult && !fullCollection ? omittedHuman : bounded(turn.request.text)))
             messages.append(.init(role:"assistant",text:bounded(answer)))
         }
         return messages
@@ -185,18 +186,33 @@ struct AskConversationLoop:Sendable {
     let execute:@Sendable (AskAgentReply.Call)async throws->AskAgentExecution
     var retainFindings:(@Sendable (AskAgentReply.Call,[AskRetainedResearch])async throws->AskAgentExecution)?=nil
     func answer(_ request:AskRequest,context:AskSemanticContext,cities:[AskAgentCity],findings:[AskAgentFinding])async throws->AskResponse {
-        let root=(AskProviderAttemptScope.lease?.attempt ?? request.performanceID ?? UUID()).uuidString,task=try request.agentTask?.checked().externalProjection
+        let fullCollection=context.collectionAccess=="permitted_details_v1"
+        let root=(AskProviderAttemptScope.lease?.attempt ?? request.performanceID ?? UUID()).uuidString,task=try request.agentTask?.checked().projection(fullCollection:fullCollection)
         var continuation:String?,result:AskConversationStep.Result?,latest:AskResponse?,ordered=request.agentTask?.orderedIDs ?? request.libraryContext?.ids ?? [],privateScope=(request.agentTask?.privateSelection==true || request.libraryContext?.excludesExternalReferences==true)
-        var privateHistory=false,currentPrivateTool=false,taskFields:[String]=[]
+        var privateHistory=false,currentPrivateTool=false,localOnlyTool=false,taskFields:[String]=[]
         var selectionIsOrdered=request.agentTask.map {$0.selectionIDs == nil} ?? (request.libraryContext?.selectionIDs == nil)
         if let membership=request.agentTask?.selectionIDs ?? request.libraryContext?.selectionIDs {ordered=membership}
         var available=availableCandidates
+        if fullCollection,let prior=request.collectionContinuation {for candidate in prior.candidates where available[candidate.id]==nil {available[candidate.id]=candidate}}
         var publicResearch=request.publicResearch
         let native=await planner.nativeResearchAvailable()
         var attemptedChange=false
         var unresolvedChanges=Set<String>()
         var citations:[AskWebCitation]=[],durableActions:[AskCollectionAction]=[],durableOutcomes:[AskAgentOutcome]=[]
         var operationRecords:[AskOperationRecord]=[]
+        func keepCollectionHistory(_ response:inout AskResponse,text:String) {
+            guard fullCollection else{return}
+            let nativeText=response.paragraphs.filter {$0.id != "conversation-answer"}.flatMap(\.spans).map {span->String in
+                switch span {case .text(let value):return value;case .place(let id):return "[[place:"+id+"]] "+(available[id]?.name ?? "Saved place")}
+            }.joined(separator:" ")
+            var paging=""
+            if let page=response.collectionPage {
+                let next=page.nextOffset.map {String($0)} ?? "none"
+                paging="\nCollection page: snapshot \(page.snapshot), returned \(page.returnedCount) of \(page.totalCount), nextOffset \(next)"
+            }
+            response.collectionConversationText=AskConversationProjection.bounded(text+"\n"+nativeText,units:1700)+paging
+            response.publicConversationText=nil
+        }
         func interrupted(_ error:Error)->AskResponse? {
             guard latest != nil || !publicResearch.isEmpty else{return nil}
             var response=latest ?? AskResponse(summary:"Public research was kept for your next message.",candidates:[],listedCandidateIDs:[],usesLocalCatalog:true)
@@ -206,6 +222,7 @@ struct AskConversationLoop:Sendable {
             if !durableActions.isEmpty {response.collectionActions=durableActions}
             response.agentTask = .init(action:attemptedChange || !durableActions.isEmpty ? "change" : "query",fields:taskFields,orderedIDs:selectionIsOrdered ? ordered : [],sourcePolicy:"public_if_missing",privateSelection:privateScope || privateHistory,outcomes:durableOutcomes.isEmpty ? nil : durableOutcomes,selectionIDs:selectionIsOrdered ? nil : ordered)
             response.publicConversationText=privateHistory || privateScope ? nil : "Unfinished task. "+(selectionIsOrdered ? "Saved result IDs: "+ordered.joined(separator:",")+". " : "The aggregate selection remains on device. ")+String(response.summary.prefix(1000))
+            keepCollectionHistory(&response,text:"Unfinished task. Continue from the saved page metadata.")
             return response
         }
         for step in 0..<12 {
@@ -213,7 +230,7 @@ struct AskConversationLoop:Sendable {
             let reply:AskConversationReply
             do {
                 var payload=AskConversationStep(requestID:root,step:step,text:request.text,context:context,cities:cities,task:task,findings:findings,history:Array(request.dialogue.suffix(12)),continuation:continuation,result:result,historyCount:request.dialogue.count)
-                if native {payload.version=10;payload.webAllowed = !currentPrivateTool;payload.turnID=(request.performanceID ?? UUID(uuidString:root)!).uuidString}
+                if native {payload.version=10;payload.webAllowed = (fullCollection || !currentPrivateTool) && !localOnlyTool;payload.turnID=(request.performanceID ?? UUID(uuidString:root)!).uuidString}
                 reply=try await planner.conversationStep(payload)
             }
             catch {
@@ -240,7 +257,7 @@ struct AskConversationLoop:Sendable {
                 }else if call.name=="search_web" {
                     // Prior private instruction contents are redacted from history.
                     // A private tool result in THIS task still cannot feed public search.
-                    guard !currentPrivateTool else {throw AskHostedError.answerRejected}
+                    guard (fullCollection || !currentPrivateTool) && !localOnlyTool else {throw AskHostedError.answerRejected}
                     struct Search:Decodable {let query:String}
                     let q=try JSONDecoder().decode(Search.self,from:Data(call.arguments.utf8))
                     let web:AskWebResearchResult
@@ -299,11 +316,21 @@ struct AskConversationLoop:Sendable {
                         // durable receipts, but require fresh reads for current details.
                         if (response.collectionActions ?? []).contains(where:{$0.state == .applied || $0.state == .undone}) {latest=nil}
                         for action in response.collectionActions ?? [] {if let i=durableActions.firstIndex(where:{$0.id==action.id}) {durableActions[i]=action}else{durableActions.append(action)}}
-                        latest=value.appendPreviousResults ? AskAgentLoop.merged(latest,response) : response
+                        let previousPage=latest ?? request.collectionContinuation
+                        if fullCollection,let page=response.collectionPage,let prior=previousPage?.collectionPage,page.snapshot==prior.snapshot,page.offset==prior.offset+prior.returnedCount,let previous=previousPage {
+                            var visiblePrevious=previous
+                            visiblePrevious.paragraphs.removeAll {$0.id=="conversation-interrupted" || $0.id=="conversation-limit"}
+                            var merged=AskAgentLoop.merged(visiblePrevious,response)
+                            merged.paragraphs.removeAll {paragraph in paragraph.spans.count==1 && {if case .text(let value)=paragraph.spans[0] {return value.hasPrefix("Showing ") && value.contains("matching saved")};return false}()}
+                            merged.collectionPage = .init(snapshot:page.snapshot,totalCount:page.totalCount,offset:prior.offset,returnedCount:prior.returnedCount+page.returnedCount,nextOffset:page.nextOffset)
+                            if let context=merged.libraryContext {merged.libraryContext = .init(ids:merged.candidates.map(\.id),filters:context.filters,excludesExternalReferences:true)}
+                            if let remaining=page.nextOffset {merged.paragraphs.append(.init(id:"collection-page",spans:[.text("Showing \(remaining) of \(page.totalCount) matching saved places. More results remain.")],sourceIDs:[]))}
+                            latest=merged
+                        } else {latest=value.appendPreviousResults ? AskAgentLoop.merged(latest,response) : response}
                     }
                     for outcome in value.outcomes ?? [] {if let i=durableOutcomes.firstIndex(where:{$0.id==outcome.id}) {durableOutcomes[i]=outcome}else{durableOutcomes.append(outcome)}}
                     if !durableActions.isEmpty {latest?.collectionActions=durableActions}
-                    ordered=value.orderedIDs;selectionIsOrdered=value.selectionIsOrdered;privateScope=value.selectionIsPrivate;privateHistory = privateHistory || value.selectionIsPrivate || value.output.localOnly;currentPrivateTool = currentPrivateTool || value.selectionIsPrivate || value.output.localOnly
+                    ordered=value.orderedIDs;selectionIsOrdered=value.selectionIsOrdered;privateScope=value.selectionIsPrivate;privateHistory = privateHistory || value.selectionIsPrivate || value.output.localOnly;currentPrivateTool = currentPrivateTool || value.selectionIsPrivate || value.output.localOnly;localOnlyTool = localOnlyTool || value.output.localOnly
                     var output=AskConversationToolResult(value.output)
                     output.presentation=value.presentation
                     if output.presentation==nil,call.name=="propose_changes" {output.presentation = .init(kind:"action",requestedFields:[],returnedFields:[],complete:value.output.complete,renderedLocally:true)}
@@ -334,13 +361,29 @@ struct AskConversationLoop:Sendable {
                 if latest==nil {response.paragraphs=[rendered]}else{response.paragraphs.insert(rendered,at:0)}
             }
             let references=rendered.spans.compactMap {span->String? in if case .place(let id)=span{return id};return nil}
-            if !references.isEmpty {selectionIsOrdered=true;ordered=references.reduce(into:[]) {if !$0.contains($1){$0.append($1)}}}
+            // A model-authored replacement list may own presentation only when
+            // every verified row appears exactly once. Otherwise the app keeps its complete list.
+            if fullCollection,let page=response.collectionPage,page.offset==0,page.nextOffset==nil,!references.isEmpty,references.count==response.candidates.count,Set(references)==Set(response.candidates.map(\.id)) {
+                response.paragraphs=[rendered]
+                let byID=Dictionary(uniqueKeysWithValues:response.candidates.map {($0.id,$0)})
+                response.candidates=references.compactMap {byID[$0]}
+                if let previous=response.libraryContext {response.libraryContext = .init(ids:references,filters:previous.filters,excludesExternalReferences:true)}
+                selectionIsOrdered=true;ordered=references
+            }
+            if !references.isEmpty && !(fullCollection && latest?.libraryContext?.filters.operation == .list) {selectionIsOrdered=true;ordered=references.reduce(into:[]) {if !$0.contains($1){$0.append($1)}}}
             response.agentTask = .init(action:attemptedChange || !durableActions.isEmpty ? "change" : "query",fields:taskFields,orderedIDs:selectionIsOrdered ? ordered : [],sourcePolicy:"public_if_missing",privateSelection:privateScope || privateHistory,outcomes:durableOutcomes.isEmpty ? nil : durableOutcomes,selectionIDs:selectionIsOrdered ? nil : ordered)
             let acknowledgements=durableActions.map {"action \($0.id.uuidString) \($0.entity) \($0.operation) \($0.state.rawValue) targets \($0.targetIDs.joined(separator:","))"}.joined(separator:"; ")
             response.publicConversationText=privateHistory || privateScope ? nil : (!unresolvedChanges.isEmpty ? "The requested change was not completed. Check its execution result before retrying." : reply.text)+(acknowledgements.isEmpty ? "" : "\nApp outcomes: "+acknowledgements)
+            keepCollectionHistory(&response,text:reply.text+"\n"+acknowledgements)
             return response
         }
-        if latest != nil || !publicResearch.isEmpty {var response=latest ?? AskResponse(summary:"Some work is unfinished.",candidates:[],listedCandidateIDs:[],usesLocalCatalog:true);response.publicResearch=Array(publicResearch.suffix(4));response.operationRecords=operationRecords.isEmpty ? nil : operationRecords;response.summary="Some work is unfinished.";response.paragraphs.append(.init(id:"conversation-limit",spans:[.text("Some work is unfinished. You can continue from the completed results.")],sourceIDs:[]));return response}
+        if var response=interrupted(AskHostedError.answerRejected) {
+            response.summary="Some work is unfinished."
+            response.paragraphs.removeAll {$0.id=="conversation-interrupted"}
+            response.paragraphs.append(.init(id:"conversation-limit",spans:[.text("Some work is unfinished. You can continue from the completed results.")],sourceIDs:[]))
+            keepCollectionHistory(&response,text:"Some work is unfinished. Continue from the saved page metadata.")
+            return response
+        }
         throw AskHostedError.answerRejected
     }
     static func paragraph(_ text:String,catalog:[AskSemanticContext.Record],available:[String:AskCandidate],candidates:inout[AskCandidate],citations:[AskWebCitation])->AskAnswerParagraph {

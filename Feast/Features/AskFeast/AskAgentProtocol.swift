@@ -14,18 +14,30 @@ struct AskAgentTask:Codable,Equatable,Sendable {
         let privateScope=privateSelection ?? (sourcePolicy=="local_only")
         return .init(action:action,fields:fields.filter {!["note","tags","status"].contains($0)},orderedIDs:privateScope ? [] : orderedIDs,sourcePolicy:sourcePolicy,privateSelection:privateScope,outcomes:privateScope ? nil : outcomes)
     }
+    func projection(fullCollection:Bool)->Self {
+        guard fullCollection else{return externalProjection}
+        return .init(action:action,fields:fields,orderedIDs:orderedIDs,sourcePolicy:sourcePolicy,privateSelection:false,outcomes:outcomes)
+    }
     func checked()throws->Self {
-        guard ["query","research","change"].contains(action),["stored_only","public_if_missing","local_only"].contains(sourcePolicy),fields.count<=11,orderedIDs.count<=200,Set(orderedIDs).count==orderedIDs.count,orderedIDs.allSatisfy({UUID(uuidString:$0) != nil}) else {throw AskError.invalidEvidence}
+        guard ["query","research","change"].contains(action),["stored_only","public_if_missing","local_only"].contains(sourcePolicy),fields.count<=11,orderedIDs.count<=AskCollectionPage.maximumRenderedRecords,Set(orderedIDs).count==orderedIDs.count,orderedIDs.allSatisfy({UUID(uuidString:$0) != nil}) else {throw AskError.invalidEvidence}
         if let selectionIDs {guard orderedIDs.isEmpty,Set(selectionIDs).count==selectionIDs.count,selectionIDs.allSatisfy({UUID(uuidString:$0) != nil}) else{throw AskError.invalidEvidence}}
         return self
     }
 }
-struct AskAgentRecord:Codable,Equatable,Sendable {let id,name,city:String;let cuisines:[String];let kind:String;var detail:String?=nil}
+struct AskAgentRecord:Codable,Equatable,Sendable {
+    let id,name,city:String;let cuisines:[String];let kind:String;var detail:String?=nil
+    var neighborhood:String?=nil,status:String?=nil,placeType:String?=nil,note:String?=nil,tags:[String]?=nil,website:String?=nil,instagram:String?=nil
+    static func collection(_ record:AskPersonalPlace)->Self {
+        .init(id:record.id,name:record.name,city:record.city,cuisines:record.cuisines,kind:"place",neighborhood:record.neighborhood,status:record.status,placeType:record.type,note:record.note,tags:record.tags,website:record.websiteURL,instagram:record.instagramURL)
+    }
+}
 struct AskAgentFinding:Codable,Equatable,Sendable {let id,recordID,field,value,sourceURL:String}
 struct AskAgentResult:Codable,Equatable,Sendable {
     let status:String,complete:Bool,totalCount:Int
     let records:[AskAgentRecord],findings:[AskAgentFinding]
     let message:String,localOnly:Bool
+    var offset:Int?=nil,returnedCount:Int?=nil,nextOffset:Int?=nil
+    var snapshot:String?=nil,summary:String?=nil
     static func localPrivate(complete:Bool=true)->Self {.init(status:"local_only",complete:complete,totalCount:0,records:[],findings:[],message:"private_result",localOnly:true)}
 }
 struct AskAgentReply:Decodable,Sendable {

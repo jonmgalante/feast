@@ -23,7 +23,7 @@ import CoreData
     @Published var savedMessage: String?
     @Published var savedCandidates: [AskSavedCandidateKey: String] = [:]
     @Published var savedRecordIDs: [AskSavedCandidateKey: String] = [:]
-    /// Rebuild only the approved, metadata-only evidence before each send. No notes or local status fields.
+    /// Rebuild the legacy hosted-answer metadata projection. Rich conversation tools use their separate consented scope.
     func approveHosted(_ request: AskRequest, evidence: AskEvidence, exactSelection:Bool = false) async -> Bool {
         guard request.mode == .collection, !request.fromOCR, !Task.isCancelled else { return false }
         do {
@@ -109,6 +109,7 @@ import CoreData
         if publicBusinessAvailable {libraryToolsVersion=4}
         if info["agentProtocolVersion"] as? Int == 8,info["agentToolsEnabled"] as? Bool == true {libraryToolsVersion=5}
         if (info["agentProtocolVersions"] as? [Int])?.contains(9)==true,info["agentToolsEnabled"] as? Bool == true {libraryToolsVersion=6}
+        if libraryToolsVersion>=6,info["collectionContextVersion"] as? Int==1 {libraryToolsVersion=7}
     }
     func refreshSavedCollection() throws {
         guard let savedCollection else { throw AskError.invalidEvidence }

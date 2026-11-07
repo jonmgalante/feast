@@ -226,6 +226,8 @@ struct AskPersonalPlace: Equatable, Sendable {
     var websiteURL:String? = nil
     var instagramURL:String? = nil
     var applePlaceID:String? = nil
+    var note:String? = nil
+    var tags:[String]? = nil
 }
 
 struct AskWebCitation: Codable, Equatable, Sendable {
@@ -421,7 +423,7 @@ struct AskLibraryProvider: AskFeastProvider {
                 return answer
             }
             if plan.operation == .answer, result.status == .success, !result.records.isEmpty {
-                // Synthesis uses the existing approved metadata projection only. Preferences/notes never leave device.
+                // Legacy synthesis keeps its metadata-only projection; rich conversation tools use a separate consented path.
                 guard result.records.count <= 6 else {
                     return try AskLibraryReadTools.response(.init(status: .ambiguous, records: result.records, appliedFilters: plan, totalCount: result.totalCount, complete: result.complete, cities: result.cities), tools: tools)
                 }

@@ -12,11 +12,12 @@ enum AskPublicLinks {
 
 enum AskPrivacy {
     // A new provider or materially broader payload requires a new scope key and fresh user consent.
-    static let onlineKey = "AskFeast.onlinePermission.cloudflare-openai.catalog-public-dialogue-selected-images.v4"
+    static let onlineKey = "AskFeast.onlinePermission.cloudflare-openai.permitted-collection-dialogue-selected-images.v5"
+    // Do not migrate older permission values: collection notes and shared content need fresh consent.
     static func accept() { UserDefaults.standard.set(true,forKey:onlineKey) }
     static func withdraw() { UserDefaults.standard.set(false,forKey:onlineKey) }
     static var onlineAllowed: Bool { UserDefaults.standard.bool(forKey: onlineKey) }
-    static let disclosure = "Your question, a compact index of saved-place names, cities and cuisines, a limited recent conversation with relevant public findings and place references, and images you attach pass through Cloudflare to OpenAI. Notes, tags, saved statuses and unselected photos aren’t sent to these AI services."
+    static let disclosure = "To answer your questions, Feast sends your questions, recent conversation, chosen images and relevant collection details to OpenAI through Cloudflare. Details include place names, cities, neighborhoods, categories, cuisines, statuses, tags and notes, including notes others shared in collections you can access. Relevant note details may also be sent to search providers or public sites, which may retain queries."
 }
 
 /// Release configuration is nonsecret bundle metadata, never a hardcoded development token.

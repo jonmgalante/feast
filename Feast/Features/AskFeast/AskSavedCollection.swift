@@ -1,7 +1,7 @@
 import CoreData
 import Foundation
 
-/// Reads approved persisted metadata only. Never faults SavedPlace objects/notes into the AI path.
+/// Reads only currently visible cities. Rich fields are fetched on demand after capability and consent gates.
 @MainActor final class AskSavedCollection {
     let context: NSManagedObjectContext
     let canMutate:(String,NSManagedObjectID?,String) -> Bool
@@ -25,7 +25,7 @@ import Foundation
     func librarySnapshot() throws -> AskLibrarySnapshot { try readCollection(visible:visibleCities()).snapshot }
     /// One uncapped metadata fetch supplies both the local catalog and evidence index.
     /// Invalid rows stay in the stored total; neither duplicate identity is eligible.
-    private func readCollection(visible:Set<UUID>) throws -> (snapshot:AskLibrarySnapshot,cityIDs:[String:String]) {
+    private func readCollection(visible:Set<UUID>,includeDetails:Bool=false) throws -> (snapshot:AskLibrarySnapshot,cityIDs:[String:String]) {
         let cities=NSFetchRequest<NSDictionary>(entityName:"FeastList")
         cities.resultType = .dictionaryResultType;cities.includesPendingChanges=false;cities.propertiesToFetch=["id","name"]
         cities.predicate=NSPredicate(format:"id IN %@",Array(visible) as NSArray)
@@ -38,6 +38,7 @@ import Foundation
         let fetch=NSFetchRequest<NSDictionary>(entityName:"SavedPlace")
         fetch.resultType = .dictionaryResultType;fetch.includesPendingChanges=false
         fetch.propertiesToFetch=["id","displayNameSnapshot","cuisinesStorage","status","placeType","feastList.id","feastList.name","listSection.name","websiteURL","instagramURL","applePlaceID"]
+        if includeDetails {fetch.propertiesToFetch! += ["note","tagsStorage"]}
         fetch.predicate=NSPredicate(format:"feastList.id IN %@",Array(visible) as NSArray)
         let rows=try context.fetch(fetch)
         var places:[AskPersonalPlace]=[],unavailable:[String?]=[],cityIDs:[String:String]=[:]
@@ -46,7 +47,7 @@ import Foundation
             guard let cityID=row["feastList.id"] as? UUID,safeCityIDs.contains(cityID) else{unavailable.append(nil);continue}
             guard let id=row["id"] as? UUID,let name=row["displayNameSnapshot"] as? String else {unavailable.append(city.utf16.count<=200 ? city : nil);continue}
             let cuisines=(row["cuisinesStorage"] as? String ?? "").split(separator:"\n").map {$0.trimmingCharacters(in:.whitespacesAndNewlines)}.filter {!$0.isEmpty}
-            places.append(.init(id:id.uuidString,name:name,status:row["status"] as? String,type:row["placeType"] as? String,cuisines:cuisines,city:city,neighborhood:row["listSection.name"] as? String ?? "",websiteURL:row["websiteURL"] as? String,instagramURL:row["instagramURL"] as? String,applePlaceID:row["applePlaceID"] as? String))
+            places.append(.init(id:id.uuidString,name:name,status:row["status"] as? String,type:row["placeType"] as? String,cuisines:cuisines,city:city,neighborhood:row["listSection.name"] as? String ?? "",websiteURL:row["websiteURL"] as? String,instagramURL:row["instagramURL"] as? String,applePlaceID:row["applePlaceID"] as? String,note:includeDetails ? row["note"] as? String : nil,tags:includeDetails ? (row["tagsStorage"] as? String ?? "").split(separator:"\n").map(String.init) : nil))
             cityIDs[id.uuidString]=cityID.uuidString
         }
         let names=safeCities.compactMap {$0["name"] as? String}
@@ -55,8 +56,8 @@ import Foundation
     func index() throws -> AskLocalIndex { try readView().index }
     /// Fresh, operation-local reads only. Never retain this view across an await,
     /// an edit, or another request: permissions and stored values must be re-read.
-    func readView() throws -> (snapshot: AskLibrarySnapshot, index: AskLocalIndex) {
-        let visible=try visibleCities(),reading=try readCollection(visible:visible),snapshot=reading.snapshot
+    func readView(includeDetails:Bool=false) throws -> (snapshot: AskLibrarySnapshot, index: AskLocalIndex) {
+        let visible=try visibleCities(),reading=try readCollection(visible:visible,includeDetails:includeDetails),snapshot=reading.snapshot
         let records=snapshot.places.compactMap {place->AskCollectionRecord? in
             guard let cityID=reading.cityIDs[place.id] else{return nil}
             return .init(id:place.id,cityID:cityID,city:"",name:place.name,neighborhood:"",cuisine:String(place.cuisines.joined(separator:", ").prefix(500)),status:"",notes:[])

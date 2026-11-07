@@ -1,3 +1,4 @@
+import {richCollection} from './collection-context.mjs';
 import {nativeAccountingAdapter} from './native-accounting.mjs';
 // Gated native execution. Provider-controlled spend: estimates are not dollar ceilings.
 import {NATIVE_RESEARCH,nativeRequestModel,nativeContinuation,nativeBody,checkedNativeItem,encodeNativeFrame,nativeEvidence,nativeDigest} from './native-research.mjs';
@@ -45,7 +46,7 @@ export async function nativeConversationAnswer(p,userHash,env,send=fetch,depende
   if(validUsage&&['completed','incomplete'].includes(value.status)&&Array.isArray(value.output)&&value.output.every(i=>knownTypes.includes(i?.type))&&rawWeb.every(i=>i.status==='completed')&&rawWeb.length<=remaining)verifiedBill={model,inputTokens:value.usage.input_tokens,outputTokens:value.usage.output_tokens,webCalls:rawWeb.length};
   if(value.status!=='completed'||!validUsage||!Array.isArray(value.output)||value.output.length>NATIVE_RESEARCH.maxItems)throw Error('native_response_unverified');
   if(value.output.some(i=>i.type==='function_call_output'))throw Error('native_provider_tool_output');
-  const output=value.output.map(item=>checkedNativeItem(item,p.text)),web=output.filter(i=>i.type==='web_search_call'),calls=output.filter(i=>i.type==='function_call');
+  const output=value.output.map(item=>checkedNativeItem(item,p.text,richCollection(p))),web=output.filter(i=>i.type==='web_search_call'),calls=output.filter(i=>i.type==='function_call');
   if(calls.length>1||web.length>remaining||(!state.webAllowed&&web.length)||new Set(web.map(x=>x.id)).size!==web.length)throw Error('native_tool_limit');
   const oldWeb=new Set(state.frame.records.filter(r=>r.item.type==='web_search_call').map(r=>r.item.id));if(web.some(x=>oldWeb.has(x.id)))throw Error('native_duplicate_web_action');
   const at=new Date().toISOString(),records=[...state.frame.records,...output.map(item=>({observedAt:at,item}))];if(records.length>NATIVE_RESEARCH.maxItems)throw Error('native_context_limit');
@@ -55,7 +56,7 @@ export async function nativeConversationAnswer(p,userHash,env,send=fetch,depende
   const text=selected.flatMap(i=>i.content.filter(c=>c.type==='output_text'||c.type==='refusal').map(c=>c.text??c.refusal)).join('\n');if(text.length>16000||!calls.length&&!text.trim()&&!state.frame.records.some(r=>r.item.type==='function_call_output'))throw Error('native_final_answer_shape');
   const finalCitations=[];for(const m of selected)for(const c of m.content)for(const a of c.annotations??[])if(!finalCitations.some(x=>x.url===a.url))finalCitations.push({title:a.title,url:a.url});
   if(finalCitations.length>20)throw Error('native_final_citation_limit');
-  const call=calls.length?checkedConversationCall(calls[0],p.text):null;
+  const call=calls.length?checkedConversationCall(calls[0],p.text,richCollection(p)):null;
   const frameDigest=await nativeDigest(continuation);
   settlementAttempted=true;
   const budget=await metrics.measure('ledger',()=>accounting.complete(reservation,{...verifiedBill,frameDigest,privateLatched:state.privateLatched,attemptWebActionsUsed:state.webActions+web.length}));

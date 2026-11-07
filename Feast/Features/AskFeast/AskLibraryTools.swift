@@ -10,6 +10,8 @@ struct AskSemanticContext: Codable, Equatable, Sendable {
     let recent:[AskRecentUserQuestion]
     // Omitted by older clients, whose catalogs were necessarily complete.
     var indexComplete:Bool? = nil
+    var collectionAccess:String? = nil
+    var totalCount:Int? = nil
     static let maximumIndexBytes = 24_000
     static func recentQuestions(_ turns:[AskTurn]) -> [AskRecentUserQuestion] {
         turns.filter {$0.status == .complete && $0.readContextMode == .collection && !$0.request.fromOCR && $0.request.attachment == nil && ($0.response?.collectionActions ?? []).isEmpty && $0.response?.agentTask?.fields.contains(where:{["note","tags","status"].contains($0)}) != true}.suffix(2).map { turn in
@@ -20,14 +22,14 @@ struct AskSemanticContext: Codable, Equatable, Sendable {
             return .init(question:turn.request.text,recordIDs:ids)
         }
     }
-    static func make(_ request:AskRequest,catalog:AskLibrarySnapshot) throws -> Self {
+    static func make(_ request:AskRequest,catalog:AskLibrarySnapshot,fullCollection:Bool=false) throws -> Self {
         guard request.recentQuestions.count <= 2,request.recentQuestions.allSatisfy({$0.question.utf16.count <= 4000 && $0.recordIDs.count <= 6 && Set($0.recordIDs).count == $0.recordIDs.count}) else {throw AskError.inputLimit}
         let safe = catalog.sanitized()
         let recentBytes=try JSONEncoder().encode(request.recentQuestions).count
-        var records:[Record]=[],bytes=2+recentBytes
+        var records:[Record]=[],bytes=512+recentBytes
         // Stable public metadata only: private filters/selections never choose the sample.
         for place in safe.places.sorted(by:{$0.id < $1.id}) {
-            guard records.count < 200 else {break}
+            if !fullCollection && records.count >= 200 {break}
             let record=Record(id:place.id,name:place.name,city:place.city,cuisines:place.cuisines)
             let size=try JSONEncoder().encode(record).count + 1
             guard bytes+size <= maximumIndexBytes else {continue}
@@ -36,7 +38,7 @@ struct AskSemanticContext: Codable, Equatable, Sendable {
         let ids=Set(records.map(\.id))
         // Deleted/revoked references are omitted from model input; the local tool still detects stale scope.
         let recent=request.recentQuestions.map {AskRecentUserQuestion(question:$0.question,recordIDs:$0.recordIDs.filter {ids.contains($0)})}
-        return .init(index:records,recent:recent,indexComplete:safe.complete && safe.cityCatalogComplete && records.count == safe.places.count ? nil : false)
+        return .init(index:records,recent:recent,indexComplete:safe.complete && safe.cityCatalogComplete && records.count == safe.places.count ? nil : false,collectionAccess:fullCollection ? "permitted_details_v1" : nil,totalCount:fullCollection ? safe.totalCount : nil)
     }
 }
 
@@ -56,17 +58,23 @@ struct AskLibraryPlan: Codable, Equatable, Sendable {
     var neighborhood: String? = nil
     var groupBy: String? = nil
     var names: [String]? = nil
+    var offset:Int? = nil
+    var limit:Int? = nil
+    var searchText:String? = nil
+    var tag:String? = nil
+    var snapshot:String? = nil
     func validated() throws -> Self {
-        guard [city,cuisine,name,neighborhood].allSatisfy({ $0 == nil || (!$0!.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0!.count <= 200) }),
+        guard [city,cuisine,name,neighborhood,searchText,tag].allSatisfy({ $0 == nil || (!$0!.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0!.count <= 200) }),
               status == nil || ["Want to try","Just opened","Been","Love","Regulars","untried"].contains(status!),
               placeType == nil || ["Restaurant","Cafe","Bakery","Bar","Dessert","Market","Other"].contains(placeType!),
-              positions.count <= 200, Set(positions).count == positions.count, positions.allSatisfy({ (1...200).contains($0) }),
-              fields.count <= (operation == .lookup ? 4 : 9), Set(fields).count == fields.count,
-              fields.allSatisfy({ (operation == .lookup ? AskBusinessRequest.allowedFields : ["city","neighborhood","address","cuisine","status","type","name","website","instagram"]).contains($0) }),
+              positions.count <= 200, Set(positions).count == positions.count, positions.allSatisfy({ (1...AskCollectionPage.maximumRenderedRecords).contains($0) }),
+              fields.count <= (operation == .lookup ? 4 : 11), Set(fields).count == fields.count,
+              fields.allSatisfy({ (operation == .lookup ? AskBusinessRequest.allowedFields : ["city","neighborhood","address","cuisine","status","type","name","website","instagram","note","tags"]).contains($0) }),
               (groupBy == nil ? operation != .group : ["city","neighborhood","cuisine","status","type"].contains(groupBy!)),
               names == nil || ((1...200).contains(names!.count) && Set(names!).count == names!.count && names!.allSatisfy({!$0.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty && $0.count <= 200}) && name == nil) else { throw AskError.invalidEvidence }
         if operation == .updateField {guard fields == ["instagram"],status == nil,placeType == nil,neighborhood == nil,cuisine == nil,names == nil,positions.count <= 1 else {throw AskError.invalidEvidence}}
         if operation == .lookup {guard !fields.isEmpty,status == nil,placeType == nil,neighborhood == nil,cuisine == nil,names == nil,positions.count<=1 else {throw AskError.invalidEvidence}}
+        guard offset == nil || offset! >= 0,limit == nil || (1...200).contains(limit!),snapshot == nil || (snapshot!.count==64 && snapshot!.allSatisfy(\.isHexDigit)) else {throw AskError.invalidEvidence}
         var normalized = self
         normalized.city = city?.trimmingCharacters(in: .whitespacesAndNewlines)
         normalized.cuisine = cuisine?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -133,12 +141,12 @@ struct AskLibraryToolResult: Sendable {
     var excludesExternalReferences=false
 }
 enum AskLibraryReadTools {
-    static func execute(_ supplied: AskLibraryPlan, snapshot: AskLibrarySnapshot, context: AskLibraryContext?,requireUniqueDetails:Bool=true) throws -> AskLibraryToolResult {
+    static func execute(_ supplied: AskLibraryPlan, snapshot: AskLibrarySnapshot, context: AskLibraryContext?,requireUniqueDetails:Bool=true,allowLargeResults:Bool=false) throws -> AskLibraryToolResult {
         var plan = try supplied.validated()
         let snapshot=snapshot.sanitized(),all = snapshot.places
         if let context {
             let selection = context.selectionIDs ?? context.ids
-            guard context.ids.count <= 200,Set(context.ids).count == context.ids.count,Set(selection).count == selection.count,Set(context.ids).isSubset(of:Set(selection)) else { throw AskError.invalidEvidence }
+            guard context.ids.count <= (allowLargeResults ? AskCollectionPage.maximumRenderedRecords : 200),Set(context.ids).count == context.ids.count,Set(selection).count == selection.count,Set(context.ids).isSubset(of:Set(selection)) else { throw AskError.invalidEvidence }
         }
         func result(_ status: AskLibraryToolResult.Status, _ records: [AskPersonalPlace]) -> AskLibraryToolResult {
             var value=AskLibraryToolResult(status: status, records: records, appliedFilters: plan, totalCount: records.count, complete: snapshot.complete(in:plan.city), cities: snapshot.cities)
@@ -169,6 +177,16 @@ enum AskLibraryReadTools {
                 var ambiguous=result(.ambiguous,[]);ambiguous.clarification="Which saved city do you mean: " + names.joined(separator:", ") + "?";return ambiguous
             }
         }
+        if let search=plan.searchText {
+            records=records.filter {record in
+                var values=[record.name,record.city,record.neighborhood]
+                values += [record.note ?? "",record.status ?? "",record.type ?? ""]
+                values += record.cuisines
+                values += record.tags ?? []
+                return values.contains {$0.range(of:search,options:[.caseInsensitive,.diacriticInsensitive]) != nil}
+            }
+        }
+        if let tag=plan.tag {records=records.filter {($0.tags ?? []).contains {AskCityIdentity.key($0)==AskCityIdentity.key(tag)}}}
         if let neighborhood = plan.neighborhood { records=records.filter {AskCityIdentity.key($0.neighborhood) == AskCityIdentity.key(neighborhood)} }
         if let cuisine = plan.cuisine { records = records.filter { $0.cuisines.contains(where: { $0.caseInsensitiveCompare(cuisine) == .orderedSame }) } }
         if let type = plan.placeType { records = records.filter { $0.type?.caseInsensitiveCompare(type) == .orderedSame } }
@@ -197,9 +215,9 @@ enum AskLibraryReadTools {
             records=plan.positions.map {shown[$0-1]}
         }
         if !snapshot.complete(in:plan.city) { return result(.partial,records) }
-        if ![.count,.group].contains(plan.operation),records.count > 200 {return result(.limited,records)}
+        if !allowLargeResults,![.count,.group].contains(plan.operation),records.count > 200 {return result(.limited,records)}
         if requireUniqueDetails && plan.operation == .details && records.count > 1 { return result(.ambiguous, records) }
-        if plan.operation == .compare && !(2...(requireUniqueDetails ? 6 : 200)).contains(records.count) { return result(.ambiguous, records) }
+        if plan.operation == .compare && !(2...(requireUniqueDetails ? 6 : (allowLargeResults ? Int.max : 200))).contains(records.count) { return result(.ambiguous, records) }
         return result(.success, records)
     }
     static func response(_ result: AskLibraryToolResult, tools: AskReadTools) throws -> AskResponse {
@@ -277,6 +295,8 @@ enum AskLibraryReadTools {
                     case "type": return record.type ?? "Category isn’t recorded"
                     case "website": return record.websiteURL.flatMap {InstagramWebsiteClient.websiteURL($0)} == nil ? "Website isn’t saved" : "Website saved"
                     case "instagram": return record.instagramURL.flatMap {InstagramWebsiteParser.profileURL($0)} == nil ? "Instagram isn’t saved" : "Instagram saved"
+                    case "note": return record.note.flatMap {$0.isEmpty ? nil : $0}
+                    case "tags": return record.tags.flatMap {$0.isEmpty ? nil : $0.joined(separator:", ")}
                     case "status": return record.status.map { "Marked " + $0 } ?? "Status isn’t recorded"
                     default: return nil
                     }

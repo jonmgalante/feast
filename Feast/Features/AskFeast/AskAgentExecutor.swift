@@ -8,6 +8,7 @@ import CryptoKit
     let researcher:any AskBusinessResearching
     let searchMaps:(String) async throws->[ApplePlaceMatch]
     let resolveMaps:@MainActor @Sendable (String) async throws -> ApplePlaceMatch?
+    let fullCollectionContext:Bool
     private var prepared:[(AskAgentPermission,[String])]=[]
     private var conversationalReplacement=false
     private var conversationalExecution=false
@@ -29,8 +30,10 @@ import CryptoKit
     private var researchFieldOrder:[String]=[]
     private var retainedPublicKeys=Set<String>()
     private var createdCities:[String:String]=[:]
+    private var collectionPageProgress:[String:Int]=[:]
     private var readContexts:[NSManagedObjectContext]=[]
-    init(adapter:AskSavedCollection,engine:AskCollectionChangeEngine,request:AskRequest,researcher:any AskBusinessResearching,searchMaps:@escaping (String)async throws->[ApplePlaceMatch],resolveMaps:@escaping @MainActor @Sendable (String)async throws->ApplePlaceMatch? = {_ in nil}) {
+    init(adapter:AskSavedCollection,engine:AskCollectionChangeEngine,request:AskRequest,researcher:any AskBusinessResearching,searchMaps:@escaping (String)async throws->[ApplePlaceMatch],resolveMaps:@escaping @MainActor @Sendable (String)async throws->ApplePlaceMatch? = {_ in nil},fullCollectionContext:Bool=false) {
+        self.fullCollectionContext=fullCollectionContext
         self.adapter=adapter;self.engine=engine;self.request=request;self.researcher=researcher;self.searchMaps=searchMaps;self.resolveMaps=resolveMaps
         humanReferenceSelection=request.agentTask?.selectionIDs ?? request.agentTask?.orderedIDs ?? request.libraryContext?.selectionIDs ?? request.libraryContext?.ids ?? []
         humanReferenceIsOrdered=request.agentTask.map {$0.selectionIDs == nil} ?? (request.libraryContext?.selectionIDs == nil)
@@ -38,6 +41,7 @@ import CryptoKit
         selection=humanReferenceSelection;selectionIsPrivate=(request.agentTask?.privateSelection ?? (request.agentTask?.sourcePolicy=="local_only")) || request.libraryContext?.excludesExternalReferences==true;findings=request.verifiedFindings
         maps=Dictionary(request.mapChoices.map {($0.id,$0.match)},uniquingKeysWith:{$1})
         mapsQuery=request.mapChoices.first?.query
+        if let page=request.collectionContinuation?.collectionPage,page.offset==0 {collectionPageProgress[page.snapshot]=page.returnedCount}
 
     }
     /// Per-operation optimistic concurrency guard, local only and never serialized
@@ -74,6 +78,11 @@ import CryptoKit
         let values=try reader.fetch(fetch).filter {$0.id.map(ids.contains)==true}
         let groups=Dictionary(grouping:values,by:{$0.id})
         return values.compactMap {city in guard let id=city.id,groups[id]?.count==1,let name=city.name,!name.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty,name.utf16.count<=200 else{return nil};return .init(id:id.uuidString,name:name)}.sorted {$0.id<$1.id}
+    }
+    func permittedRecordIDs()throws->Set<String> {
+        var ids=Set<String>()
+        for entity in ["city","neighborhood","place"] {for object in try objects(entity) {if let id=object.value(forKey:"id") as? UUID {ids.insert(id.uuidString)}}}
+        return ids
     }
     private func objects(_ entity:String)throws->[NSManagedObject] {
         let ids=try adapter.visibleCities(),name=entity=="city" ? "FeastList" : entity=="neighborhood" ? "ListSection" : "SavedPlace"
@@ -394,9 +403,119 @@ import CryptoKit
         default:throw AskError.invalidEvidence
         }
     }
+    /// On-demand, permission-checked rich reads. A page is a transport budget, not a collection cap.
+    /// The fingerprint pins membership, order AND current values across successive pages.
+    private func collectionQuery(_ entity:String,plan:AskLibraryPlan,selectionIDs:[String]?)throws->AskAgentExecution {
+        _ = try plan.validated()
+        let offset=plan.offset ?? 0,limit=plan.limit ?? 200
+        let aggregate=[AskLibraryPlan.Operation.count,.group,.catalog].contains(plan.operation)
+        let view=try adapter.readView(includeDetails:true)
+        var matched:[AskPersonalPlace]=[],result:AskLibraryToolResult?
+        if entity=="place" {
+            let selected=selectionIDs ?? (plan.scope == .previous ? selection : nil)
+            if let selected {guard Set(selected).count==selected.count,Set(selected).isSubset(of:Set(view.snapshot.places.map(\.id))) else{return .init(output:.init(status:"stale",complete:false,totalCount:0,records:[],findings:[],message:"target_mismatch",localOnly:false),response:plain("Those results have changed. Ask for the list again."),orderedIDs:[],selectionIsOrdered:false)}}
+            let context=selected.map {AskLibraryContext(ids:selectionIsOrdered && $0.count<=AskCollectionPage.maximumRenderedRecords ? $0 : [],filters:plan,selectionIDs:$0)}
+            let filtered=selected.map {ids in AskLibrarySnapshot(places:view.snapshot.places.filter {ids.contains($0.id)},totalCount:ids.count,cityNames:view.snapshot.cityNames)} ?? view.snapshot
+            result=try AskLibraryReadTools.execute(plan,snapshot:filtered,context:context,requireUniqueDetails:false,allowLargeResults:true)
+            guard result!.status == .success else {
+                return .init(output:.init(status:result!.status == .stale ? "stale" : result!.status == .ambiguous ? "ambiguous" : "partial",complete:false,totalCount:result!.totalCount,records:[],findings:[],message:"unavailable",localOnly:false),response:try AskLibraryReadTools.response(result!,tools:AskReadTools(request:request.collectionReadVersion(),index:view.index)),orderedIDs:[],selectionIsOrdered:false)
+            }
+            matched=result!.records
+        } else {
+            guard ["city","neighborhood"].contains(entity),![.compare,.group,.catalog].contains(plan.operation) else{throw AskError.invalidEvidence}
+            var values=try objects(entity)
+            if let selected=selectionIDs ?? (plan.scope == .previous ? selection : nil) {
+                let available=Set(values.compactMap {($0.value(forKey:"id") as? UUID)?.uuidString})
+                guard Set(selected).count==selected.count,Set(selected).isSubset(of:available) else{throw AskChangeError.missing}
+                values=values.filter {($0.value(forKey:"id") as? UUID).map {selected.contains($0.uuidString)}==true}
+            }
+            for object in values {
+                guard let id=object.value(forKey:"id") as? UUID,let name=object.value(forKey:"name") as? String else{throw AskError.invalidEvidence}
+                let city=entity=="city" ? name : (object.value(forKey:"feastList") as? FeastList)?.displayName ?? ""
+                matched.append(.init(id:id.uuidString,name:name,status:nil,type:nil,cuisines:[],city:city,neighborhood:entity=="neighborhood" ? name : ""))
+            }
+            if let city=plan.city {
+                switch AskCityIdentity.resolve(city,available:view.snapshot.cities) {
+                case .matched(let canonical):matched=matched.filter {AskCityIdentity.key($0.city)==AskCityIdentity.key(canonical)}
+                case .missing:matched=[]
+                case .ambiguous:return .init(output:.init(status:"ambiguous",complete:false,totalCount:0,records:[],findings:[],message:"ambiguous",localOnly:false),response:plain("Which saved city do you mean?"),orderedIDs:[],selectionIsOrdered:false)
+                }
+            }
+            if let name=plan.name {matched=matched.filter {AskCityIdentity.key($0.name)==AskCityIdentity.key(name)}}
+            if let search=plan.searchText {matched=matched.filter {$0.name.range(of:search,options:[.caseInsensitive,.diacriticInsensitive]) != nil}}
+            matched.sort {$0.name == $1.name ? $0.id<$1.id : $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending}
+            if let names=plan.names {
+                var selected:[AskPersonalPlace]=[]
+                for name in names {let matches=matched.filter {AskCityIdentity.key($0.name)==AskCityIdentity.key(name)};guard matches.count==1 else{throw AskError.invalidEvidence};selected.append(matches[0])}
+                matched=selected
+            }
+            if !plan.positions.isEmpty {
+                guard plan.scope == .previous,selectionIsOrdered else{throw AskError.invalidEvidence}
+                let ordered=selection.compactMap {id in matched.first {$0.id==id}}
+                guard plan.positions.allSatisfy({$0<=ordered.count}) else{throw AskError.invalidEvidence}
+                matched=plan.positions.map {ordered[$0-1]}
+            }
+            guard plan.status==nil,plan.placeType==nil,plan.cuisine==nil,plan.tag==nil else{throw AskError.invalidEvidence}
+        }
+        let records=matched.map {record->AskAgentRecord in
+            if entity=="place" {
+                var value=AskAgentRecord.collection(record)
+                if aggregate || (!plan.fields.contains("note") && !(plan.fields.isEmpty && [.details,.compare,.answer].contains(plan.operation))) {value.note=nil}
+                if aggregate || (!plan.fields.contains("tags") && !(plan.fields.isEmpty && [.details,.compare,.answer].contains(plan.operation))) {value.tags=nil}
+                return value
+            }
+            return .init(id:record.id,name:record.name,city:record.city,cuisines:[],kind:entity,neighborhood:entity=="neighborhood" ? record.neighborhood : nil)
+        }
+        let encoder=JSONEncoder();encoder.outputFormatting=[.sortedKeys]
+        let fingerprint=SHA256.hash(data:try encoder.encode(records)).map {String(format:"%02x",$0)}.joined()
+        guard offset<=records.count,(offset==0 || plan.snapshot==fingerprint),(plan.snapshot==nil || plan.snapshot==fingerprint) else {
+            return .init(output:.init(status:"stale",complete:false,totalCount:records.count,records:[],findings:[],message:"target_mismatch",localOnly:false),response:plain("The collection changed while reading these results. Ask for the list again to get a complete current answer."),orderedIDs:[],selectionIsOrdered:false)
+        }
+        if aggregate {
+            let response:AskResponse
+            if let result {response=try AskLibraryReadTools.response(result,tools:AskReadTools(request:request.collectionReadVersion(),index:view.index))}
+            else {response=plain("\(records.count) saved \(entity == "city" ? "cities" : "neighborhoods").")}
+            let summary=response.paragraphs.flatMap(\.spans).compactMap {if case .text(let value)=$0{return value};return nil}.joined(separator:"\n")
+            let rendered = entity != "place" || plan.operation == .catalog || response.libraryContext?.selectionIDs != nil
+            guard rendered,summary.utf16.count<=8000 else{return .init(output:.init(status:"partial",complete:false,totalCount:records.count,records:[],findings:[],message:"unavailable",localOnly:false),response:response,orderedIDs:[],selectionIsOrdered:false)}
+            selection=records.map(\.id);selectionIsOrdered=false;selectionIsPrivate=true
+            let total=plan.operation == .catalog ? view.snapshot.totalCount : records.count
+            return .init(output:.init(status:total==0 ? "empty" : "success",complete:true,totalCount:total,records:[],findings:[],message:total==0 ? "not_found" : "ok",localOnly:false,summary:summary),response:response,orderedIDs:selection,selectionIsPrivate:true,presentation:.init(kind:plan.operation == .count && plan.groupBy==nil || plan.operation == .catalog ? "count" : "groups",requestedFields:plan.fields,returnedFields:plan.groupBy.map {[$0]} ?? [],complete:true,renderedLocally:true),selectionIsOrdered:false)
+        }
+        var page:[AskAgentRecord]=[],bytes=1500
+        for record in records.dropFirst(offset).prefix(limit) {
+            guard (record.note?.utf16.count ?? 0)<=4000,(record.tags?.count ?? 0)<=30,(record.tags ?? []).allSatisfy({$0.utf16.count<=200}) else {
+                return .init(output:.init(status:"partial",complete:false,totalCount:records.count,records:[],findings:[],message:"unavailable",localOnly:false),response:plain("A saved detail exceeds this request’s capacity. Narrow the request or choose different fields; no details have been silently shortened."),orderedIDs:[],selectionIsOrdered:false)
+            }
+            let size=try encoder.encode(record).count+1
+            if bytes+size>58_000 {break}
+            page.append(record);bytes+=size
+        }
+        guard records.isEmpty || !page.isEmpty else{throw AskError.inputLimit}
+        let end=offset+page.count,next=end<records.count ? end : nil
+        var response:AskResponse
+        if var result {
+            var renderedPlan=plan;renderedPlan.fields.removeAll {$0=="address"}
+            result = .init(status:.success,records:Array(matched.dropFirst(offset).prefix(page.count)),appliedFilters:renderedPlan,totalCount:records.count,complete:true,cities:result.cities)
+            response=try AskLibraryReadTools.response(result,tools:AskReadTools(request:request.collectionReadVersion(),index:view.index))
+        } else {response=plain(page.map {"• "+$0.name}.joined(separator:"\n"))}
+        if next != nil || offset>0 {
+            response.paragraphs.insert(.init(id:"collection-page",spans:[.text("Showing \(offset+1)–\(end) of \(records.count) matching saved \(entity == "place" ? "places" : "items").")],sourceIDs:[]),at:0)
+        }
+        if plan.operation == .answer {response.paragraphs=[]}
+        response.collectionPage = .init(snapshot:fingerprint,totalCount:records.count,offset:offset,returnedCount:page.count,nextOffset:next)
+        // Keep the complete membership for scope=previous, even when transport is paged.
+        if offset==0 {collectionPageProgress[fingerprint]=0}
+        if collectionPageProgress[fingerprint]==offset {collectionPageProgress[fingerprint]=end}
+        selection=records.map(\.id);selectionIsOrdered=collectionPageProgress[fingerprint]==records.count && records.count<=AskCollectionPage.maximumRenderedRecords;selectionIsPrivate=true
+        let output=AskAgentResult(status:records.isEmpty ? "empty" : "success",complete:offset==0 && next==nil,totalCount:records.count,records:page,findings:[],message:records.isEmpty ? "not_found" : "ok",localOnly:false,offset:offset,returnedCount:page.count,nextOffset:next,snapshot:fingerprint)
+        return .init(output:output,response:response,orderedIDs:selection,selectionIsPrivate:true,presentation:.init(kind:plan.operation == .details || plan.operation == .compare ? "details" : "rows",requestedFields:plan.fields,returnedFields:plan.fields.filter {$0 != "address"},complete:offset==0 && next==nil,renderedLocally:plan.operation != .answer),selectionIsOrdered:selectionIsOrdered)
+    }
     private func query(_ data:Data,intent:AskAgentInterpretation)throws->AskAgentExecution {
         struct Query:Decodable {let entity:String,query:AskLibraryPlan,selectionIDs:[String]?}
         let supplied=try JSONDecoder().decode(Query.self,from:data)
+        if fullCollectionContext {return try collectionQuery(supplied.entity,plan:supplied.query,selectionIDs:supplied.selectionIDs)}
+        guard supplied.query.offset==nil,supplied.query.limit==nil,supplied.query.searchText==nil,supplied.query.tag==nil,supplied.query.snapshot==nil else{throw AskError.invalidEvidence}
         if supplied.entity != "place" {
             guard ["city","neighborhood"].contains(supplied.entity) else {throw AskError.invalidEvidence}
             var records=try objects(supplied.entity)
@@ -506,7 +625,7 @@ import CryptoKit
         let value=try JSONDecoder().decode(Research.self,from:data)
         guard (1...6).contains(value.targetIDs.count),Set(value.targetIDs).count==value.targetIDs.count,(1...4).contains(value.fields.count),value.fields.allSatisfy(AskBusinessRequest.allowedFields.contains),intent.sourcePolicy != "local_only",value.sourcePolicy=="stored_only" || intent.sourcePolicy=="public_if_missing" else {throw AskError.invalidEvidence}
         let all=try adapter.personalPlaces(),records=try value.targetIDs.map {id in guard let record=all.first(where:{$0.id==id}) else {throw AskChangeError.missing};return record}
-        if selectionIsPrivate,!Set(value.targetIDs).isDisjoint(with:Set(selection)) {
+        if !fullCollectionContext,selectionIsPrivate,!Set(value.targetIDs).isDisjoint(with:Set(selection)) {
             guard records.allSatisfy({Self.explicitlyNames($0.name,in:request.text)}) else {return .init(output:.localPrivate(),response:plain("Please name the places you’d like me to look up online."),orderedIDs:selection,selectionIsPrivate:true,selectionIsOrdered:selectionIsOrdered)}
         }
         selectionIsPrivate=false

@@ -211,10 +211,12 @@ struct AskToolPresentation:Encodable,Sendable {
 }
 struct AskConversationToolResult:Encodable,Sendable {
     let status:String,complete:Bool,totalCount:Int,records:[AskAgentRecord],findings:[AskAgentFinding],message:String,localOnly:Bool
+    var offset:Int?=nil,returnedCount:Int?=nil,nextOffset:Int?=nil
+    var snapshot:String?=nil,summary:String?=nil
     var web:AskWebResearchResult?=nil
     var history:[AskDialogueMessage]?=nil
     var presentation:AskToolPresentation?=nil
-    init(_ r:AskAgentResult,web:AskWebResearchResult?=nil){status=r.status;complete=r.complete;totalCount=r.totalCount;records=r.records;findings=r.findings;message=r.message;localOnly=r.localOnly;self.web=web}
+    init(_ r:AskAgentResult,web:AskWebResearchResult?=nil){status=r.status;complete=r.complete;totalCount=r.totalCount;records=r.records;findings=r.findings;message=r.message;localOnly=r.localOnly;self.web=web;offset=r.offset;returnedCount=r.returnedCount;nextOffset=r.nextOffset;snapshot=r.snapshot;summary=r.summary}
 }
 struct AskHumanAuthorization:Decodable,Sendable {let approved,replaceExisting,deleteContents:Bool;let reason:String;var targetSelector:AskAgentSelector?=nil}
 protocol AskConversationPlanning:Sendable {
@@ -276,6 +278,9 @@ extension AskHostedProvider:AskConversationPlanning {
     }
     func conversationStep(_ step:AskConversationStep)async throws->AskConversationReply {
         guard [9,10].contains(step.version) else {throw AskHostedError.invalidResponse}
+        if step.context.collectionAccess != nil {
+            guard step.context.collectionAccess=="permitted_details_v1",await libraryPlanVersion()>=7 else{throw AskHostedError.disabled}
+        }
         if step.version==10 {guard await nativeResearchAvailable(),step.webAllowed != nil,UUID(uuidString:step.turnID ?? "") != nil else {throw AskHostedError.disabled}}
         let encoded=try JSONEncoder().encode(step)
         guard var p=try JSONSerialization.jsonObject(with:encoded) as? [String:Any] else {throw AskError.invalidEvidence}

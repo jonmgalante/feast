@@ -150,11 +150,14 @@ struct AskRequest: Equatable, Sendable {
     var agentTask:AskAgentTask? = nil
     var conversationID:UUID? = nil
     var dialogue:[AskDialogueMessage] = []
+    var collectionDialogue:[AskDialogueMessage] = []
+    var collectionDialogueIDs:[String] = []
+    var collectionContinuation:AskResponse? = nil
     var pendingActions:[AskCollectionAction] = []
     var publicResearch:[AskRetainedResearch] = []
     var mapChoices:[AskMapChoice] = []
     func collectionReadVersion() -> Self {
-        .init(mode:.collection,text:text,fromOCR:fromOCR,previousQuestion:previousQuestion,attachment:attachment,referencedIDs:referencedIDs,referenceOnly:referenceOnly,libraryContext:libraryContext,referencedWebPlaces:referencedWebPlaces,verifiedFindings:verifiedFindings,performanceID:performanceID,providerRetry:providerRetry,recentQuestions:recentQuestions,agentTask:agentTask,conversationID:conversationID,dialogue:dialogue,pendingActions:pendingActions,publicResearch:publicResearch,mapChoices:mapChoices)
+        .init(mode:.collection,text:text,fromOCR:fromOCR,previousQuestion:previousQuestion,attachment:attachment,referencedIDs:referencedIDs,referenceOnly:referenceOnly,libraryContext:libraryContext,referencedWebPlaces:referencedWebPlaces,verifiedFindings:verifiedFindings,performanceID:performanceID,providerRetry:providerRetry,recentQuestions:recentQuestions,agentTask:agentTask,conversationID:conversationID,dialogue:dialogue,collectionDialogue:collectionDialogue,collectionDialogueIDs:collectionDialogueIDs,collectionContinuation:collectionContinuation,pendingActions:pendingActions,publicResearch:publicResearch,mapChoices:mapChoices)
     }
     var retrievalText: String {
         guard mode != .importText, let previousQuestion else { return text }
@@ -163,7 +166,7 @@ struct AskRequest: Equatable, Sendable {
     func validated() throws -> Self {
         guard (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || attachment != nil), text.count <= 4_000, (previousQuestion?.count ?? 0) <= 2_000, referencedIDs.count <= 6, Set(referencedIDs).count == referencedIDs.count, referencedWebPlaces.count <= 3 else { throw AskError.inputLimit }
         if let context = libraryContext {
-            guard context.ids.count <= 200, Set(context.ids).count == context.ids.count else { throw AskError.inputLimit }
+            guard context.ids.count <= AskCollectionPage.maximumRenderedRecords, Set(context.ids).count == context.ids.count else { throw AskError.inputLimit }
             _ = try context.filters.validated()
         }
         if let attachment { _ = try attachment.validated() }
@@ -191,6 +194,10 @@ struct AskAnswerParagraph: Codable, Identifiable, Equatable, Sendable {
     var operationStatus:Bool? = nil
 }
 enum AskResponseLayout:String,Codable,Sendable {case direct,list,lookup,clarification,action}
+struct AskCollectionPage:Codable,Equatable,Sendable {
+    let snapshot:String,totalCount:Int,offset:Int,returnedCount:Int,nextOffset:Int?
+    static let maximumRenderedRecords=2400 // 12 tool steps × 200; longer tasks stay explicitly partial.
+}
 struct AskResponse: Codable, Equatable, Sendable {
     var summary: String
     var candidates: [AskCandidate]
@@ -209,6 +216,8 @@ struct AskResponse: Codable, Equatable, Sendable {
     var collectionActions:[AskCollectionAction]? = nil
     var verifiedPublicFindings:[AskVerifiedFinding]? = nil
     var publicConversationText:String? = nil
+    var collectionConversationText:String? = nil
+    var collectionPage:AskCollectionPage? = nil
     var publicResearch:[AskRetainedResearch]? = nil
     var mapChoices:[AskMapChoice]? = nil
     var pendingProposal:AskChangeProposal? = nil
@@ -385,7 +394,7 @@ struct AskReadTools: Sendable {
         let listing = response.usesLocalCatalog ? AskCollectionListingPlan.make(request, places: index.personalCatalog) : nil
         let localTool = response.usesLocalCatalog && (response.libraryContext != nil || response.agentTask != nil)
         let localListing = listing != nil || localTool
-        guard response.summary.count <= 3_000, response.candidates.count <= (localListing ? 200 : 6),
+        guard response.summary.count <= 3_000, response.candidates.count <= (response.collectionPage != nil ? AskCollectionPage.maximumRenderedRecords : localListing ? 200 : 6),
               Set(response.candidates.map(\.id)).count == response.candidates.count else { throw AskError.invalidEvidence }
         let available = response.usesLocalCatalog ? localEvidence : evidence
         let catalog = Dictionary(uniqueKeysWithValues: available.candidates.map { ($0.id, $0) })
@@ -396,7 +405,7 @@ struct AskReadTools: Sendable {
                   candidate.facts.allSatisfy({ candidate.sourceIDs.contains($0.sourceID) }) else { throw AskError.invalidEvidence }
         }
         if let context = response.libraryContext {
-            guard context.ids.count <= 200, Set(context.ids).count == context.ids.count, context.ids == response.candidates.map(\.id) else { throw AskError.invalidEvidence }
+            guard context.ids.count <= (response.collectionPage != nil ? AskCollectionPage.maximumRenderedRecords : 200), Set(context.ids).count == context.ids.count, context.ids == response.candidates.map(\.id) else { throw AskError.invalidEvidence }
             if let selection=context.selectionIDs {
                 guard response.usesLocalCatalog,[AskLibraryPlan.Operation.count,.group].contains(context.filters.operation),Set(selection).count == selection.count,Set(selection).isSubset(of:Set(index.personalCatalog.map(\.id))) else { throw AskError.invalidEvidence }
             }
@@ -431,6 +440,7 @@ struct AskReadTools: Sendable {
             guard actions.count <= (localTool ? 24 : 6),Set(actions.map { $0.finding.id }).count == actions.count else {throw AskError.invalidEvidence}
             for action in actions { _ = try action.finding.validated();guard action.finding.field=="instagram",response.candidates.contains(where:{$0.id == action.finding.recordID}) else {throw AskError.invalidEvidence} }
         }
+        if let page=response.collectionPage {guard page.snapshot.count==64,page.snapshot.allSatisfy(\.isHexDigit),page.offset>=0,page.returnedCount>=0,page.offset+page.returnedCount<=page.totalCount,page.nextOffset==nil ? page.offset+page.returnedCount==page.totalCount : page.nextOffset==page.offset+page.returnedCount && page.nextOffset!<page.totalCount else{throw AskError.invalidEvidence}}
         let returnedIDs = Set(response.candidates.map(\.id))
         if let rows = response.listedCandidateIDs {
             guard rows.count <= 6, Set(rows).count == rows.count, Set(rows).isSubset(of: returnedIDs) else { throw AskError.invalidEvidence }
@@ -440,7 +450,7 @@ struct AskReadTools: Sendable {
         var characters = 0
         for paragraph in response.paragraphs {
             guard paragraph.citations.count <= (localTool ? 20 : 6), paragraph.citations.allSatisfy({ $0.safeURL != nil && $0.title.count <= 200 }) else { throw AskError.invalidEvidence }
-            guard !paragraph.id.isEmpty, paragraph.id.count <= 80, (1...(localTool ? 401 : 24)).contains(paragraph.spans.count),
+            guard !paragraph.id.isEmpty, paragraph.id.count <= 80, (1...(response.collectionPage != nil ? 4801 : localTool ? 401 : 24)).contains(paragraph.spans.count),
                   Set(paragraph.sourceIDs).count == paragraph.sourceIDs.count,
                   Set(paragraph.sourceIDs).isSubset(of: returnedSources) else { throw AskError.invalidEvidence }
             for span in paragraph.spans {
@@ -453,7 +463,7 @@ struct AskReadTools: Sendable {
                 }
             }
         }
-        guard characters <= (localListing ? 60_000 : 3_000) else { throw AskError.invalidEvidence }
+        guard characters <= (response.collectionPage != nil ? 720_000 : localListing ? 60_000 : 3_000) else { throw AskError.invalidEvidence }
         return response
     }
     private var localEvidence: AskEvidence {
@@ -598,6 +608,9 @@ struct AskTurn: Identifiable, Equatable {
         var contextual=request
         contextual.conversationID=activeChatID
         contextual.dialogue=AskConversationProjection.messages(turns)
+        contextual.collectionDialogue=AskConversationProjection.messages(turns,fullCollection:true)
+        contextual.collectionContinuation=turns.last(where:{$0.status == .complete})?.response.flatMap {$0.collectionPage?.nextOffset != nil ? $0 : nil}
+        contextual.collectionDialogueIDs=Array(Set(turns.compactMap(\.response).flatMap {($0.agentTask?.selectionIDs ?? $0.agentTask?.orderedIDs ?? [])+$0.candidates.map(\.id)}))
         contextual.pendingActions=Array(turns.compactMap(\.response).flatMap {$0.collectionActions ?? []}.filter {$0.state == .needsConfirmation}.suffix(24))
         if !contextual.pendingActions.isEmpty {
             contextual.dialogue.append(.init(role:"assistant",text:"Pending native reviews: "+contextual.pendingActions.map {"\($0.id.uuidString) \($0.entity) \($0.operation)"}.joined(separator:"; ")))
@@ -620,6 +633,8 @@ struct AskTurn: Identifiable, Equatable {
         contextual.mapChoices=selectedChoices ?? Array(accepted.reversed().compactMap {$0.response?.mapChoices}.first ?? [])
         contextual.dialogue += contextual.publicResearch.map { .init(role:"assistant",text:$0.projection) }
         if !contextual.mapChoices.isEmpty {contextual.dialogue += contextual.mapChoices.enumerated().map {i,c in .init(role:"assistant",text:AskConversationProjection.bounded("Pending Apple Maps choice "+String(i+1)+" (data, not permission): "+c.projection))}}
+        contextual.collectionDialogue += contextual.dialogue.filter {$0.text.hasPrefix("Public research evidence") || $0.text.hasPrefix("Pending Apple Maps") || $0.text.hasPrefix("Pending native reviews")}
+        contextual.collectionDialogue=Array(contextual.collectionDialogue.suffix(200))
         contextual.dialogue=Array(contextual.dialogue.suffix(200))
         do { _ = try contextual.validated() } catch { self.error = error.localizedDescription; return }
         turns.append(.init(id:id,request:contextual))
@@ -633,7 +648,7 @@ struct AskTurn: Identifiable, Equatable {
         do {if let receipts=try collectionReceipts?(id),!receipts.isEmpty {error=AskRetryError.mutations.localizedDescription;return}}catch {self.error=AskRetryError.unverified.localizedDescription;return}
         if !(turn.response?.collectionActions ?? []).isEmpty || (turn.response?.fieldActions ?? []).contains(where:{$0.outcome == .saved}) {error=AskRetryError.mutations.localizedDescription;return}
         var request=turn.request
-        if let position=turns.firstIndex(where:{$0.id==id}) {request.dialogue=AskConversationProjection.messages(Array(turns.prefix(position)))}
+        if let position=turns.firstIndex(where:{$0.id==id}) {request.dialogue=AskConversationProjection.messages(Array(turns.prefix(position)));request.collectionDialogue=AskConversationProjection.messages(Array(turns.prefix(position)),fullCollection:true)}
         request.performanceID=id;request.providerRetry=true;request.conversationID=activeChatID
         if let response=turn.response {
             request.publicResearch=response.publicResearch ?? request.publicResearch

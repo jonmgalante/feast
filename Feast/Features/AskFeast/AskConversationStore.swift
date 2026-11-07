@@ -77,7 +77,7 @@ enum AskHistoryError: LocalizedError {
     private static func valid(_ value:AskConversationSnapshot) -> Bool {
         value.version == 1 && value.draft.count <= 4000 && value.turns.count <= 100 &&
         Set(value.turns.map(\.id)).count == value.turns.count &&
-        value.turns.allSatisfy { $0.question.count <= 4000 && ($0.context?.count ?? 0) <= 2000 && $0.response.summary.count <= 3000 && $0.response.candidates.count <= ($0.response.usesLocalCatalog ? 200 : 6) && $0.response.paragraphs.count <= ($0.response.usesLocalCatalog ? 201 : 6) && $0.sources.count <= ($0.response.usesLocalCatalog ? 200 : 60) && ($0.response.publicResearch ?? []).allSatisfy {research in research.result.nativeEvidence.map {(try? $0.checked()) != nil} ?? true} }
+        value.turns.allSatisfy { $0.question.count <= 4000 && ($0.context?.count ?? 0) <= 2000 && $0.response.summary.count <= 3000 && $0.response.candidates.count <= ($0.response.collectionPage != nil ? AskCollectionPage.maximumRenderedRecords : $0.response.usesLocalCatalog ? 200 : 6) && $0.response.paragraphs.count <= ($0.response.collectionPage != nil ? 4001 : $0.response.usesLocalCatalog ? 201 : 6) && $0.sources.count <= ($0.response.collectionPage != nil ? AskCollectionPage.maximumRenderedRecords : $0.response.usesLocalCatalog ? 200 : 60) && ($0.response.publicResearch ?? []).allSatisfy {research in research.result.nativeEvidence.map {(try? $0.checked()) != nil} ?? true} }
     }
     func loadLibrary() throws -> AskChatLibrary {
         let source:URL
