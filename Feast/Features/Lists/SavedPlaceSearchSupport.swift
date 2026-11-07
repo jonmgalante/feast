@@ -205,19 +205,37 @@ struct SavedPlaceFilterSheet: View {
         }
     }
     private var tagsSection: some View {
-        Section("Tags") {
-            ForEach(FeastTag.catalog(from: [availableTags, Array(filters.selectedTags)]), id: \.self) { tag in
-                Button {
-                    if filters.selectedTags.contains(tag) { filters.selectedTags.remove(tag) }
-                    else { filters.selectedTags.insert(tag) }
-                } label: {
-                    HStack {
-                        Text(tag)
-                        Spacer()
-                        if filters.selectedTags.contains(tag) { Image(systemName: "checkmark") }
+        let tags = FeastTag.catalog(from: [availableTags, Array(filters.selectedTags)])
+
+        return Section("Tags") {
+            if !tags.isEmpty {
+                FeastFormGroup {
+                    ForEach(tags, id: \.self) { tag in
+                        Button {
+                            if filters.selectedTags.contains(tag) { filters.selectedTags.remove(tag) }
+                            else { filters.selectedTags.insert(tag) }
+                        } label: {
+                            HStack {
+                                Text(tag)
+                                    .multilineTextAlignment(.leading)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                Spacer()
+                                Image(systemName: "checkmark")
+                                    .opacity(filters.selectedTags.contains(tag) ? 1 : 0)
+                                    .accessibilityHidden(true)
+                            }
+                            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .tint(FeastTheme.Colors.primaryText)
+                        .accessibilityAddTraits(filters.selectedTags.contains(tag) ? .isSelected : [])
+
+                        if tag != tags.last {
+                            Divider()
+                        }
                     }
                 }
-                .tint(FeastTheme.Colors.primaryText)
             }
         }
     }

@@ -390,37 +390,37 @@ struct ListsRootView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
 
-        if !isZeroCityState && !isZeroSavedPlacesState {
-            cityToolbarItem {
-                Button { browse.showingCityFilters = true } label: {
-                    FeastToolbarSymbol(systemName: "slider.horizontal.3", isEmphasized: searchFilters.hasCriteria)
+        cityToolbarItem {
+            HStack(spacing: FeastTheme.Spacing.xSmall) {
+                if !isZeroCityState && !isZeroSavedPlacesState {
+                    Button { browse.showingCityFilters = true } label: {
+                        FeastToolbarSymbol(systemName: "slider.horizontal.3", isEmphasized: searchFilters.hasCriteria)
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Filter places")
+                }
+
+                Button(action: presentCreateCity) {
+                    FeastToolbarSymbol(systemName: "plus")
                         .frame(width: 44, height: 44)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Filter places")
+                .accessibilityLabel("Add City")
+
+                Menu {
+                    Button("Import from Notes", systemImage: "square.and.arrow.down") { presentImportFromNotes() }
+                    Button("Export library", systemImage: "square.and.arrow.up") { confirmingExport = true }
+                } label: {
+                    FeastToolbarSymbol(systemName: "ellipsis")
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Library options")
             }
-        }
-        cityToolbarItem {
-            Button(action: presentCreateCity) {
-                FeastToolbarSymbol(systemName: "plus")
-                    .frame(width: 44, height: 44)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Add City")
-        }
-        cityToolbarItem {
-            Menu {
-                Button("Import from Notes", systemImage: "square.and.arrow.down") { presentImportFromNotes() }
-                Button("Export library", systemImage: "square.and.arrow.up") { confirmingExport = true }
-            } label: {
-                FeastToolbarSymbol(systemName: "ellipsis")
-                    .frame(width: 44, height: 44)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Library options")
         }
     }
 

@@ -136,9 +136,11 @@ private struct FeastSelectedTagChip: View {
         } label: {
             HStack(spacing: 6) {
                 Text(tag)
+                    .fixedSize(horizontal: false, vertical: true)
 
                 Image(systemName: "xmark")
                     .font(.system(size: 10, weight: .bold))
+                    .fixedSize()
             }
             .font(FeastTheme.Typography.rowUtility)
             .foregroundStyle(FeastTheme.Colors.primaryText)
@@ -215,13 +217,22 @@ private struct FeastChipFlowLayout: Layout {
             return []
         }
 
-        let effectiveMaxWidth = maxWidth.isFinite ? maxWidth : .greatestFiniteMagnitude
+        let effectiveMaxWidth = maxWidth.isFinite ? max(0, maxWidth) : .greatestFiniteMagnitude
 
         var rows: [FeastChipFlowRow] = []
         var currentRow = FeastChipFlowRow()
 
         for index in subviews.indices {
-            let size = subviews[index].sizeThatFits(.unspecified)
+            let idealSize = subviews[index].sizeThatFits(.unspecified)
+            var size = idealSize
+            if idealSize.width > effectiveMaxWidth {
+                // Measure wrapping before computing row heights, then place at this same size.
+                size = subviews[index].sizeThatFits(
+                    ProposedViewSize(width: effectiveMaxWidth, height: nil)
+                )
+                // Padding can impose a minimum width during a zero-width sizing probe.
+                size.width = min(size.width, effectiveMaxWidth)
+            }
             let proposedWidth = currentRow.elements.isEmpty
                 ? size.width
                 : currentRow.width + itemSpacing + size.width

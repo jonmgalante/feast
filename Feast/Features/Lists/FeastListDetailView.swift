@@ -400,12 +400,11 @@ struct FeastListDetailView: View {
             }
             .accessibilityLabel("Filter places")
 
-            Menu {
-                Button("Add Neighborhood") {
-                    presentAddNeighborhoodEditor()
-                }
+            Button {
+                presentAddNeighborhoodEditor()
             } label: {
-                AddNeighborhoodIcon()
+                FeastToolbarSymbol(systemName: "rectangle.stack.badge.plus")
+                    .accessibilityHidden(true)
             }
             .accessibilityLabel("Add Neighborhood")
         }
@@ -648,25 +647,6 @@ private struct NeighborhoodHeaderActionLabel: View {
             .frame(width: 36, height: 36)
             .contentShape(Rectangle())
             .accessibilityHidden(true)
-    }
-}
-
-private struct AddNeighborhoodIcon: View {
-    var body: some View {
-        ZStack(alignment: .topTrailing) {
-            FeastToolbarSymbol(systemName: "map")
-
-            Image(systemName: "plus.circle.fill")
-                .font(.system(size: 10, weight: .bold))
-                .foregroundStyle(FeastTheme.Colors.accentSelection)
-                .background {
-                    Circle()
-                        .fill(FeastTheme.Colors.surfaceBackground)
-                }
-                .offset(x: 3.5, y: -2.5)
-        }
-        .frame(width: 18, height: 18)
-        .accessibilityHidden(true)
     }
 }
 
