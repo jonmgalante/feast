@@ -57,6 +57,16 @@ struct AskSavedCollectionPanel: View {
                                 Text(turn.request.text.isEmpty ? "Screenshot" : turn.request.text)
                                     .padding(FeastTheme.Spacing.medium)
                                     .background(FeastTheme.Colors.accentSelection.opacity(0.12), in: RoundedRectangle(cornerRadius: FeastTheme.CornerRadius.medium))
+                                    .accessibilityActions {
+                                        if !turn.request.text.isEmpty {
+                                            Button("Copy question") { UIPasteboard.general.string = turn.request.text }
+                                        }
+                                    }
+                                    .contextMenu {
+                                        if !turn.request.text.isEmpty {
+                                            Button("Copy question", systemImage: "doc.on.doc") { UIPasteboard.general.string = turn.request.text }
+                                        }
+                                    }
                                     .frame(maxWidth: .infinity, alignment: .trailing)
                                 if turn.request.attachment != nil { Label("Attached screenshot", systemImage: "photo").font(FeastTheme.Typography.caption) }
                                 if let response = turn.response {
