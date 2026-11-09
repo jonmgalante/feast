@@ -76,6 +76,64 @@ import Foundation
         precondition(recoveredCreation?.targetIDs==interrupted.targetIDs)
         _ = try crashEngine.performExplicitAction(interrupted.id,undo:true)
         let survivingCities=try repository.fetchFeastLists();precondition(!survivingCities.contains {$0.id?.uuidString==interrupted.targetIDs[0]})
+        // Stable recovery IDs are journaled before writes. Reconstructing the
+        // engine must not append a note twice or allocate another created ID.
+        let dedupURL=temporaryDirectory.appendingPathComponent("recovery-dedup-actions.json"),turn=UUID(),chat=UUID()
+        func recoveryGrant(_ p:AskChangeProposal)->AskChangeGrant {.init(question:p.instructionQuote,entity:p.entity,operations:[p.operation],fields:Set(p.changes.map(\.field)),targetIDs:Set(p.targetIDs),allowsCreation:p.operation=="create",cityIDs:Set(p.cityID.map {[$0]} ?? []),sectionIDs:Set(p.sectionID.map {[$0]} ?? []),mapMatchIDs:Set(p.mapMatchID.map {[$0]} ?? []),boundProposal:p)}
+        let note=AskChangeProposal(entity:"place",operation:"append",targetIDs:[id],cityID:nil,sectionID:nil,mapMatchID:nil,changes:[.init(field:"note",value:"Only append once",values:nil,findingID:nil)],instructionQuote:"Append this note")
+        let appendKey=try AskRecoveryOperationIdentity(turnID:turn,step:1,callID:"fixture-append").key(entity:"place",target:id)
+        let dedup=AskCollectionChangeEngine(adapter:adapter,journalURL:dedupURL)
+        let readyNote=try dedup.prepare(note,question:note.instructionQuote,authorization:recoveryGrant(note),findings:[],turnID:turn,chatID:chat,recoveryOperationID:appendKey)
+        let firstNote=try dedup.apply(readyNote.id,authorization:recoveryGrant(note))
+        let onceNote=recovered.note,onceRevision=recovered.updatedAt
+        let reloaded=AskCollectionChangeEngine(adapter:adapter,journalURL:dedupURL)
+        let sameNote=try reloaded.prepare(note,question:note.instructionQuote,authorization:recoveryGrant(note),findings:[],turnID:turn,chatID:chat,recoveryOperationID:appendKey)
+        let repeatedNote=try reloaded.apply(sameNote.id,authorization:recoveryGrant(note))
+        precondition(firstNote.id==repeatedNote.id && recovered.note==onceNote && recovered.updatedAt==onceRevision)
+        var differentNote=note;differentNote.changes=[.init(field:"note",value:"Different payload",values:nil,findingID:nil)]
+        do {_ = try reloaded.prepare(differentNote,question:differentNote.instructionQuote,authorization:recoveryGrant(differentNote),findings:[],turnID:turn,chatID:chat,recoveryOperationID:appendKey);preconditionFailure("Recovery key accepted different mutation content")}catch {}
+        var noGrant=recoveryGrant(note);noGrant.boundProposal=nil
+        let noPermission=AskChangeGrant(question:note.instructionQuote,entity:"place",operations:[],fields:[],targetIDs:[],allowsCreation:false)
+        do {_ = try reloaded.prepare(note,question:note.instructionQuote,authorization:noPermission,findings:[],turnID:turn,chatID:chat,recoveryOperationID:appendKey);preconditionFailure("Recovery key bypassed authorization")}catch {}
+        do {_ = try reloaded.apply(sameNote.id,authorization:noGrant);preconditionFailure("Recovery receipt bypassed bound authorization")}catch {}
+        let creation=AskChangeProposal(entity:"place",operation:"create",targetIDs:[],cityID:destination,sectionID:sectionID,mapMatchID:match.id,changes:[],instructionQuote:"Save this place once")
+        let createKey=try AskRecoveryOperationIdentity(turnID:turn,step:2,callID:"fixture-create").key(entity:"place",target:nil)
+        let readyCreation=try reloaded.prepare(creation,question:creation.instructionQuote,authorization:recoveryGrant(creation),findings:[],turnID:turn,chatID:chat,recoveryOperationID:createKey)
+        let createdOnce=try reloaded.apply(readyCreation.id,authorization:recoveryGrant(creation),maps:[match.id:match])
+        var interruptedArchive=try JSONSerialization.jsonObject(with:Data(contentsOf:dedupURL)) as! [String:Any]
+        var interruptedEntries=interruptedArchive["entries"] as! [[String:Any]]
+        let intentIndex=interruptedEntries.firstIndex {($0["id"] as? String)==createdOnce.id.uuidString}!
+        interruptedEntries[intentIndex]["phase"]="intent"
+        interruptedArchive["entries"]=interruptedEntries;try JSONSerialization.data(withJSONObject:interruptedArchive).write(to:dedupURL,options:.atomic)
+        let afterCreationCrash=AskCollectionChangeEngine(adapter:adapter,journalURL:dedupURL)
+        let recoveredIntent=try afterCreationCrash.prepare(creation,question:creation.instructionQuote,authorization:recoveryGrant(creation),findings:[],turnID:turn,chatID:chat,recoveryOperationID:createKey)
+        let createdAgain=try afterCreationCrash.apply(recoveredIntent.id,authorization:recoveryGrant(creation),maps:[match.id:match])
+        precondition(createdAgain.id==createdOnce.id && createdAgain.targetIDs==createdOnce.targetIDs)
+        _ = try afterCreationCrash.performExplicitAction(createdOnce.id,undo:true)
+        let afterUndo=AskCollectionChangeEngine(adapter:adapter,journalURL:dedupURL)
+        let undoneIntent=try afterUndo.prepare(creation,question:creation.instructionQuote,authorization:recoveryGrant(creation),findings:[],turnID:turn,chatID:chat,recoveryOperationID:createKey)
+        let noRecreation=try afterUndo.apply(undoneIntent.id,authorization:recoveryGrant(creation),maps:[match.id:match])
+        precondition(noRecreation.state == .undone)
+        let onceFetch=SavedPlace.fetchRequest();onceFetch.predicate=NSPredicate(format:"id == %@",UUID(uuidString:createdOnce.targetIDs[0])! as NSUUID)
+        let onceSurvivors=try context.fetch(onceFetch);precondition(onceSurvivors.isEmpty)
+        let ownDelete=AskChangeProposal(entity:"place",operation:"delete",targetIDs:[createdID],cityID:nil,sectionID:nil,mapMatchID:nil,changes:[],instructionQuote:"Delete this place")
+        let ownDeleteKey=try AskRecoveryOperationIdentity(turnID:turn,step:3,callID:"fixture-delete").key(entity:"place",target:createdID)
+        let readyDelete=try afterUndo.prepare(ownDelete,question:ownDelete.instructionQuote,authorization:recoveryGrant(ownDelete),findings:[],turnID:turn,chatID:chat,recoveryOperationID:ownDeleteKey)
+        let beforeDeletion=try afterUndo.recoveryDeletedRecordIDs(forTurn:turn);precondition(!beforeDeletion.contains(createdID))
+        _ = try afterUndo.apply(readyDelete.id,authorization:recoveryGrant(ownDelete),confirmed:true)
+        let deletedProof=try afterUndo.recoveryDeletedRecordIDs(forTurn:turn),otherTurnProof=try afterUndo.recoveryDeletedRecordIDs(forTurn:UUID())
+        precondition(deletedProof.contains(createdID) && otherTurnProof.isEmpty)
+        let restoredDeletionEngine=AskCollectionChangeEngine(adapter:adapter,journalURL:dedupURL)
+        let restoredProof=try restoredDeletionEngine.recoveryDeletedRecordIDs(forTurn:turn);precondition(restoredProof.contains(createdID))
+        let confirmationTurn=UUID()
+        let confirmedDeletionProof=try restoredDeletionEngine.recoveryDeletedRecordIDs(forTurn:confirmationTurn,includingActionIDs:[readyDelete.id])
+        precondition(confirmedDeletionProof==[createdID])
+        let undoCreationProof=try restoredDeletionEngine.recoveryDeletedRecordIDs(forTurn:confirmationTurn,includingActionIDs:[createdOnce.id])
+        precondition(undoCreationProof==Set(createdOnce.targetIDs))
+        _ = try restoredDeletionEngine.performExplicitAction(readyDelete.id,undo:true)
+        let undoneProof=try restoredDeletionEngine.recoveryDeletedRecordIDs(forTurn:turn);precondition(!undoneProof.contains(createdID))
+        print("PASS retained-context deletion proof requires this turn's committed unchanged journal result; prepared/other-turn/undone records never qualify")
+        print("PASS stable mutation identity survives restart, paid-tool scope mismatch is refused, note append occurs once, creation intent reconciles once, and Undo cannot recreate it")
         print("PASS generalized isolated field change, durable restore, repeated apply/Undo, stale edit refusal, permission refusal and confirmed recoverable deletion preserve IDs and unrelated metadata")
     }
 }

@@ -19,6 +19,7 @@ import CoreData
     @Published private(set) var libraryToolsVersion = 1
     @Published private(set) var publicBusinessAvailable = false
     @Published private(set) var nativeResearchAvailable = false
+    @Published private(set) var recoveryAvailable = false
     private var changeEngine:AskCollectionChangeEngine?
     @Published var savedMessage: String?
     @Published var savedCandidates: [AskSavedCandidateKey: String] = [:]
@@ -60,7 +61,7 @@ import CoreData
             guard let base=FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask).first else {throw AskError.invalidEvidence}
             let engine=AskCollectionChangeEngine(adapter:adapter,journalURL:base.appendingPathComponent("AskFeast/collection-actions-v1.json"))
             changeEngine=engine
-            session=AskSession(index:index,provider:AskAgentProvider(remote:provider,fallback:legacy,adapter:adapter,engine:engine,searchMaps:{query in try await ApplePlacesService().search(query:query)},resolveMaps:{id in try await ApplePlacesService().resolve(placeID:id)}))
+            session=AskSession(index:index,provider:AskAgentProvider(remote:provider,fallback:legacy,adapter:adapter,engine:engine,searchMaps:{query in try await ApplePlacesService().search(query:query)},recoveryStore:AskRecoveryFeature.enabled ? AskTurnRecoveryStore.shared : nil,resolveMaps:{id in try await ApplePlacesService().resolve(placeID:id)}))
             session?.refreshIndex={try adapter.index()}
             session?.collectionExecutor={id,undo in try engine.performExplicitAction(id,undo:undo)}
             session?.collectionStatus={id in try engine.actionStatus(id)}
@@ -83,11 +84,11 @@ import CoreData
         guard let adapter=savedCollection,let engine=changeEngine,let session,!session.isLoading else{return false}
         let provider=productionProvider(configuration:configuration)
         let legacy=AskLibraryProvider(remote:provider,places:{try await adapter.personalPlaces()},intentPlanner:provider,snapshot:{try await adapter.librarySnapshot()})
-        return session.replaceProviderWhenIdle(AskAgentProvider(remote:provider,fallback:legacy,adapter:adapter,engine:engine,searchMaps:{query in try await ApplePlacesService().search(query:query)},resolveMaps:{id in try await ApplePlacesService().resolve(placeID:id)}))
+        return session.replaceProviderWhenIdle(AskAgentProvider(remote:provider,fallback:legacy,adapter:adapter,engine:engine,searchMaps:{query in try await ApplePlacesService().search(query:query)},recoveryStore:AskRecoveryFeature.enabled ? AskTurnRecoveryStore.shared : nil,resolveMaps:{id in try await ApplePlacesService().resolve(placeID:id)}))
     }
     private var capabilitiesEndpoint: URL?
     func refreshHostedCapabilities(endpoint: URL? = nil) async {
-        if let endpoint {if capabilitiesEndpoint != endpoint {nativeResearchAvailable=false};capabilitiesEndpoint = endpoint }
+        if let endpoint {if capabilitiesEndpoint != endpoint {nativeResearchAvailable=false;recoveryAvailable=false};capabilitiesEndpoint = endpoint }
         guard AskPrivacy.onlineAllowed else { return }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpCookieStorage = nil; configuration.urlCache = nil
@@ -100,6 +101,7 @@ import CoreData
         guard let (data,response) = try? await session.data(for: request),
               (response as? HTTPURLResponse)?.statusCode == 200, data.count < 4096,
               let info = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        recoveryAvailable = info["answerJobsVersion"] as? Int == 1
         nativeResearchAvailable = info["nativeResearchEnabled"] as? Bool == true && (info["agentProtocolVersions"] as? [Int])?.contains(10)==true
         screenshotSendingAvailable = info["selectedScreenshotEnabled"] as? Bool == true
         discoveryAvailable = info["webDiscoveryEnabled"] as? Bool == true
@@ -149,15 +151,15 @@ import CoreData
             token: token, approve: { [weak self] request, evidence in
                 guard let self else { return false }
                 return await self.approveHosted(request, evidence: evidence)
-            }, send: send, webEnabled: { [weak self] in await self?.discoveryAvailable ?? false }, libraryToolsEnabled: { [weak self] in await self?.libraryToolsAvailable ?? false }, permission: { AskPrivacy.onlineAllowed },libraryPlanVersion:{ [weak self] in await self?.libraryToolsVersion ?? 1 },publicLookupEnabled:{[weak self] in await self?.publicBusinessAvailable ?? false},nativeResearchEnabled:{[weak self] in await self?.nativeResearchAvailable ?? false})
+            }, send: send, webEnabled: { [weak self] in await self?.discoveryAvailable ?? false }, libraryToolsEnabled: { [weak self] in await self?.libraryToolsAvailable ?? false }, permission: { AskPrivacy.onlineAllowed },libraryPlanVersion:{ [weak self] in await self?.libraryToolsVersion ?? 1 },publicLookupEnabled:{[weak self] in await self?.publicBusinessAvailable ?? false},nativeResearchEnabled:{[weak self] in await self?.nativeResearchAvailable ?? false},recoveryEnabled:{[weak self] in guard AskRecoveryFeature.enabled else{return false};return await self?.recoveryAvailable ?? false})
     }
     func productionProvider(configuration: AskHostedConfiguration) -> AskHostedProvider {
         AskHostedProvider(configuration:configuration,token:{ try configuration.ownerValidation ? AskOwnerValidationAccess.credential() : AskProductionAccess.credential() },approve:{ [weak self] request,evidence in
             guard let self else { return false }; return await self.approveHosted(request,evidence:evidence,exactSelection:true)
-        },send:{ try await AskHostedHTTP.shared.send($0) },webEnabled:{ [weak self] in await self?.discoveryAvailable ?? false },libraryToolsEnabled:{ [weak self] in await self?.libraryToolsAvailable ?? false },permission:{ AskPrivacy.onlineAllowed },libraryPlanVersion:{ [weak self] in await self?.libraryToolsVersion ?? 1 },publicLookupEnabled:{[weak self] in await self?.publicBusinessAvailable ?? false},prepareCapabilities:{[weak self] in await self?.refreshHostedCapabilities(endpoint:configuration.endpoint)},nativeResearchEnabled:{[weak self] in await self?.nativeResearchAvailable ?? false})
+        },send:{ try await AskHostedHTTP.shared.send($0) },webEnabled:{ [weak self] in await self?.discoveryAvailable ?? false },libraryToolsEnabled:{ [weak self] in await self?.libraryToolsAvailable ?? false },permission:{ AskPrivacy.onlineAllowed },libraryPlanVersion:{ [weak self] in await self?.libraryToolsVersion ?? 1 },publicLookupEnabled:{[weak self] in await self?.publicBusinessAvailable ?? false},prepareCapabilities:{[weak self] in await self?.refreshHostedCapabilities(endpoint:configuration.endpoint)},nativeResearchEnabled:{[weak self] in await self?.nativeResearchAvailable ?? false},recoveryEnabled:{[weak self] in guard AskRecoveryFeature.enabled else{return false};return await self?.recoveryAvailable ?? false},recoveryCleanupToken:{try configuration.ownerValidation ? AskOwnerValidationAccess.recoveryCleanupCredential(endpoint:configuration.endpoint) : AskProductionAccess.recoveryCleanupCredential(endpoint:configuration.endpoint)})
     }
     func disableOnline() {
-        session?.suspend(); session?.attachment = nil
+        session?.revokeRecovery(); session?.attachment = nil
         screenshotSendingAvailable = false; discoveryAvailable = false; libraryToolsAvailable = false;publicBusinessAvailable=false;libraryToolsVersion = 1
     }
     func recordSave(turnID: UUID, candidateID: String, name: String, city: String, recordID: String?) {
@@ -166,5 +168,5 @@ import CoreData
         savedRecordIDs[key] = recordID.flatMap { UUID(uuidString: $0)?.uuidString }
         savedMessage = "Saved \(name) to \(city) in Feast."
     }
-    func selectionChanged(to tab: Int) { if tab != 2 { session?.cancel(userInitiated:false) } }
+    func selectionChanged(to tab: Int) { if tab != 2 { session?.cancel(userInitiated:false) } else {session?.restorePendingRecovery(activityResume:true)} }
 }

@@ -35,13 +35,23 @@ private actor CollectionContextConversation:AskConversationPlanning {
 }
 @MainActor enum AskCollectionContextTests {
     static func run(model:NSManagedObjectModel,temporaryDirectory:URL)async throws {
-        let oldKey="AskFeast.onlinePermission.cloudflare-openai.catalog-public-dialogue-selected-images.v4"
-        let defaults=UserDefaults.standard,old=defaults.object(forKey:oldKey),current=defaults.object(forKey:AskPrivacy.onlineKey)
-        defer {if let old {defaults.set(old,forKey:oldKey)}else{defaults.removeObject(forKey:oldKey)};if let current {defaults.set(current,forKey:AskPrivacy.onlineKey)}else{defaults.removeObject(forKey:AskPrivacy.onlineKey)}}
-        defaults.set(true,forKey:oldKey);defaults.removeObject(forKey:AskPrivacy.onlineKey)
-        precondition(!AskPrivacy.onlineAllowed && AskPrivacy.onlineKey != oldKey)
-        AskPrivacy.accept();precondition(AskPrivacy.onlineAllowed);AskPrivacy.withdraw();precondition(!AskPrivacy.onlineAllowed)
-        for term in ["Cloudflare","OpenAI","notes","tags","statuses","shared"] {precondition(AskPrivacy.disclosure.contains(term))}
+        let olderKeys=["AskFeast.onlinePermission.cloudflare-openai.catalog-public-dialogue-selected-images.v4",
+                       "AskFeast.onlinePermission.cloudflare-openai.permitted-collection-dialogue-selected-images.v5"]
+        let defaults=UserDefaults.standard,keys=olderKeys+[AskPrivacy.onlineKey]
+        let previous=keys.reduce(into:[String:Any]()) {saved,key in if let value=defaults.object(forKey:key) {saved[key]=value}}
+        defer {for key in keys {if let value=previous[key] {defaults.set(value,forKey:key)}else{defaults.removeObject(forKey:key)}}}
+        for key in olderKeys {defaults.set(true,forKey:key)}
+        defaults.removeObject(forKey:AskPrivacy.onlineKey)
+        precondition(AskPrivacy.onlineKey.hasSuffix("selected-images-recovery.v6"))
+        precondition(!AskPrivacy.onlineAllowed && !olderKeys.contains(AskPrivacy.onlineKey))
+        AskPrivacy.accept();precondition(AskPrivacy.onlineAllowed)
+        AskPrivacy.withdraw();precondition(!AskPrivacy.onlineAllowed)
+        // Older grants remain untouched and never restore a withdrawn or
+        // absent recovery-inclusive grant.
+        precondition(olderKeys.allSatisfy {defaults.bool(forKey:$0)})
+        defaults.removeObject(forKey:AskPrivacy.onlineKey);precondition(!AskPrivacy.onlineAllowed)
+        for term in ["Cloudflare","OpenAI","notes","tags","statuses","shared","temporarily stores request data and answers","24-hour recovery window"] {precondition(AskPrivacy.disclosure.contains(term))}
+        print("PASS recovery-inclusive v6 consent defaults off, does not migrate v4/v5 grants, and preserves explicit accept/withdraw behavior")
         let coordinator=NSPersistentStoreCoordinator(managedObjectModel:model)
         _ = try coordinator.addPersistentStore(ofType:NSSQLiteStoreType,configurationName:nil,at:temporaryDirectory.appendingPathComponent("rich-collection.sqlite"))
         let context=NSManagedObjectContext(concurrencyType:.mainQueueConcurrencyType);context.persistentStoreCoordinator=coordinator

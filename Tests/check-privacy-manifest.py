@@ -21,7 +21,7 @@ EXPECTED = {
     TYPE + name: {FUNCTIONALITY, PERSONALIZATION} if name in
     {"OtherUserContent", "SearchHistory"} else {FUNCTIONALITY}
     for name in ("Name", "OtherUserContent", "SearchHistory", "UserID", "DeviceID",
-                 "ProductInteraction", "OtherUsageData", "OtherDiagnosticData")
+                 "ProductInteraction", "OtherUsageData", "PerformanceData", "OtherDiagnosticData")
 }
 REQUIRED_APIS = {
     "NSPrivacyAccessedAPICategoryUserDefaults": ["CA92.1"],
@@ -104,6 +104,18 @@ def check_rejected_mutations(manifest):
     bad["NSPrivacyCollectedDataTypes"][1] = copy.deepcopy(bad["NSPrivacyCollectedDataTypes"][0])
     fixtures.append(bad)
     bad = copy.deepcopy(manifest); bad["NSPrivacyAccessedAPITypes"][0]["NSPrivacyAccessedAPITypeReasons"] = []; fixtures.append(bad)
+    # Recovery replies persist request-linked timings. Do not silently drop this
+    # declaration, describe it as anonymous/tracking, or broaden its purpose.
+    bad = copy.deepcopy(manifest)
+    bad["NSPrivacyCollectedDataTypes"] = [e for e in bad["NSPrivacyCollectedDataTypes"]
+                                          if e[TYPE] != TYPE + "PerformanceData"]
+    fixtures.append(bad)
+    for key, value in ((TYPE + "Linked", False), (TYPE + "Tracking", True),
+                       (TYPE + "Purposes", [PURPOSE + "Analytics"])):
+        bad = copy.deepcopy(manifest)
+        performance = next(e for e in bad["NSPrivacyCollectedDataTypes"]
+                           if e[TYPE] == TYPE + "PerformanceData")
+        performance[key] = value; fixtures.append(bad)
     for fixture in fixtures:
         try:
             validate(fixture)
@@ -121,7 +133,7 @@ def main():
     validate(manifest)
     check_resource_membership()
     check_rejected_mutations(manifest)
-    print("PASS eight reviewed collected types, purposes, linkage, no tracking, existing API reasons and target membership")
+    print("PASS nine reviewed collected types, purposes, linkage, no tracking, existing API reasons and target membership")
     if args.app:
         bundled = plistlib.loads((args.app / "PrivacyInfo.xcprivacy").read_bytes())
         validate(bundled)

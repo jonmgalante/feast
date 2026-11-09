@@ -172,7 +172,7 @@ struct AskConversationFailure:LocalizedError {
 }
 
 struct AskDialogueMessage:Codable,Equatable,Sendable {let role,text:String}
-struct AskConversationReply:Decodable,Sendable {
+struct AskConversationReply:Codable,Sendable {
     let version:Int,requestID:String,step:Int,kind:String,text:String,continuation:String,model:String
     let call:AskAgentReply.Call?
     var nativeEvidence:AskNativeEvidence? = nil
@@ -197,19 +197,19 @@ struct AskMapChoice:Codable,Equatable,Sendable,Identifiable {
     var match:ApplePlaceMatch {.init(applePlaceID:applePlaceID,displayName:name,secondaryText:address,coordinate:nil,suggestedSectionPath:.init(cityOrRegion:city.isEmpty ? nil : city,neighborhood:nil),websiteURL:website,instagramURL:nil)}
 }
 struct AskWebResearchResult:Codable,Equatable,Sendable {let text:String;let citations:[AskWebCitation];var nativeEvidence:AskNativeEvidence? = nil}
-struct AskConversationStep:Encodable,Sendable {
-    struct Result:Encodable,Sendable {let callID:String;let output:AskConversationToolResult}
+struct AskConversationStep:Codable,Sendable {
+    struct Result:Codable,Sendable {let callID:String;let output:AskConversationToolResult}
     var version=9
-    let mode="conversationStep"
+    var mode="conversationStep"
     let requestID:String,step:Int,text:String,context:AskSemanticContext,cities:[AskAgentCity],task:AskAgentTask?,findings:[AskAgentFinding],history:[AskDialogueMessage],continuation:String?,result:Result?
     var historyCount:Int=0
     var webAllowed:Bool? = nil
     var turnID:String? = nil
 }
-struct AskToolPresentation:Encodable,Sendable {
+struct AskToolPresentation:Codable,Sendable {
     let kind:String,requestedFields:[String],returnedFields:[String],complete:Bool,renderedLocally:Bool
 }
-struct AskConversationToolResult:Encodable,Sendable {
+struct AskConversationToolResult:Codable,Sendable {
     let status:String,complete:Bool,totalCount:Int,records:[AskAgentRecord],findings:[AskAgentFinding],message:String,localOnly:Bool
     var offset:Int?=nil,returnedCount:Int?=nil,nextOffset:Int?=nil
     var snapshot:String?=nil,summary:String?=nil
@@ -281,11 +281,18 @@ extension AskHostedProvider:AskConversationPlanning {
         if step.context.collectionAccess != nil {
             guard step.context.collectionAccess=="permitted_details_v1",await libraryPlanVersion()>=7 else{throw AskHostedError.disabled}
         }
-        if step.version==10 {guard await nativeResearchAvailable(),step.webAllowed != nil,UUID(uuidString:step.turnID ?? "") != nil else {throw AskHostedError.disabled}}
+        if step.version==10 {
+            if AskRecoveryScope.handle==nil {guard await nativeResearchAvailable() else{throw AskHostedError.disabled}}
+            guard step.webAllowed != nil,UUID(uuidString:step.turnID ?? "") != nil else{throw AskHostedError.disabled}
+        }
         let encoded=try JSONEncoder().encode(step)
         guard var p=try JSONSerialization.jsonObject(with:encoded) as? [String:Any] else {throw AskError.invalidEvidence}
         for key in ["task","continuation","result"] where p[key]==nil {p[key]=NSNull()}
+        if let handle=AskRecoveryScope.handle {return try await recoveredConversationStep(step,handle:handle)}
         let value=try await conversationRequest(p,as:AskConversationReply.self)
+        return try checkedConversationReply(value,step:step)
+    }
+    func checkedConversationReply(_ value:AskConversationReply,step:AskConversationStep)throws->AskConversationReply {
         guard value.version==step.version,value.requestID==step.requestID,value.step==step.step,["answer","tool"].contains(value.kind),(value.kind=="tool")==(value.call != nil),value.text.count<=16000,value.continuation.utf8.count<=350000,value.model=="gpt-6-astra"||value.model.hasPrefix("gpt-6-astra-")||value.model=="gpt-6.1-sol"||value.model.hasPrefix("gpt-6.1-sol-") else {throw AskHostedError.invalidResponse}
         if step.version==10 {
             guard let evidence=value.nativeEvidence else {throw AskHostedError.invalidResponse}

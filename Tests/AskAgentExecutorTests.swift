@@ -64,6 +64,19 @@ private struct AgentMutationPauseProvider:AskFeastProvider {
         let found=try await executor.execute(lookup,intent:intent("research"))
         precondition(found.response?.fieldActions?.count==3 && found.response?.verifiedPublicFindings?.count==3 && found.orderedIDs==ids)
         _ = try await executor.execute(lookup,intent:intent("research"));let repeatedCount=await researcher.count();precondition(repeatedCount==3)
+        // A restored executor reuses successful public lookups and the same
+        // reference order, without making another provider call.
+        let executorSnapshot=try executor.recoverySnapshot()
+        let restoredExecutor=AskAgentExecutor(adapter:adapter,engine:engine,request:request,researcher:researcher,searchMaps:{_ in []})
+        try restoredExecutor.restoreRecoverySnapshot(executorSnapshot)
+        let restoredLookup=try await restoredExecutor.execute(lookup,intent:intent("research"))
+        let restoredCount=await researcher.count()
+        precondition(restoredCount==3 && restoredLookup.orderedIDs==found.orderedIDs && restoredLookup.response?.verifiedPublicFindings==found.response?.verifiedPublicFindings)
+        var wrongRequest=request;wrongRequest.performanceID=UUID()
+        let wrongExecutor=AskAgentExecutor(adapter:adapter,engine:engine,request:wrongRequest,researcher:researcher,searchMaps:{_ in []})
+        do {try wrongExecutor.restoreRecoverySnapshot(executorSnapshot);preconditionFailure("A checkpoint from another turn was restored")}catch {}
+        do {try restoredExecutor.restoreRecoverySnapshot(Data("{}".utf8));preconditionFailure("Corrupt executor checkpoint was accepted")}catch {}
+        print("PASS executor restart preserves research cache and reference order without paid replay; mismatched/corrupt checkpoint rejected")
         var saveRequest=request;saveRequest=AskRequest(mode:.collection,text:"Save all three",fromOCR:false,verifiedFindings:found.response!.verifiedPublicFindings!,performanceID:UUID(),agentTask:request.agentTask)
         let saver=AskAgentExecutor(adapter:adapter,engine:engine,request:saveRequest,researcher:researcher,searchMaps:{_ in []})
         let permission:[String:Any]=["entity":"place","operations":["update"],"fields":["instagram"],"targetIDs":ids,"instructionQuote":"Save all three","selector":NSNull(),"changes":[["field":"instagram","source":"verified_finding","value":NSNull(),"values":NSNull()]]]
@@ -83,6 +96,15 @@ private struct AgentMutationPauseProvider:AskFeastProvider {
         let replayed=try await saver.execute(call("propose_changes",replayGroup),intent:saving)
         precondition(replayed.outcomes?.count==3 && replayed.outcomes?.allSatisfy {$0.state=="applied"}==true)
         let savedReceipts=try engine.receipts(forTurn:saveRequest.performanceID!);precondition(savedReceipts.count==3)
+        let saverSnapshot=try saver.recoverySnapshot()
+        let restoredSaver=AskAgentExecutor(adapter:adapter,engine:engine,request:saveRequest,researcher:researcher,searchMaps:{_ in []})
+        try restoredSaver.restoreRecoverySnapshot(saverSnapshot)
+        do {_ = try await restoredSaver.execute(call("propose_changes",proposal),intent:saving);preconditionFailure("A prepared authorization grant was restored")}catch {}
+        try restoredSaver.prepare(saving)
+        _ = try await restoredSaver.execute(call("propose_changes",proposal),intent:saving)
+        let replayReceipts=try engine.receipts(forTurn:saveRequest.performanceID!)
+        precondition(replayReceipts==savedReceipts)
+        print("PASS restored executor does not restore mutation authorization; fresh preparation reuses durable receipts without duplicate edits")
         let undoRequest=AskRequest(mode:.collection,text:"Undo the second one",fromOCR:false,agentTask:.init(action:"change",fields:["instagram"],orderedIDs:ids,sourcePolicy:"local_only"))
         let undoer=AskAgentExecutor(adapter:adapter,engine:engine,request:undoRequest,researcher:researcher,searchMaps:{_ in []})
         let undoPermission:[String:Any]=["entity":"place","operations":["undo"],"fields":[],"targetIDs":[ids[1]],"instructionQuote":"Undo the second one","changes":[],"selector":["city":NSNull(),"name":NSNull(),"neighborhood":NSNull(),"cuisine":NSNull(),"status":NSNull(),"placeType":NSNull(),"scope":"previous","positions":[2]]]
@@ -94,6 +116,9 @@ private struct AgentMutationPauseProvider:AskFeastProvider {
         undo["instructionQuote"]="second one"
         _ = try await undoer.execute(call("propose_changes",undo),intent:undoIntent)
         precondition(places[0].instagramURL != nil && places[1].instagramURL==nil && places[2].instagramURL != nil)
+        let afterExternalUndo=try await restoredSaver.execute(call("propose_changes",proposal),intent:saving)
+        precondition(afterExternalUndo.response?.collectionActions?.first(where:{$0.targetIDs==[ids[1]]})?.state == .undone && places[1].instagramURL==nil)
+        print("PASS recovered receipt cache refreshes an externally undone action and never silently reapplies it")
         // Stop before an executor reaches persistence must leave both the field
         // and durable action journal unchanged. The gate makes the race ordered,
         // rather than relying on a timing-sensitive sleep.

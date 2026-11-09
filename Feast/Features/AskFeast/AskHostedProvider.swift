@@ -96,6 +96,8 @@ struct AskHostedProvider: AskFeastProvider {
     var brokerAnswers = AskBrokerAnswers()
     var prepareCapabilities:@Sendable ()async->Void = {}
     var nativeResearchEnabled:@Sendable ()async->Bool = {false}
+    var recoveryEnabled:@Sendable ()async->Bool = {false}
+    var recoveryCleanupToken:(@Sendable ()async throws->String)?=nil
 
     func answer(_ request: AskRequest, tools: AskReadTools) async throws -> AskResponse {
         try configuration.validate()

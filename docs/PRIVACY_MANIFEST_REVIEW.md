@@ -1,11 +1,13 @@
 # Privacy manifest reconciliation
 
-Reviewed 2026-11-07 against source baseline `d600907c196dbc74016fc462efbd083569a1023c`.
-Scope: the production iPhone app and its enabled Ask request paths. This review
-changes the bundled manifest only, with an offline regression check. It does not
-verify deployed settings, certify legal compliance, publish App Store Connect
-answers, or authorize provider requests. No real collection, credential, or
-retained cloud record was inspected.
+Initial review: 2026-11-07 against source baseline `d600907c196dbc74016fc462efbd083569a1023c`.
+Updated 2026-11-09 for the local durable-recovery candidate based on `9a39ab3`.
+Scope: the production iPhone app and the proposed enabled Ask recovery path.
+Recovery remains disabled; its new Performance Data declaration prepares the
+bundled manifest for that rollout and does not claim it is currently deployed.
+This review does not verify deployed settings, certify legal compliance, publish
+App Store Connect answers, or authorize provider requests. No real collection,
+credential, or retained cloud record was inspected.
 
 ## Classification rules and sources
 
@@ -21,7 +23,7 @@ has exactly four keys. The manifest must be bundled as a resource.
 - [Apple: App privacy details](https://developer.apple.com/app-store/app-privacy-details/)
 
 Official Apple pages, their linked Markdown, and the documentation JSON's
-`possibleValues` were retrieved on the review date. Apple defines collection by
+`possibleValues` were retrieved on the initial review date. Apple defines collection by
 access beyond real-time request service, not merely by a database write in app
 code. Optional online consent does not exempt ongoing primary-feature collection.
 Identity linkage includes a device; hashing a persistent identity is not proof of
@@ -32,7 +34,7 @@ purposes are not interchangeable with behavioral Analytics.
 ## Type / purpose / linkage matrix
 
 Each listed type uses the `NSPrivacyCollectedDataType` prefix in the manifest.
-All eight are **linked to the user** and **not used for tracking**.
+All nine are **linked to the user** and **not used for tracking**.
 
 | Type | Purposes | Evidence and rationale |
 | --- | --- | --- |
@@ -43,10 +45,12 @@ All eight are **linked to the user** and **not used for tracking**.
 | DeviceID | App Functionality | Random device and activation IDs, credential hashes, and the grant receipt persist for authentication, duplicate prevention and revocation. `AskPhoneActivation.swift:62-84`; `phone-access.mjs:76-94`. They remain mapped to the actor and are not anonymous just because randomly generated or hashed. |
 | ProductInteraction | App Functionality | Durable request roots, turn/step records, response counts and web-action counts record use of online Ask and enforce replay/concurrency/recovery rules. `native-accounting.mjs:28-53,57-69`; `reconciled-accounting.mjs:84-97,125-151`. These are functional records, not evidence of a behavioral analytics service. |
 | OtherUsageData | App Functionality | Per-request model/token consumption and provider usage-cost accounting are retained with `userHash`. This covers resource consumption, distinct from the request/turn interactions above. `native-accounting.mjs:63-76`; `reconciled-accounting.mjs:144-151`; `production-ledger.mjs:40-47`. Provider expense records are not a user's purchase history or payment details. |
+| PerformanceData | App Functionality | Enabled recovery retains native reply stage durations, call counts and counters in grant/request-scoped jobs until acknowledgment, Stop or content expiry. `native-conversation.mjs` attaches `metrics.snapshot()`; `answer-jobs.mjs` stores the final reply, keyed by `userHash`, request and step. These are not anonymous merely because the measurements contain no prompt text. The purpose is service operation/recovery, not behavioral analytics. |
 | OtherDiagnosticData | App Functionality | Retained pending/uncertain/rejected states, provider status/error codes, and bounded lookup diagnostic codes support technical recovery and service reliability. `native-accounting.mjs:57-68`; `reconciled-accounting.mjs:65-82,144-161`; `public-business.mjs:38-40`. Request IDs allow linkage back to user records. |
 
 Swift references are under `Feast/Features/AskFeast/`; JavaScript references are
-under `Backend/feast-production/`. Line numbers refer to the reviewed baseline.
+under `Backend/feast-production/`. Existing line numbers refer to the original
+reviewed baseline; the recovery row names its current source functions.
 Content/search requests are authenticated as the device's actor before provider
 dispatch. Neither payload projection nor the backend establishes irreversible
 unlinking before collection. Do not set linked=false merely because OpenAI is
@@ -57,10 +61,13 @@ service operation and usage accounting.
 
 ## Retention evidence and limits
 
-The [published Feast policy](https://jonmgalante.github.io/feast-site/privacy/)
-was fetched successfully and says “Last updated: November 7, 2026.” It covers v5
-collection/shared-note context, search recipients, persistent access/accounting
-records, disabled image uploads, and provider retention.
+The [Feast policy](https://jonmgalante.github.io/feast-site/privacy/) was fetched
+during the initial review and said “Last updated: November 7, 2026.” Its local
+source was rechecked offline on November 9; no current publication was fetched.
+It covers v5 collection/shared-note context, search recipients, persistent
+access/accounting records, disabled image uploads and provider retention. It
+still needs a recovery-storage update before this feature is enabled. No policy
+publication is represented by this local manifest change.
 
 The [current OpenAI data controls](https://developers.openai.com/api/docs/guides/your-data)
 state that standard abuse-monitoring logs can contain prompts/responses and are
@@ -73,25 +80,35 @@ training-sharing settings. Do not claim such controls from source alone.
 
 The backend explicitly persists access, identity, replay, usage and diagnostic
 records in Durable Objects. Revocation retains records rather than deleting them.
-The inspected paths have no automatic expiry. Request fingerprints and frame
-digests are not raw transcripts, but remain associated with request/user IDs.
-The content/search declarations also account for provider retention rather than
-pretending that absence of a Feast transcript table proves no collection.
+Those existing metadata/accounting paths have no automatic expiry. Request
+fingerprints and frame digests are not raw transcripts, but remain associated
+with request/user IDs. The content/search declarations also account for provider
+retention rather than pretending that absence of a Feast transcript table proves
+no collection.
+
+The new recovery path separately retains request data, provider receipts and
+answers on Cloudflare. Each accepted step has a 24-hour recovery window. Prompt
+and raw receipt are removed after settlement; the answer is removed earlier on
+acknowledgment or Stop, or on expiry. Expired content cannot be returned. Storage
+or platform outages may delay physical cleanup until the service can run again;
+the in-app sentence therefore describes a recovery window, not a guaranteed
+physical-deletion deadline. Compact duplicate-prevention records normally remain
+seven days, longer if necessary to finish accounting/fencing. Existing accounting
+records are separate, as are OpenAI/search-provider retention practices.
+
+The recovery-inclusive v6 consent must not migrate a previous v5 grant. It uses
+the existing permission prompt and Settings toggle, with one added sentence.
+Neither the disclosure nor the feature promises every question can finish while
+the app is closed: local phone tool steps can still wait for foreground activity.
 
 ## Exclusions and exact unresolved questions
 
-- **Performance Data remains unresolved, not declared by inference.** Ordinary
-  `PerformanceMeasurements` is request-local (`performance.mjs:1-20`); receipts
-  and timings are stored locally (`AskConversationProtocol.swift:5-74`). The
-  owner-only pilot persists elapsed time (`pilot-accounting.mjs:54-59`), but
-  ordinary public requests cannot reach it (`public-handler.mjs:25-26`). The
-  published policy mentions backend timing retention, while checked-in Wrangler
-  observability settings are disabled scaffolding, not live evidence. Before
-  public submission, confirm: **Does the deployed public app service or a service
-  provider retain user/device/request-linked duration or other performance data
-  beyond request completion? Which fields, retention period and purpose?** If yes,
-  add PerformanceData with the evidenced linkage/purposes and update this check.
-  If not, reconcile the policy's broad timing wording separately.
+- **Performance Data is now source-proven for enabled recovery.** Its declaration
+  covers the persisted request-linked timings above. Other deployed diagnostics,
+  logging and observability settings have not been inspected. Confirm their
+  fields, retention and purposes before public submission; update declarations
+  if those practices add a different purpose or data type. The checked-in
+  Wrangler file remains disabled scaffolding, not live configuration evidence.
 - **Provider controls:** confirm the production OpenAI project's actual retention
   and data-sharing configuration, and whether providers use app data for any
   purpose beyond the stated functionality/security/personalization. The standard
@@ -119,10 +136,10 @@ pretending that absence of a Feast transcript table proves no collection.
 ## Offline validation
 
 Run `plutil -lint Feast/PrivacyInfo.xcprivacy` and
-`python3 Tests/check-privacy-manifest.py`. The check validates the eight reviewed
+`python3 Tests/check-privacy-manifest.py`. The check validates the nine reviewed
 entries, exact TN3184 keys, Boolean linkage/tracking, purposes, duplicate rejection,
 unchanged required-reason APIs, and synchronized target resource membership.
-Ten in-memory negative cases ensure it rejects invalid/unreviewed declarations.
+Fourteen in-memory negative cases ensure it rejects invalid/unreviewed declarations.
 It reads no app stores or credentials and makes no network requests.
 
 For the final built app or archive, run

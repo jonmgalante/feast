@@ -10,6 +10,7 @@ struct AskAgentTask:Codable,Equatable,Sendable {
     var privateSelection:Bool? = nil
     var outcomes:[AskAgentOutcome]? = nil
     var selectionIDs:[String]? = nil // Full aggregate membership, on device only; never an ordinal list.
+    var referencesIncomplete:Bool? = nil // Local-only: an unresolved/ambiguous displayed reference must not silently shift positions.
     var externalProjection:Self {
         let privateScope=privateSelection ?? (sourcePolicy=="local_only")
         return .init(action:action,fields:fields.filter {!["note","tags","status"].contains($0)},orderedIDs:privateScope ? [] : orderedIDs,sourcePolicy:sourcePolicy,privateSelection:privateScope,outcomes:privateScope ? nil : outcomes)
@@ -41,7 +42,7 @@ struct AskAgentResult:Codable,Equatable,Sendable {
     static func localPrivate(complete:Bool=true)->Self {.init(status:"local_only",complete:complete,totalCount:0,records:[],findings:[],message:"private_result",localOnly:true)}
 }
 struct AskAgentReply:Decodable,Sendable {
-    struct Call:Decodable,Sendable {let name,callID,arguments:String}
+    struct Call:Codable,Sendable {let name,callID,arguments:String}
     let version:Int,requestID:String,step:Int
     let call:Call
     let continuation:String

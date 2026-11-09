@@ -67,6 +67,7 @@ struct FeastRootView: View {
             }
         }
         .onChange(of: scenePhase) { _, phase in if phase == .background { MapPlaceLookup.shared.clear() } }
+        .onChange(of: scenePhase) { _,phase in ask.session?.setAppActive(phase == .active) }
         .onChange(of: browse.selectedTab) { _, tab in ask.selectionChanged(to: tab) }
         .environmentObject(browse)
         .onChange(of: browse.filters.selectedListURIString) { _, _ in browse.scopeDidChange() }

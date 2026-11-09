@@ -20,9 +20,16 @@ is implied.
 
 ## Fresh consent and shared content
 
-The permission scope is now:
+The collection-context rollout introduced this historical permission scope:
 
 `AskFeast.onlinePermission.cloudflare-openai.permitted-collection-dialogue-selected-images.v5`
+
+The current durable-recovery candidate supersedes it with
+`AskFeast.onlinePermission.cloudflare-openai.permitted-collection-dialogue-selected-images-recovery.v6`.
+It adds temporary Cloudflare recovery storage and requires fresh consent without
+migrating v5. See [the current privacy review](PRIVACY_MANIFEST_REVIEW.md). The v5
+rationale below describes the earlier collection-context change, not permission
+to enable recovery.
 
 Do not copy or migrate any older permission Boolean into this key. A prior v4
 approval is not approval for sending private notes, tags, statuses, or shared
@@ -41,8 +48,9 @@ solely in Feast/iCloud. Automatic location sharing is not added.
 The product owner explicitly authorized relevant saved-note content, including
 shared notes, in queries sent to search providers or public sites when needed to
 answer, after being told those recipients may retain or log queries. This is
-separate from sending notes to OpenAI for reasoning. The unshipped v5 scope
-covers this clarified behavior; no migration or additional scope bump is needed.
+separate from sending notes to OpenAI for reasoning. The v5 scope covered that
+clarified behavior without a further bump for the collection-context change
+alone. The later recovery-storage change uses the new v6 scope described above.
 
 This product authorization does not establish every contributor's expectations
 or authorize actual-data tests or deployment. Resolve shared-content policy and
@@ -101,8 +109,8 @@ Use synthetic fixtures and mocked transports only for this candidate. Record
 actual commands, results, source revisions, and build artifacts in the release
 packet; do not treat this checklist as a test report.
 
-- Seed only the old v4 permission as true and leave v5 absent: permission stays
-  denied. Cancel retains the draft and sends nothing. Explicit acceptance works
+- Seed the old v4/v5 permissions as true and leave recovery v6 absent: permission
+  stays denied. Cancel retains the draft and sends nothing. Explicit acceptance works
   once; withdrawal blocks subsequent requests and stale consent resumes.
 - Verify both entry-point consent and Settings disclose all new fields and
   providers, shared-note search use, chosen images, and honest retention.

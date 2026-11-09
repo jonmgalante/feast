@@ -1,6 +1,7 @@
 import {WorkerEntrypoint} from 'cloudflare:workers';
 import {brokerAnswer,productionStatus} from './broker.mjs';
 export {ProductionLedger} from './production-ledger.mjs';
+export {AnswerJobs} from './answer-jobs.mjs';
 export {default} from './public-handler.mjs';
 // Private named Service Binding only. No HTTP route accepts owner credentials on public production.
 export class OwnerValidationRPC extends WorkerEntrypoint {

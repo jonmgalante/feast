@@ -126,14 +126,14 @@ struct AskEvidence: Sendable {
     let candidates: [AskCandidate]
     let sources: [AskSource]
 }
-struct AskScreenshot: Equatable, Sendable {
+struct AskScreenshot: Codable, Equatable, Sendable {
     let jpeg: Data
     func validated() throws -> Self {
         guard !jpeg.isEmpty, jpeg.count <= 196608, jpeg.starts(with: [0xff,0xd8]), jpeg.suffix(2) == Data([0xff,0xd9]) else { throw AskError.imageLimit }
         return self
     }
 }
-struct AskRequest: Equatable, Sendable {
+struct AskRequest: Codable, Equatable, Sendable {
     let mode: AskMode
     let text: String
     let fromOCR: Bool
@@ -487,6 +487,15 @@ struct AskReadTools: Sendable {
     }
     func collectionReadTools() throws -> Self {try AskReadTools(request:request.collectionReadVersion(),index:index)}
     var completeLocalCatalog: Bool { index.catalogComplete }
+    /// Resolve exact current IDs in one local scan. This does not enlarge model input.
+    func localCandidates(_ ids:Set<String>)->[String:AskCandidate] {Self.localCandidates(ids,in:index)}
+    static func localCandidates(_ ids:Set<String>,in index:AskLocalIndex)->[String:AskCandidate] {
+        let records=Dictionary(grouping:index.records.filter {ids.contains($0.id)},by: \.id)
+        return records.reduce(into:[:]) {result,entry in
+            guard entry.value.count==1,let candidate=AskSavedMetadataEvidence.build(entry.value).candidates.first else{return}
+            result[entry.key]=candidate
+        }
+    }
     func localCandidate(_ id: String) -> AskCandidate? {
         guard let record=index.records.first(where:{$0.id==id}) else{return nil}
         return AskSavedMetadataEvidence.build([record]).candidates.first
@@ -539,6 +548,10 @@ struct AskTurn: Identifiable, Equatable {
     private var generation = UUID()
     private var task: Task<Void, Never>?
     private var activeID: UUID?
+    private var recoveryTasks:[UUID:Task<Void,Never>]=[:]
+    private var recoveryRequests:[UUID:AskRequest]=[:]
+    private var recoveryResumeRequested=Set<UUID>()
+    private var recoveryStore:AskTurnRecoveryStore? {(provider as? AskAgentProvider)?.recoveryStore}
     private var pendingActivityAt:Date?
     private var previousActivityBeforeRequest:Date?
     var activityNow:()->Date = Date.init
@@ -560,7 +573,7 @@ struct AskTurn: Identifiable, Equatable {
     var providerLabel: String { provider.label }
     /// Activation changes transport only; keep the same chat, draft, findings and action journal.
     func replaceProviderWhenIdle(_ next:any AskFeastProvider)->Bool {
-        guard !isLoading else{return false};provider=next;return true
+        guard !isLoading,recoveryTasks.isEmpty else{return false};provider=next;return true
     }
     func updateIndex(_ index: AskLocalIndex) { self.index = index }
     func source(_ id: String) -> AskSource? { turns.reversed().flatMap(\.sources).first { $0.id == id } }
@@ -644,6 +657,11 @@ struct AskTurn: Identifiable, Equatable {
         start(id:id,request:contextual)
     }
     func retry(_ id: UUID) {
+        // Reconcile the exact durable step, never create a fresh paid attempt.
+        if let recoveryStore,let saved=try? recoveryStore.checkpoint(id) {
+            if saved.resumable {restorePendingRecovery()}else{error=saved.failure ?? AskRecoveryError.stopped.localizedDescription}
+            return
+        }
         guard !isLoading, canRetry[id] != false, let turn = turns.first(where: { $0.id == id }), turn.status != .complete else { return }
         do {if let receipts=try collectionReceipts?(id),!receipts.isEmpty {error=AskRetryError.mutations.localizedDescription;return}}catch {self.error=AskRetryError.unverified.localizedDescription;return}
         if !(turn.response?.collectionActions ?? []).isEmpty || (turn.response?.fieldActions ?? []).contains(where:{$0.outcome == .saved}) {error=AskRetryError.mutations.localizedDescription;return}
@@ -659,32 +677,54 @@ struct AskTurn: Identifiable, Equatable {
         }
         start(id: id, request: request)
     }
-    private func start(id: UUID, request: AskRequest) {
+    private func start(id: UUID, request original: AskRequest) {
+        var request=original
+        if recoveryStore != nil {request.performanceID=id;if request.conversationID==nil {request.conversationID=activeChatID}}
         let startedAt = DispatchTime.now().uptimeNanoseconds
         let trace=AskPipelineTrace(id:UUID(),turnID:id)
         if pipelineTraces.count>=20 {pipelineTraces.removeAll()}
         pipelineTraces[id]=trace
-        generation = UUID(); let token = generation
-        activeID = id; isLoading = true; error = nil; canRetry[id] = true
+        let visible=request.conversationID==nil || request.conversationID==activeChatID
+        if visible {generation = UUID()}; let token = generation
+        if visible {activeID = id; isLoading = true; error = nil; canRetry[id] = true}
         scheduleHistory()
         setStatus(id, .loading)
         let tools: AskReadTools
         do { tools = try AskReadTools(request: request, index: index) }
-        catch { trace.finish(.failed);trace.elapsed(.taskExit,since:startedAt);Task {await AskPerformanceRecorder.shared.recordPipeline(trace.snapshot())};setStatus(id, .failed(error.localizedDescription)); self.error = error.localizedDescription; isLoading = false; activeID = nil; return }
+        catch { trace.finish(.failed);trace.elapsed(.taskExit,since:startedAt);Task {await AskPerformanceRecorder.shared.recordPipeline(trace.snapshot())};setStatus(id, .failed(error.localizedDescription)); self.error = error.localizedDescription; isLoading = false; activeID = nil; refreshActiveRecoveryTask(); return }
         trace.elapsed(.preparation,since:startedAt)
-        task = Task { [weak self, provider] in
+        if recoveryStore != nil {recoveryRequests[id]=request}
+        let work = Task { [weak self, provider] in
+            var reconcileAfterExit=false
+            defer {
+                self?.finishRecoveryTask(id)
+                if reconcileAfterExit,self?.recoveryStore?.active==true {self?.restorePendingRecovery()}
+            }
             defer {if trace.snapshot().outcome == .running {trace.finish(Task.isCancelled ? .cancelled : .failed)};trace.elapsed(.taskExit,since:startedAt);Task {await AskPerformanceRecorder.shared.recordPipeline(trace.snapshot())}}
             do {
                 let result = try await AskPipelineScope.$trace.withValue(trace) {try await provider.answer(request, tools: tools)}
                 try Task.checkCancellation()
+                if let self,let recoveryStore=self.recoveryStore {
+                    while !recoveryStore.active {try await Task.sleep(nanoseconds:100_000_000);try Task.checkCancellation()}
+                    if let saved=try recoveryStore.checkpoint(id) {
+                        guard saved.resumable else{throw AskRecoveryError.stopped}
+                        guard recoveryAccessIsCurrent(saved) else{throw AskHostedError.selectionUnavailable}
+                    }
+                }
                 let validationStarted = DispatchTime.now().uptimeNanoseconds
                 let currentTools:AskReadTools
                 if let fresh=try self?.refreshIndex?() {self?.index=fresh;currentTools=try AskReadTools(request:request,index:fresh)}else{currentTools=tools}
                 var checked = try currentTools.checked(currentTools.rebasedCatalogResponse(result))
-                if let self {checked.fieldActions=checked.fieldActions?.map {self.currentFieldAction($0)}}
+                if let self {checked.fieldActions=checked.fieldActions?.map {self.currentFieldAction($0)};checked=self.currentCollectionActions(checked)}
                 let validationMS = AskPerformanceRecorder.milliseconds(since: validationStarted)
                 trace.record(.validation,milliseconds:validationMS)
-                guard let self, generation == token, let position = turns.firstIndex(where: { $0.id == id }) else { return }
+                guard let self else{return}
+                if recoveryStore != nil,let origin=request.conversationID,origin != activeChatID {
+                    let sources=(checked.candidates.flatMap(\.sourceIDs)+checked.paragraphs.flatMap(\.sourceIDs)).reduce(into:[AskSource]()) {all,id in if !all.contains(where:{$0.id==id}),let source=currentTools.source(id) {all.append(source)}}
+                    if archiveRecovered(.init(id:id,request:request,response:checked,sources:sources,status:.complete),chat:origin) {try? recoveryStore?.removeCompleted(id)}
+                    trace.finish(.completed);return
+                }
+                guard generation == token || recoveryRequests[id] != nil,let position=turns.firstIndex(where:{$0.id==id}) else{return}
                 turns[position].response = checked
                 if checked.requestsFieldSave == true {
                     for action in checked.fieldActions ?? [] { self.applyFieldAction(turn:id,findingID:action.finding.id,mode:.save,allowLoading:true) }
@@ -693,14 +733,21 @@ struct AskTurn: Identifiable, Equatable {
                     if !result.contains(where: { $0.id == id }), let source = currentTools.source(id) { result.append(source) }
                 }
                 turns[position].status = .complete; isLoading = false; activeID = nil
+                finishRecoveryTask(id)
                 markConversationActivity()
                 acceptedAt[id] = DispatchTime.now().uptimeNanoseconds
                 answerRevisions[id,default:0]+=1
                 trace.elapsed(.answerAvailable,since:startedAt);trace.finish(.completed)
                 scheduleHistory(trace:trace)
+                if recoveryStore != nil,flushCurrentChat() {try? recoveryStore?.removeCompleted(id)}
                 await AskPerformanceRecorder.shared.record(.validation, milliseconds: validationMS, traceID: id)
                 await AskPerformanceRecorder.shared.record(.overall, milliseconds: AskPerformanceRecorder.milliseconds(since: startedAt), traceID: id)
             } catch AskHostedError.consentRequired {
+                if let self,let store=recoveryStore,(try? store.checkpoint(id)) != nil {
+                    try? store.stop(id)
+                    if request.conversationID==activeChatID {setStatus(id,.stopped);isLoading=false;activeID=nil;flushHistory()}
+                    return
+                }
                 // Nothing was sent. Restore the draft instead of an error/retry turn.
                 guard let self, generation == token, !Task.isCancelled else { return }
                 turns.removeAll { $0.id == id }
@@ -713,15 +760,48 @@ struct AskTurn: Identifiable, Equatable {
                 scheduleHistory()
             } catch is CancellationError { }
             catch {
-                guard let self, generation == token, !Task.isCancelled else { return }
+                guard let self,!Task.isCancelled else{return}
+                if let recoveryStore,let saved=try? recoveryStore.checkpoint(id) {
+                    // A foreground event may precede the suspended transport's
+                    // delayed failure. Reconcile once, without a retry loop.
+                    let resumedWhileRunning=recoveryResumeRequested.remove(id) != nil
+                    reconcileAfterExit=resumedWhileRunning && recoveryStore.active && saved.phase == .awaitingReply && error is URLError
+                    let message=saved.phase == .executingTool ? AskRecoveryError.localStepUncertain.localizedDescription : error.localizedDescription
+                    let retained=recoveryInterruptedResponse(saved,message:message)
+                    var stopped=saved
+                    if saved.phase == .executingTool || error is AskHostedError || (error as? AskRecoveryError) == .expired || (error as? AskRecoveryError) == .unavailable {
+                        stopped.phase = .blocked;stopped.failure=message;stopped.finalResponse=retained;try? recoveryStore.save(stopped)
+                    }
+                    if request.conversationID==activeChatID {
+                        if let i=turns.firstIndex(where:{$0.id==id}) {turns[i].response=retained}
+                        setStatus(id,.failed(message));self.error=message;isLoading=false;activeID=nil;canRetry[id]=false;finishRecoveryTask(id);flushHistory()
+                    }else if let origin=request.conversationID {
+                        _ = archiveRecovered(.init(id:id,request:request,response:retained,sources:[],status:.failed(message)),chat:origin)
+                    }
+                    return
+                }
+                if recoveryStore != nil,let origin=request.conversationID,origin != activeChatID {
+                    _ = archiveRecovered(.init(id:id,request:request,response:nil,sources:[],status:.failed(error.localizedDescription)),chat:origin);return
+                }
+                guard generation == token else{return}
                 canRetry[id] = (error as? AskConversationFailure)?.retryable ?? (error as? AskHostedError)?.retryable ?? true
                 let message = AskHostedError.message(for: error)
                 setStatus(id, .failed(message)); self.error = message
                 markConversationActivity()
                 scheduleHistory()
                 isLoading = false; activeID = nil
+                finishRecoveryTask(id)
             }
         }
+        if visible {task=work}
+        if recoveryStore != nil {recoveryTasks[id]=work}
+    }
+    private func currentCollectionActions(_ original:AskResponse)->AskResponse {
+        guard let collectionStatus,var actions=original.collectionActions else{return original}
+        for i in actions.indices {
+            if let current=try? collectionStatus(actions[i].id) {actions[i]=current}else{actions[i].state = .unavailable;actions[i].undoable=false}
+        }
+        var response=original;response.collectionActions=actions;response.refreshCollectionReviewStatus();return response
     }
     private func currentFieldAction(_ action:AskFieldActionState)->AskFieldActionState {
         guard let fieldStatus else{return action}
@@ -786,6 +866,12 @@ struct AskTurn: Identifiable, Equatable {
         if let position = turns.firstIndex(where: { $0.id == id }) { turns[position].status = status }
     }
     func cancel(userInitiated:Bool=true) {
+        if !userInitiated,recoveryStore != nil {flushHistory();return}
+        if let activeID,let recoveryStore {
+            do {try recoveryStore.stop(activeID)}catch {self.error=error.localizedDescription}
+            recoveryTasks[activeID]?.cancel();recoveryTasks.removeValue(forKey:activeID);recoveryRequests.removeValue(forKey:activeID);canRetry[activeID]=false
+            cancelRecoveryJob(activeID)
+        }
         needsOnlineConsent = false;consentTicket = nil
         generation = UUID(); task?.cancel(); task = nil
         if let activeID {
@@ -798,6 +884,7 @@ struct AskTurn: Identifiable, Equatable {
         if let id=activeID,let trace=pipelineTraces[id] {trace.elapsed(.stopRequested,since:trace.started);trace.finish(.cancelled)}
         activeID = nil; isLoading = false
         scheduleHistory()
+        if recoveryStore != nil {refreshActiveRecoveryTask();flushHistory()}
     }
     var progressLabel: String {
         // Buffered server responses do not expose a truthful live research phase.
@@ -815,7 +902,7 @@ struct AskTurn: Identifiable, Equatable {
     }
     func clearConversation() {
         cancel(); historyTask?.cancel(); historyGeneration = UUID()
-        do {try collectionClear?(activeChatID)}catch {self.error=error.localizedDescription;return}
+        do {try stopRecoveryChat(activeChatID);try collectionClear?(activeChatID)}catch {self.error=error.localizedDescription;return}
         resetScreen(.init()); flushHistory()
     }
     private func actionReceiptResponse(_ actions:[AskCollectionAction])->AskResponse {
@@ -823,6 +910,7 @@ struct AskTurn: Identifiable, Equatable {
         return .init(summary:text,candidates:[],paragraphs:[.init(id:"action-recovery",spans:[.text(text)],sourceIDs:[],operationStatus:true)],listedCandidateIDs:[],usesLocalCatalog:true,agentTask:.init(action:"change",fields:[],orderedIDs:actions.flatMap(\.targetIDs),sourcePolicy:"local_only"),collectionActions:actions,executionStatus:"stopped")
     }
     private func resetScreen(_ value:AskConversationSnapshot) {
+        if recoveryStore != nil {activeID=nil;isLoading=false;task=nil}
         turns = value.turns.map { $0.turn }; acceptedAt = [:]; input = value.draft
         if let collectionStatus {for i in turns.indices {guard var response=turns[i].response,var actions=response.collectionActions else{continue};for j in actions.indices {if let current=try? collectionStatus(actions[j].id) {actions[j]=current}else {actions[j].state = .unavailable;actions[j].undoable=false}};response.collectionActions=actions;response.refreshCollectionReviewStatus();turns[i].response=response}}
         if let fieldStatus {for i in turns.indices {guard var response=turns[i].response,let actions=response.fieldActions else{continue};response.fieldActions=actions.map {currentFieldAction($0)};turns[i].response=response}}
@@ -834,6 +922,7 @@ struct AskTurn: Identifiable, Equatable {
         }
         attachment = nil; canRetry = [:]; error = nil; needsOnlineConsent = false
         mode = .collection; sourceOverride = nil; fromOCR = false
+        restorePendingRecovery()
     }
     func restoreHistory(from store: AskConversationStore) {
         guard history == nil else { return }
@@ -861,7 +950,7 @@ struct AskTurn: Identifiable, Equatable {
     @discardableResult func openChat(_ id:UUID) -> Bool {
         guard id != activeChatID,chats.contains(where:{$0.id == id}) else { return false }
         suspend();guard flushCurrentChat(),commitChats(chats,active:id) else { return false }
-        historyGeneration = UUID();resetScreen(chats.first {$0.id == id}!.conversation);return true
+        historyGeneration = UUID();resetScreen(chats.first {$0.id == id}!.conversation);restorePendingRecovery(activityResume:true);return true
     }
     @discardableResult func renameChat(_ id:UUID,to name:String) -> Bool {
         let title = name.trimmingCharacters(in:.whitespacesAndNewlines)
@@ -873,7 +962,7 @@ struct AskTurn: Identifiable, Equatable {
     @discardableResult func deleteChat(_ id:UUID) -> Bool {
         guard chats.contains(where:{$0.id == id}) else { return false }
         suspend()
-        do {try collectionClear?(id)}catch {self.error=error.localizedDescription;return false}
+        do {try stopRecoveryChat(id);try collectionClear?(id)}catch {self.error=error.localizedDescription;return false}
         var next = currentChatSnapshot().filter {$0.id != id}
         if next.isEmpty { next = AskChatLibrary.empty().chats }
         let active = id == activeChatID ? next[0].id : activeChatID
@@ -899,7 +988,7 @@ struct AskTurn: Identifiable, Equatable {
     }
     private func snapshot() -> AskConversationSnapshot {
         let completed = turns.filter { $0.status != .loading && $0.request.attachment == nil }.map(AskArchivedTurn.init)
-        let interrupted = turns.last(where: { $0.status == .loading })
+        let interrupted = turns.last(where: { $0.status == .loading && (try? recoveryStore?.checkpoint($0.id)) == nil })
         return .init(version: 1, draft: String((input.isEmpty ? interrupted?.request.text ?? "" : input).prefix(4000)), turns: completed)
     }
     private func scheduleHistory(trace:AskPipelineTrace? = nil) {
@@ -934,7 +1023,120 @@ struct AskTurn: Identifiable, Equatable {
     private func markConversationActivity() {pendingActivityAt=activityNow()}
     func flushHistory() { historyTask?.cancel(); _ = flushCurrentChat() }
     func suspend() {
+        if recoveryStore != nil {flushHistory();return}
         if input.isEmpty, let activeID, let turn = turns.first(where: { $0.id == activeID }) { input = turn.request.text }
         cancel(userInitiated:false); flushHistory()
     }
+    private func refreshActiveRecoveryTask() {
+        guard recoveryStore != nil else{return}
+        // Multiple accepted turns may reconnect together. Completion of one
+        // must not hide Stop or enable edits while another visible turn runs.
+        let remaining=turns.reversed().first {turn in recoveryRequests[turn.id]?.conversationID==activeChatID && recoveryTasks[turn.id] != nil}
+        activeID=remaining?.id;isLoading=remaining != nil;task=remaining.flatMap {recoveryTasks[$0.id]}
+    }
+    private func finishRecoveryTask(_ id:UUID) {
+        recoveryResumeRequested.remove(id)
+        guard recoveryRequests.removeValue(forKey:id) != nil else{return}
+        recoveryTasks.removeValue(forKey:id)
+        refreshActiveRecoveryTask()
+    }
+    private func recoveryAccessIsCurrent(_ saved:AskTurnCheckpoint)->Bool {
+        guard let agent=provider as? AskAgentProvider,let researcher=agent.remote as? any AskBusinessResearching else{return false}
+        let verifier=AskAgentExecutor(adapter:agent.adapter,engine:agent.engine,request:saved.executorRequest ?? saved.request,researcher:researcher,searchMaps:{_ in []})
+        guard let permitted=try? verifier.permittedRecordIDs(),let deleted=try? agent.engine.recoveryDeletedRecordIDs(forTurn:saved.turnID,includingActionIDs:Set((saved.state.durableActions+(saved.finalResponse?.collectionActions ?? [])).map(\.id))) else{return false}
+        let external=Set((saved.request.mapChoices+(saved.state.latest?.mapChoices ?? [])+(saved.finalResponse?.mapChoices ?? [])).map(\.id))
+        let references=Set((saved.context?.index.map(\.id) ?? [])+saved.retainedRecordIDs+Array(saved.state.available.keys)+saved.state.ordered+saved.cities.map(\.id)).subtracting(external)
+        return references.isSubset(of:permitted.union(deleted))
+    }
+    private func recoveryInterruptedResponse(_ saved:AskTurnCheckpoint,message:String)->AskResponse? {
+        // Error presentation is also a read. Never expose retained private
+        // results if sharing access changed while the request was away.
+        guard recoveryAccessIsCurrent(saved) else{return nil}
+        var response=saved.finalResponse ?? saved.state.latest
+        var actions=saved.state.durableActions
+        for action in (try? collectionReceipts?(saved.turnID)) ?? [] {
+            if let i=actions.firstIndex(where:{$0.id==action.id}) {actions[i]=action}else{actions.append(action)}
+        }
+        if response==nil,!actions.isEmpty {response=actionReceiptResponse(actions)}
+        if response==nil,!saved.state.publicResearch.isEmpty {response = .init(summary:"Earlier research was kept.",candidates:[],listedCandidateIDs:[],usesLocalCatalog:true)}
+        guard var retained=response else{return nil}
+        if !actions.isEmpty {retained.collectionActions=actions}
+        if !saved.state.publicResearch.isEmpty {retained.publicResearch=saved.state.publicResearch}
+        if !saved.state.operationRecords.isEmpty {retained.operationRecords=saved.state.operationRecords}
+        retained.paragraphs.removeAll {$0.id=="recovery-interrupted"}
+        retained.paragraphs.append(.init(id:"recovery-interrupted",spans:[.text(message)],sourceIDs:[],operationStatus:true))
+        retained=currentCollectionActions(retained)
+        if let fresh=try? refreshIndex?(),let tools=try? AskReadTools(request:saved.userRequest ?? saved.request,index:fresh) {
+            guard let checked=try? tools.checked(tools.rebasedCatalogResponse(retained)) else{return nil};retained=checked
+        }
+        return retained
+    }
+    private func archiveRecovered(_ turn:AskTurn,chat:UUID)->Bool {
+        guard let position=chats.firstIndex(where:{$0.id==chat}) else{return false}
+        var next=currentChatSnapshot()
+        next[position].conversation.turns.removeAll {$0.id==turn.id}
+        next[position].conversation.turns.append(.init(turn))
+        next[position].lastActivityAt=activityNow();next[position].updatedAt=activityNow()
+        if next[position].title=="New chat" {next[position].title=String(turn.request.text.prefix(80))}
+        return commitChats(next,active:activeChatID)
+    }
+    private func cancelRecoveryJob(_ turn:UUID) {
+        guard let saved=try? recoveryStore?.checkpoint(turn),
+              let agent=provider as? AskAgentProvider,let hosted=agent.remote as? AskHostedProvider,saved.endpoint==hosted.configuration.endpoint.absoluteString else{return}
+        let step=saved.pendingRequest ?? AskConversationStep(requestID:saved.attemptID.uuidString,step:min(saved.state.nextStep,11),text:"",context:.init(index:[],recent:[]),cities:[],task:nil,findings:[],history:[],continuation:nil,result:nil)
+        Task { _ = try? await hosted.recoveryJob("cancel",step:step) }
+    }
+    private func stopRecoveryChat(_ chat:UUID)throws {
+        guard let recoveryStore else{return}
+        for (id,request) in recoveryRequests where request.conversationID==chat {recoveryTasks[id]?.cancel();recoveryTasks.removeValue(forKey:id);recoveryRequests.removeValue(forKey:id)}
+        for saved in try recoveryStore.checkpoints(chat:chat) {try recoveryStore.stop(saved.turnID);cancelRecoveryJob(saved.turnID)}
+        try recoveryStore.deleteChat(chat)
+    }
+    func revokeRecovery() {
+        guard recoveryStore != nil else{suspend();return}
+        if let recoveryStore {
+            for saved in (try? recoveryStore.checkpoints()) ?? [] {try? recoveryStore.stop(saved.turnID);cancelRecoveryJob(saved.turnID)}
+            for work in recoveryTasks.values {work.cancel()};recoveryTasks.removeAll();recoveryRequests.removeAll()
+        }
+        cancel();flushHistory()
+    }
+    func setAppActive(_ active:Bool) {
+        guard let recoveryStore else{return}
+        let returning=active && !recoveryStore.active
+        recoveryStore.active=active
+        if active {restorePendingRecovery(activityResume:returning)}else{flushHistory()}
+    }
+    func restorePendingRecovery(activityResume:Bool=false) {
+        guard historyReadable,let recoveryStore,recoveryStore.active else{return}
+        do {
+            let saved=try recoveryStore.checkpoints()
+            // The archive remains authoritative for deletion. Never resurrect a chat.
+            for item in saved where chats.contains(where:{$0.id==item.chatID}) {
+                let request=item.userRequest ?? item.request
+                if chats.first(where:{$0.id==item.chatID})?.conversation.turns.first(where:{$0.id==item.turnID})?.stopped==true {
+                    try recoveryStore.stop(item.turnID);continue
+                }
+                if !item.resumable {
+                    if item.chatID==activeChatID,!turns.contains(where:{$0.id==item.turnID}) {
+                        turns.append(.init(id:item.turnID,request:request,response:recoveryInterruptedResponse(item,message:item.failure ?? AskRecoveryError.unavailable.localizedDescription),sources:[],status:item.phase == .stopped ? .stopped : .failed(item.failure ?? AskRecoveryError.unavailable.localizedDescription)))
+                        flushHistory()
+                    }
+                    continue
+                }
+                if item.chatID==activeChatID,!turns.contains(where:{$0.id==item.turnID}) {turns.append(.init(id:item.turnID,request:request))}
+                if recoveryTasks[item.turnID] != nil {
+                    if activityResume,item.phase == .awaitingReply {recoveryResumeRequested.insert(item.turnID)}
+                    if item.chatID==activeChatID {activeID=item.turnID;isLoading=true;task=recoveryTasks[item.turnID];setStatus(item.turnID,.loading)}
+                    continue
+                }
+                if !recoveryStore.isRunning(item.turnID) {start(id:item.turnID,request:request)}
+            }
+            // Navigation during preflight has no durable request yet, but its
+            // existing task still belongs to the original chat, not the draft.
+            for (id,request) in recoveryRequests where request.conversationID==activeChatID && !turns.contains(where:{$0.id==id}) {
+                turns.append(.init(id:id,request:request));activeID=id;isLoading=true;task=recoveryTasks[id]
+            }
+        }catch {self.error=error.localizedDescription}
+    }
+
 }

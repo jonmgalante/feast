@@ -12,12 +12,12 @@ enum AskPublicLinks {
 
 enum AskPrivacy {
     // A new provider or materially broader payload requires a new scope key and fresh user consent.
-    static let onlineKey = "AskFeast.onlinePermission.cloudflare-openai.permitted-collection-dialogue-selected-images.v5"
-    // Do not migrate older permission values: collection notes and shared content need fresh consent.
+    static let onlineKey = "AskFeast.onlinePermission.cloudflare-openai.permitted-collection-dialogue-selected-images-recovery.v6"
+    // Do not migrate older permission values: cloud recovery storage requires fresh consent.
     static func accept() { UserDefaults.standard.set(true,forKey:onlineKey) }
     static func withdraw() { UserDefaults.standard.set(false,forKey:onlineKey) }
     static var onlineAllowed: Bool { UserDefaults.standard.bool(forKey: onlineKey) }
-    static let disclosure = "To answer your questions, Feast sends your questions, recent conversation, chosen images and relevant collection details to OpenAI through Cloudflare. Details include place names, cities, neighborhoods, categories, cuisines, statuses, tags and notes, including notes others shared in collections you can access. Relevant note details may also be sent to search providers or public sites, which may retain queries."
+    static let disclosure = "To answer your questions, Feast sends your questions, recent conversation, chosen images and relevant collection details to OpenAI through Cloudflare. Details include place names, cities, neighborhoods, categories, cuisines, statuses, tags and notes, including notes others shared in collections you can access. Relevant note details may also be sent to search providers or public sites, which may retain queries. To help resume interrupted answers, Feast temporarily stores request data and answers on Cloudflare with a 24-hour recovery window."
 }
 
 /// Release configuration is nonsecret bundle metadata, never a hardcoded development token.
@@ -38,6 +38,14 @@ enum AskProductionAccess {
     }
     static func credential() throws -> String {
         guard AskPrivacy.onlineAllowed else { throw AskHostedError.consentRequired }
+        return try readCredential()
+    }
+    /// Identity-only cancellation/acknowledgement of an accepted job, never AI input.
+    static func recoveryCleanupCredential(endpoint:URL)throws->String {
+        guard configuration(info:Bundle.main.infoDictionary ?? [:])?.endpoint==endpoint else{throw AskHostedError.disabled}
+        return try readCredential()
+    }
+    private static func readCredential()throws->String {
         let query: [String:Any] = [kSecClass as String:kSecClassGenericPassword,
             kSecAttrService as String:"com.jongalante.Feast.ask.production",kSecAttrAccount as String:"device",
             kSecAttrSynchronizable as String:false,kSecReturnData as String:true,kSecMatchLimit as String:kSecMatchLimitOne,
@@ -75,6 +83,17 @@ enum AskOwnerValidationAccess {
         var value:CFTypeRef?
         guard SecItemCopyMatching(query(returnData:true) as CFDictionary,&value) == errSecSuccess,
               let data=value as? Data,let token=String(data:data,encoding:.utf8) else {throw AskHostedError.disabled}
+        return token
+#else
+        throw AskHostedError.disabled
+#endif
+    }
+    /// Cleanup stays pinned to the temporary owner-validation endpoint.
+    static func recoveryCleanupCredential(endpoint:URL)throws->String {
+#if targetEnvironment(simulator)
+        guard endpoint.absoluteString=="https://"+host+"/v1/answer" else{throw AskHostedError.disabled}
+        var value:CFTypeRef?
+        guard SecItemCopyMatching(query(returnData:true) as CFDictionary,&value)==errSecSuccess,let data=value as? Data,let token=String(data:data,encoding:.utf8) else{throw AskHostedError.disabled}
         return token
 #else
         throw AskHostedError.disabled

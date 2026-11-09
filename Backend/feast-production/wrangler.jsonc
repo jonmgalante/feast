@@ -16,13 +16,18 @@
     "OWNER_VALIDATION_ENABLED": "false",
     "ALLOW_PUBLIC_LOOKUP": "false",
     "ALLOW_RECONCILED_BUDGET": "false",
-    "ALLOW_LEGACY_RECONCILIATION": "false"
+    "ALLOW_LEGACY_RECONCILIATION": "false",
+    "ASK_FEAST_RECOVERY_ENABLED": "false"
   },
   "durable_objects": {
     "bindings": [
       {
         "name": "PRODUCTION_STATE",
         "class_name": "ProductionLedger"
+      },
+      {
+        "name": "ANSWER_JOBS",
+        "class_name": "AnswerJobs"
       }
     ]
   },
@@ -32,6 +37,10 @@
       "new_sqlite_classes": [
         "ProductionLedger"
       ]
+    },
+    {
+      "tag": "answer-jobs-v1",
+      "new_sqlite_classes": ["AnswerJobs"]
     }
   ]
 }

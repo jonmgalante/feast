@@ -180,30 +180,76 @@ enum AskConversationProjection {
         return messages
     }
 }
+/// Keep display identities independently of whether a candidate rendered. A missing
+/// middle row must never turn the next row into a different ordinal on a save.
+enum AskPlaceReferenceSequence {
+    struct Sequence {let ids:[String];let incomplete:Bool;let explicitList:Bool}
+    private static let token=try! NSRegularExpression(pattern:"\\[\\[place:([^\\]\\r\\n]+)\\]\\]")
+    private static let row=try! NSRegularExpression(pattern:"(?m)^\\h*([0-9]+)[.)]\\h+([^\\r\\n]*)")
+    private static let bullet=try! NSRegularExpression(pattern:"(?m)^\\h*[-*•]\\h+([^\\r\\n]*)")
+    private static func tokens(_ text:String)->(ids:[String],incomplete:Bool) {
+        let source=text as NSString,matches=token.matches(in:text,range:NSRange(location:0,length:source.length))
+        let ids=matches.compactMap {UUID(uuidString:source.substring(with:$0.range(at:1)))?.uuidString}
+        return (ids,ids.count != matches.count || text.components(separatedBy:"[[place:").count-1 != matches.count)
+    }
+    static func read(_ text:String)->Sequence {
+        let all=tokens(text),source=text as NSString
+        let numberedRows=row.matches(in:text,range:NSRange(location:0,length:source.length))
+        let numbered=numberedRows.contains {source.substring(with:$0.range(at:2)).contains("[[place:")}
+        let rows=numbered ? numberedRows : bullet.matches(in:text,range:NSRange(location:0,length:source.length))
+        let bodyGroup=numbered ? 2 : 1
+        // List rows, not repeated mentions in surrounding prose, define order.
+        if rows.contains(where:{source.substring(with:$0.range(at:bodyGroup)).contains("[[place:")}) {
+            var ids:[String]=[],incomplete=all.incomplete
+            for (index,match) in rows.enumerated() {
+                let item=tokens(source.substring(with:match.range(at:bodyGroup)))
+                if (numbered && Int(source.substring(with:match.range(at:1))) != index+1) || item.ids.count != 1 || item.incomplete {incomplete=true}
+                ids += item.ids
+            }
+            if Set(ids).count != ids.count {incomplete=true}
+            var seen=Set<String>()
+            return .init(ids:ids.filter {seen.insert($0).inserted},incomplete:incomplete,explicitList:true)
+        }
+        var seen=Set<String>()
+        return .init(ids:all.ids.filter {seen.insert($0).inserted},incomplete:all.incomplete,explicitList:false)
+    }
+}
 struct AskConversationLoop:Sendable {
     let planner:any AskConversationPlanning
     let availableCandidates:[String:AskCandidate]
     let execute:@Sendable (AskAgentReply.Call)async throws->AskAgentExecution
     var retainFindings:(@Sendable (AskAgentReply.Call,[AskRetainedResearch])async throws->AskAgentExecution)?=nil
+    var recoverySnapshot:(@Sendable ()async throws->Data)?=nil
+    var revalidateRecoveryAccess:@Sendable ([UUID])async throws->Void = {_ in}
     func answer(_ request:AskRequest,context:AskSemanticContext,cities:[AskAgentCity],findings:[AskAgentFinding])async throws->AskResponse {
         let fullCollection=context.collectionAccess=="permitted_details_v1"
         let root=(AskProviderAttemptScope.lease?.attempt ?? request.performanceID ?? UUID()).uuidString,task=try request.agentTask?.checked().projection(fullCollection:fullCollection)
-        var continuation:String?,result:AskConversationStep.Result?,latest:AskResponse?,ordered=request.agentTask?.orderedIDs ?? request.libraryContext?.ids ?? [],privateScope=(request.agentTask?.privateSelection==true || request.libraryContext?.excludesExternalReferences==true)
-        var privateHistory=false,currentPrivateTool=false,localOnlyTool=false,taskFields:[String]=[]
-        var selectionIsOrdered=request.agentTask.map {$0.selectionIDs == nil} ?? (request.libraryContext?.selectionIDs == nil)
-        if let membership=request.agentTask?.selectionIDs ?? request.libraryContext?.selectionIDs {ordered=membership}
-        var available=availableCandidates
-        if fullCollection,let prior=request.collectionContinuation {for candidate in prior.candidates where available[candidate.id]==nil {available[candidate.id]=candidate}}
-        var publicResearch=request.publicResearch
-        let native=await planner.nativeResearchAvailable()
-        var attemptedChange=false
-        var unresolvedChanges=Set<String>()
-        var citations:[AskWebCitation]=[],durableActions:[AskCollectionAction]=[],durableOutcomes:[AskAgentOutcome]=[]
-        var operationRecords:[AskOperationRecord]=[]
+        let recovery=AskRecoveryScope.handle
+        var state=AskRecoveryLoopState()
+        state.referencesIncomplete=request.agentTask?.referencesIncomplete
+        state.ordered=request.agentTask?.orderedIDs ?? request.libraryContext?.ids ?? []
+        state.privateScope=(request.agentTask?.privateSelection==true || request.libraryContext?.excludesExternalReferences==true)
+        state.selectionIsOrdered=request.agentTask.map {$0.selectionIDs == nil} ?? (request.libraryContext?.selectionIDs == nil)
+        if let membership=request.agentTask?.selectionIDs ?? request.libraryContext?.selectionIDs {state.ordered=membership}
+        state.available=availableCandidates
+        if fullCollection,let prior=request.collectionContinuation {for candidate in prior.candidates where state.available[candidate.id]==nil {state.available[candidate.id]=candidate}}
+        state.publicResearch=request.publicResearch
+        let native=recovery != nil ? true : await planner.nativeResearchAvailable()
+        if let recovery,let checkpoint=try await recovery.store.checkpoint(recovery.turn) {
+            if checkpoint.phase == .executingTool {throw AskRecoveryError.localStepUncertain}
+            if checkpoint.loopInitialized {state=checkpoint.state}
+        }
+        func saveBoundary(nextStep:Int,phase:AskTurnCheckpoint.Phase)async throws {
+            guard let recovery,var checkpoint=try await recovery.store.checkpoint(recovery.turn) else{return}
+            state.nextStep=nextStep;checkpoint.state=state;checkpoint.phase=phase;checkpoint.loopInitialized=true
+            checkpoint.executor=try await recoverySnapshot?()
+            if phase == .ready {checkpoint.pendingRequest=nil;checkpoint.reply=nil}
+            try await recovery.store.save(checkpoint)
+        }
         func keepCollectionHistory(_ response:inout AskResponse,text:String) {
             guard fullCollection else{return}
             let nativeText=response.paragraphs.filter {$0.id != "conversation-answer"}.flatMap(\.spans).map {span->String in
-                switch span {case .text(let value):return value;case .place(let id):return "[[place:"+id+"]] "+(available[id]?.name ?? "Saved place")}
+                switch span {case .text(let value):return value;case .place(let id):return "[[place:"+id+"]] "+(state.available[id]?.name ?? "Saved place")}
             }.joined(separator:" ")
             var paging=""
             if let page=response.collectionPage {
@@ -214,38 +260,45 @@ struct AskConversationLoop:Sendable {
             response.publicConversationText=nil
         }
         func interrupted(_ error:Error)->AskResponse? {
-            guard latest != nil || !publicResearch.isEmpty else{return nil}
-            var response=latest ?? AskResponse(summary:"Public research was kept for your next message.",candidates:[],listedCandidateIDs:[],usesLocalCatalog:true)
-            response.publicResearch=Array(publicResearch.suffix(4))
-            response.operationRecords=operationRecords.isEmpty ? nil : operationRecords
+            guard state.latest != nil || !state.publicResearch.isEmpty else{return nil}
+            var response=state.latest ?? AskResponse(summary:"Public research was kept for your next message.",candidates:[],listedCandidateIDs:[],usesLocalCatalog:true)
+            response.publicResearch=Array(state.publicResearch.suffix(4))
+            response.operationRecords=state.operationRecords.isEmpty ? nil : state.operationRecords
             response.paragraphs.append(.init(id:"conversation-interrupted",spans:[.text("Earlier results were kept. "+AskHostedError.message(for:error))],sourceIDs:[]))
-            if !durableActions.isEmpty {response.collectionActions=durableActions}
-            response.agentTask = .init(action:attemptedChange || !durableActions.isEmpty ? "change" : "query",fields:taskFields,orderedIDs:selectionIsOrdered ? ordered : [],sourcePolicy:"public_if_missing",privateSelection:privateScope || privateHistory,outcomes:durableOutcomes.isEmpty ? nil : durableOutcomes,selectionIDs:selectionIsOrdered ? nil : ordered)
-            response.publicConversationText=privateHistory || privateScope ? nil : "Unfinished task. "+(selectionIsOrdered ? "Saved result IDs: "+ordered.joined(separator:",")+". " : "The aggregate selection remains on device. ")+String(response.summary.prefix(1000))
+            if !state.durableActions.isEmpty {response.collectionActions=state.durableActions}
+            response.agentTask = .init(action:state.attemptedChange || !state.durableActions.isEmpty ? "change" : "query",fields:state.taskFields,orderedIDs:state.selectionIsOrdered ? state.ordered : [],sourcePolicy:"public_if_missing",privateSelection:state.privateScope || state.privateHistory,outcomes:state.durableOutcomes.isEmpty ? nil : state.durableOutcomes,selectionIDs:state.selectionIsOrdered ? nil : state.ordered,referencesIncomplete:state.referencesIncomplete)
+            response.publicConversationText=state.privateHistory || state.privateScope ? nil : "Unfinished task. "+(state.selectionIsOrdered ? "Saved result IDs: "+state.ordered.joined(separator:",")+". " : "The aggregate selection remains on device. ")+String(response.summary.prefix(1000))
             keepCollectionHistory(&response,text:"Unfinished task. Continue from the saved page metadata.")
             return response
         }
-        for step in 0..<12 {
+        if let recovery,let saved=try await recovery.store.checkpoint(recovery.turn),!saved.loopInitialized {try await saveBoundary(nextStep:0,phase:.ready)}
+        for step in state.nextStep..<12 {
             try Task.checkCancellation()
+            try await AskRecoveryActivity.check()
+            if recovery != nil {try await revalidateRecoveryAccess(state.durableActions.map(\.id))}
             let reply:AskConversationReply
             do {
-                var payload=AskConversationStep(requestID:root,step:step,text:request.text,context:context,cities:cities,task:task,findings:findings,history:Array(request.dialogue.suffix(12)),continuation:continuation,result:result,historyCount:request.dialogue.count)
-                if native {payload.version=10;payload.webAllowed = (fullCollection || !currentPrivateTool) && !localOnlyTool;payload.turnID=(request.performanceID ?? UUID(uuidString:root)!).uuidString}
+                var payload=AskConversationStep(requestID:root,step:step,text:request.text,context:context,cities:cities,task:task,findings:findings,history:Array(request.dialogue.suffix(12)),continuation:state.continuation,result:state.result,historyCount:request.dialogue.count)
+                if native {payload.version=10;payload.webAllowed = (fullCollection || !state.currentPrivateTool) && !state.localOnlyTool;payload.turnID=(request.performanceID ?? UUID(uuidString:root)!).uuidString}
                 reply=try await planner.conversationStep(payload)
             }
             catch {
+                if recovery != nil {throw error}
                 if let response=interrupted(error) {return response};throw error
             }
-            continuation=reply.continuation
+            state.continuation=reply.continuation
             if native,let evidence=reply.nativeEvidence,!evidence.blocks.isEmpty {
                 let queries=evidence.actions.flatMap {($0.queries ?? [])+($0.query.map {[$0]} ?? [])}
                 let researchID=UUID(uuidString:root)!
                 let web=AskWebResearchResult(text:AskConversationProjection.bounded(evidence.blocks.map(\.text).joined(separator:"\n\n"),units:16000),citations:Array(evidence.sources.filter {$0.roles.contains("cited")}.prefix(20)).map {.init(title:$0.title,url:$0.url)},nativeEvidence:evidence)
                 let retained=AskRetainedResearch(id:researchID,originatingTurn:request.performanceID ?? researchID,query:AskConversationProjection.bounded((queries.isEmpty ? ["Public native research"] : queries).joined(separator:"\n"),units:1500),result:web)
-                publicResearch.removeAll {$0.id==researchID};publicResearch.append(retained)
+                state.publicResearch.removeAll {$0.id==researchID};state.publicResearch.append(retained)
             }
-            if native {citations=reply.finalCitations ?? []}
+            if native {state.citations=reply.finalCitations ?? []}
             if let call=reply.call {
+                try await AskRecoveryActivity.check()
+                if recovery != nil {try await revalidateRecoveryAccess(state.durableActions.map(\.id))}
+                try await saveBoundary(nextStep:step,phase:.executingTool)
                 if call.name=="read_conversation" {
                     struct Range:Decodable {let offset,limit:Int}
                     let range=try JSONDecoder().decode(Range.self,from:Data(call.arguments.utf8))
@@ -253,27 +306,33 @@ struct AskConversationLoop:Sendable {
                     let messages=Array(request.dialogue.dropFirst(range.offset).prefix(range.limit))
                     var output=AskConversationToolResult(.init(status:messages.isEmpty ? "empty" : "success",complete:range.offset+messages.count>=request.dialogue.count,totalCount:request.dialogue.count,records:[],findings:[],message:messages.isEmpty ? "not_found" : "ok",localOnly:false))
                     output.history=messages
-                    result = .init(callID:call.callID,output:output)
+                    state.result = .init(callID:call.callID,output:output)
                 }else if call.name=="search_web" {
                     // Prior private instruction contents are redacted from history.
                     // A private tool result in THIS task still cannot feed public search.
-                    guard (fullCollection || !currentPrivateTool) && !localOnlyTool else {throw AskHostedError.answerRejected}
+                    guard (fullCollection || !state.currentPrivateTool) && !state.localOnlyTool else {throw AskHostedError.answerRejected}
                     struct Search:Decodable {let query:String}
                     let q=try JSONDecoder().decode(Search.self,from:Data(call.arguments.utf8))
                     let web:AskWebResearchResult
                     do {web=try await planner.searchConversationWeb(q.query)}catch {if let response=interrupted(error){return response};throw error}
-                    publicResearch.append(.init(id:UUID(),originatingTurn:request.performanceID ?? UUID(),query:q.query,result:web))
-                    for source in web.citations where !citations.contains(where:{$0.url==source.url}) {citations.append(source)}
-                    result = .init(callID:call.callID,output:.init(.init(status:"success",complete:true,totalCount:0,records:[],findings:[],message:"ok",localOnly:false),web:web))
+                    state.publicResearch.append(.init(id:UUID(),originatingTurn:request.performanceID ?? UUID(),query:q.query,result:web))
+                    for source in web.citations where !state.citations.contains(where:{$0.url==source.url}) {state.citations.append(source)}
+                    state.result = .init(callID:call.callID,output:.init(.init(status:"success",complete:true,totalCount:0,records:[],findings:[],message:"ok",localOnly:false),web:web))
                 }else {
                     if call.name=="propose_changes",let proposal=try? JSONDecoder().decode(AskChangeProposal.self,from:Data(call.arguments.utf8)) {
-                        attemptedChange=true
-                        taskFields=proposal.changes.map(\.field)
-                        if taskFields.contains(where:{["note","tags","status"].contains($0)}) {privateHistory=true}
-                    }else if call.name=="query_collection",durableActions.isEmpty,let object=try? JSONSerialization.jsonObject(with:Data(call.arguments.utf8)) as? [String:Any],let query=object["query"] as? [String:Any] {taskFields=query["fields"] as? [String] ?? []}
+                        state.attemptedChange=true
+                        state.taskFields=proposal.changes.map(\.field)
+                        if state.taskFields.contains(where:{["note","tags","status"].contains($0)}) {state.privateHistory=true}
+                    }else if call.name=="query_collection",state.durableActions.isEmpty,let object=try? JSONSerialization.jsonObject(with:Data(call.arguments.utf8)) as? [String:Any],let query=object["query"] as? [String:Any] {state.taskFields=query["fields"] as? [String] ?? []}
                     var value:AskAgentExecution
-                    do {if call.name=="retain_findings",let retainFindings {value=try await retainFindings(call,publicResearch)}else{value=try await execute(call)}}catch {
-                        if error is CancellationError {throw error}
+                    do {
+                        let operation=AskRecoveryOperationIdentity(turnID:request.performanceID ?? UUID(),step:step,callID:call.callID)
+                        value=try await AskRecoveryOperationScope.$identity.withValue(recovery == nil ? nil : operation) {
+                            if call.name=="retain_findings",let retainFindings {return try await retainFindings(call,state.publicResearch)}
+                            return try await execute(call)
+                        }
+                    }catch {
+                        if error is CancellationError || error is AskRecoveryError {throw error}
                         // Retention is optional evidence association, never a write.
                         // Reject the proposed association without discarding actual
                         // research or preventing a grounded answer from that research.
@@ -282,21 +341,23 @@ struct AskConversationLoop:Sendable {
                         let rejectedRetention:Bool
                         switch error {case AskError.invalidEvidence,AskError.inputLimit,is DecodingError:rejectedRetention=true;default:rejectedRetention=false}
                         if call.name=="retain_findings",rejectedRetention {
-                            result = .init(callID:call.callID,output:.init(.init(status:"conflict",complete:false,totalCount:0,records:[],findings:[],message:"unavailable",localOnly:false)))
+                            state.result = .init(callID:call.callID,output:.init(.init(status:"conflict",complete:false,totalCount:0,records:[],findings:[],message:"unavailable",localOnly:false)))
+                            try await saveBoundary(nextStep:step+1,phase:.ready)
                             continue
                         }
                         if call.name=="propose_changes",let proposal=try? JSONDecoder().decode(AskChangeProposal.self,from:Data(call.arguments.utf8)) {
-                            if latest==nil {latest = .init(summary:"The change could not be completed.",candidates:[],listedCandidateIDs:[],usesLocalCatalog:true)}
-                            latest?.pendingProposal=proposal;latest?.executionStatus=error is AskChangeError ? "failed" : "unresolved"
-                            operationRecords=AskOperationRecord.merged(operationRecords,.make(turn:request.performanceID ?? UUID(),proposal:proposal,actions:[],status:latest?.executionStatus ?? "unresolved",outcomes:[]))
+                            if state.latest==nil {state.latest = .init(summary:"The change could not be completed.",candidates:[],listedCandidateIDs:[],usesLocalCatalog:true)}
+                            state.latest?.pendingProposal=proposal;state.latest?.executionStatus=error is AskChangeError ? "failed" : "unresolved"
+                            state.operationRecords=AskOperationRecord.merged(state.operationRecords,.make(turn:request.performanceID ?? UUID(),proposal:proposal,actions:[],status:state.latest?.executionStatus ?? "unresolved",outcomes:[]))
                         }
+                        if recovery != nil {throw error}
                         if let response=interrupted(error){return response};throw error
                     }
                     if call.name=="propose_changes" {
                         value.response?.pendingProposal=try? JSONDecoder().decode(AskChangeProposal.self,from:Data(call.arguments.utf8))
                         value.response?.executionStatus=value.output.status
                         if let proposal=value.response?.pendingProposal {
-                            operationRecords=AskOperationRecord.merged(operationRecords,.make(turn:request.performanceID ?? UUID(),proposal:proposal,actions:value.response?.collectionActions ?? [],status:value.output.status,outcomes:value.outcomes ?? [],effectiveTargetIDs:value.effectiveTargetIDs))
+                            state.operationRecords=AskOperationRecord.merged(state.operationRecords,.make(turn:request.performanceID ?? UUID(),proposal:proposal,actions:value.response?.collectionActions ?? [],status:value.output.status,outcomes:value.outcomes ?? [],effectiveTargetIDs:value.effectiveTargetIDs))
                         }
                         if let proposal=value.response?.pendingProposal {
                             let fields=proposal.changes.map(\.field).sorted().joined(separator:",")
@@ -304,19 +365,19 @@ struct AskConversationLoop:Sendable {
                             for target in targets {
                                 let key=proposal.entity+":"+proposal.operation+":"+target+":"+fields
                                 let leaf=value.outcomes?.last(where:{$0.id==target})?.state
-                                if ["applied","unchanged"].contains(value.output.status) || ["applied","undone"].contains(leaf ?? "") {unresolvedChanges.remove(key)}
-                                else {unresolvedChanges.insert(key)}
+                                if ["applied","unchanged"].contains(value.output.status) || ["applied","undone"].contains(leaf ?? "") {state.unresolvedChanges.remove(key)}
+                                else {state.unresolvedChanges.insert(key)}
                             }
-                        }else if !["applied","unchanged"].contains(value.output.status) {unresolvedChanges.insert(call.callID)}
-                        if let fields=value.presentation?.requestedFields {taskFields=fields}
+                        }else if !["applied","unchanged"].contains(value.output.status) {state.unresolvedChanges.insert(call.callID)}
+                        if let fields=value.presentation?.requestedFields {state.taskFields=fields}
                     }
                     if let response=value.response {
-                        for candidate in response.candidates {available[candidate.id]=candidate}
+                        for candidate in response.candidates {state.available[candidate.id]=candidate}
                         // A successful mutation invalidates earlier read snapshots. Keep
                         // durable receipts, but require fresh reads for current details.
-                        if (response.collectionActions ?? []).contains(where:{$0.state == .applied || $0.state == .undone}) {latest=nil}
-                        for action in response.collectionActions ?? [] {if let i=durableActions.firstIndex(where:{$0.id==action.id}) {durableActions[i]=action}else{durableActions.append(action)}}
-                        let previousPage=latest ?? request.collectionContinuation
+                        if (response.collectionActions ?? []).contains(where:{$0.state == .applied || $0.state == .undone}) {state.latest=nil}
+                        for action in response.collectionActions ?? [] {if let i=state.durableActions.firstIndex(where:{$0.id==action.id}) {state.durableActions[i]=action}else{state.durableActions.append(action)}}
+                        let previousPage=state.latest ?? request.collectionContinuation
                         if fullCollection,let page=response.collectionPage,let prior=previousPage?.collectionPage,page.snapshot==prior.snapshot,page.offset==prior.offset+prior.returnedCount,let previous=previousPage {
                             var visiblePrevious=previous
                             visiblePrevious.paragraphs.removeAll {$0.id=="conversation-interrupted" || $0.id=="conversation-limit"}
@@ -325,55 +386,69 @@ struct AskConversationLoop:Sendable {
                             merged.collectionPage = .init(snapshot:page.snapshot,totalCount:page.totalCount,offset:prior.offset,returnedCount:prior.returnedCount+page.returnedCount,nextOffset:page.nextOffset)
                             if let context=merged.libraryContext {merged.libraryContext = .init(ids:merged.candidates.map(\.id),filters:context.filters,excludesExternalReferences:true)}
                             if let remaining=page.nextOffset {merged.paragraphs.append(.init(id:"collection-page",spans:[.text("Showing \(remaining) of \(page.totalCount) matching saved places. More results remain.")],sourceIDs:[]))}
-                            latest=merged
-                        } else {latest=value.appendPreviousResults ? AskAgentLoop.merged(latest,response) : response}
+                            state.latest=merged
+                        } else {state.latest=value.appendPreviousResults ? AskAgentLoop.merged(state.latest,response) : response}
                     }
-                    for outcome in value.outcomes ?? [] {if let i=durableOutcomes.firstIndex(where:{$0.id==outcome.id}) {durableOutcomes[i]=outcome}else{durableOutcomes.append(outcome)}}
-                    if !durableActions.isEmpty {latest?.collectionActions=durableActions}
-                    ordered=value.orderedIDs;selectionIsOrdered=value.selectionIsOrdered;privateScope=value.selectionIsPrivate;privateHistory = privateHistory || value.selectionIsPrivate || value.output.localOnly;currentPrivateTool = currentPrivateTool || value.selectionIsPrivate || value.output.localOnly;localOnlyTool = localOnlyTool || value.output.localOnly
+                    for outcome in value.outcomes ?? [] {if let i=state.durableOutcomes.firstIndex(where:{$0.id==outcome.id}) {state.durableOutcomes[i]=outcome}else{state.durableOutcomes.append(outcome)}}
+                    if !state.durableActions.isEmpty {let actions=state.durableActions;state.latest?.collectionActions=actions}
+                    if call.name=="query_collection",["success","empty","local_only"].contains(value.output.status) {state.referencesIncomplete=nil}
+                    state.ordered=value.orderedIDs;state.selectionIsOrdered=value.selectionIsOrdered;state.privateScope=value.selectionIsPrivate;state.privateHistory = state.privateHistory || value.selectionIsPrivate || value.output.localOnly;state.currentPrivateTool = state.currentPrivateTool || value.selectionIsPrivate || value.output.localOnly;state.localOnlyTool = state.localOnlyTool || value.output.localOnly
                     var output=AskConversationToolResult(value.output)
                     output.presentation=value.presentation
                     if output.presentation==nil,call.name=="propose_changes" {output.presentation = .init(kind:"action",requestedFields:[],returnedFields:[],complete:value.output.complete,renderedLocally:true)}
-                    result = .init(callID:call.callID,output:output)
-                    if ["budget_stopped","needs_confirmation","conflict","unavailable"].contains(value.output.status),!(call.name=="propose_changes" && ["conflict","unavailable"].contains(value.output.status)),!(call.name=="search_maps" && value.output.status=="unavailable"),var response=latest {response.publicResearch=Array(publicResearch.suffix(4));response.operationRecords=operationRecords.isEmpty ? nil : operationRecords;response.agentTask = .init(action:attemptedChange ? "change" : "query",fields:taskFields,orderedIDs:selectionIsOrdered ? ordered : [],sourcePolicy:"public_if_missing",privateSelection:privateScope || privateHistory,outcomes:durableOutcomes.isEmpty ? nil : durableOutcomes,selectionIDs:selectionIsOrdered ? nil : ordered);return response}
+                    state.result = .init(callID:call.callID,output:output)
+                    if ["budget_stopped","needs_confirmation","conflict","unavailable"].contains(value.output.status),!(call.name=="propose_changes" && ["conflict","unavailable"].contains(value.output.status)),!(call.name=="search_maps" && value.output.status=="unavailable"),var response=state.latest {response.publicResearch=Array(state.publicResearch.suffix(4));response.operationRecords=state.operationRecords.isEmpty ? nil : state.operationRecords;response.agentTask = .init(action:state.attemptedChange ? "change" : "query",fields:state.taskFields,orderedIDs:state.selectionIsOrdered ? state.ordered : [],sourcePolicy:"public_if_missing",privateSelection:state.privateScope || state.privateHistory,outcomes:state.durableOutcomes.isEmpty ? nil : state.durableOutcomes,selectionIDs:state.selectionIsOrdered ? nil : state.ordered,referencesIncomplete:state.referencesIncomplete);return response}
                 }
-                if let lease=AskProviderAttemptScope.lease {
-                    var checkpoint=latest ?? AskResponse(summary:"Completed research retained.",candidates:[],listedCandidateIDs:[],usesLocalCatalog:true)
-                    checkpoint.publicResearch=Array(publicResearch.suffix(4))
-                    checkpoint.agentTask = .init(action:"query",fields:taskFields,orderedIDs:selectionIsOrdered ? ordered : [],sourcePolicy:"public_if_missing",privateSelection:privateScope || privateHistory,selectionIDs:selectionIsOrdered ? nil : ordered)
+                if recovery == nil,let lease=AskProviderAttemptScope.lease {
+                    var checkpoint=state.latest ?? AskResponse(summary:"Completed research retained.",candidates:[],listedCandidateIDs:[],usesLocalCatalog:true)
+                    checkpoint.publicResearch=Array(state.publicResearch.suffix(4))
+                    checkpoint.agentTask = .init(action:"query",fields:state.taskFields,orderedIDs:state.selectionIsOrdered ? state.ordered : [],sourcePolicy:"public_if_missing",privateSelection:state.privateScope || state.privateHistory,selectionIDs:state.selectionIsOrdered ? nil : state.ordered,referencesIncomplete:state.referencesIncomplete)
                     try await AskProviderAttempts.shared.keepReadContext(checkpoint,lease:lease)
                 }
+                try await saveBoundary(nextStep:step+1,phase:.ready)
                 continue
             }
             let assemblyStarted=DispatchTime.now().uptimeNanoseconds
             defer {AskPipelineScope.record(.assembly,since:assemblyStarted)}
-            var response=latest ?? AskResponse(summary:String(reply.text.prefix(3000)),candidates:[],listedCandidateIDs:[],usesLocalCatalog:true)
-            response.publicResearch=Array(publicResearch.suffix(4))
-            response.operationRecords=operationRecords.isEmpty ? nil : operationRecords
-            let finalText = !unresolvedChanges.isEmpty ? "" : reply.text
-            var rendered=Self.paragraph(finalText,catalog:context.index,available:available,candidates:&response.candidates,citations:citations)
+            var response=state.latest ?? AskResponse(summary:String(reply.text.prefix(3000)),candidates:[],listedCandidateIDs:[],usesLocalCatalog:true)
+            response.publicResearch=Array(state.publicResearch.suffix(4))
+            response.operationRecords=state.operationRecords.isEmpty ? nil : state.operationRecords
+            let finalText = !state.unresolvedChanges.isEmpty ? "" : reply.text
+            var rendered=Self.paragraph(finalText,catalog:context.index,available:state.available,candidates:&response.candidates,citations:state.citations)
             if native {rendered.citationsAreResearchPool=false}
             if !finalText.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty {
                 // Tool-attempt failures are fallback presentation, not final facts.
                 // The agent has seen their structured status and may have resolved
                 // them through another tool. Keep them only if work interrupts.
                 response.paragraphs.removeAll {$0.transientToolStatus == true}
-                if latest==nil {response.paragraphs=[rendered]}else{response.paragraphs.insert(rendered,at:0)}
+                if state.latest==nil {response.paragraphs=[rendered]}else{response.paragraphs.insert(rendered,at:0)}
             }
-            let references=rendered.spans.compactMap {span->String? in if case .place(let id)=span{return id};return nil}
-            // A model-authored replacement list may own presentation only when
-            // every verified row appears exactly once. Otherwise the app keeps its complete list.
-            if fullCollection,let page=response.collectionPage,page.offset==0,page.nextOffset==nil,!references.isEmpty,references.count==response.candidates.count,Set(references)==Set(response.candidates.map(\.id)) {
+            let sequence=AskPlaceReferenceSequence.read(finalText)
+            let references=sequence.ids
+            let incomplete=sequence.incomplete || references.contains {state.available[$0]==nil}
+            let nativeOperation=state.latest?.libraryContext?.filters.operation
+            // A native aggregate has membership, not an ordinal list. Incidental
+            // references in its explanation must not shrink/reorder that membership.
+            let aggregate=nativeOperation.map {[AskLibraryPlan.Operation.count,.group,.catalog].contains($0)} ?? false
+            // Compare with the original native rows, before paragraph rendering
+            // adds references. An incidental extra place is not another result.
+            let nativeIDs=state.latest?.candidates.map(\.id) ?? []
+            let completeReplacement:Bool
+            if fullCollection,!aggregate,let page=response.collectionPage,page.offset==0,page.nextOffset==nil,!incomplete,!references.isEmpty,references.count==nativeIDs.count,Set(references)==Set(nativeIDs) {completeReplacement=true}else{completeReplacement=false}
+            if completeReplacement {
                 response.paragraphs=[rendered]
                 let byID=Dictionary(uniqueKeysWithValues:response.candidates.map {($0.id,$0)})
                 response.candidates=references.compactMap {byID[$0]}
                 if let previous=response.libraryContext {response.libraryContext = .init(ids:references,filters:previous.filters,excludesExternalReferences:true)}
-                selectionIsOrdered=true;ordered=references
+                state.selectionIsOrdered=true;state.ordered=references;state.referencesIncomplete=nil
+            } else if !aggregate && !(fullCollection && nativeOperation == .list) && !references.isEmpty {
+                state.selectionIsOrdered=true;state.ordered=references;state.referencesIncomplete=incomplete ? true : nil
             }
-            if !references.isEmpty && !(fullCollection && latest?.libraryContext?.filters.operation == .list) {selectionIsOrdered=true;ordered=references.reduce(into:[]) {if !$0.contains($1){$0.append($1)}}}
-            response.agentTask = .init(action:attemptedChange || !durableActions.isEmpty ? "change" : "query",fields:taskFields,orderedIDs:selectionIsOrdered ? ordered : [],sourcePolicy:"public_if_missing",privateSelection:privateScope || privateHistory,outcomes:durableOutcomes.isEmpty ? nil : durableOutcomes,selectionIDs:selectionIsOrdered ? nil : ordered)
-            let acknowledgements=durableActions.map {"action \($0.id.uuidString) \($0.entity) \($0.operation) \($0.state.rawValue) targets \($0.targetIDs.joined(separator:","))"}.joined(separator:"; ")
-            response.publicConversationText=privateHistory || privateScope ? nil : (!unresolvedChanges.isEmpty ? "The requested change was not completed. Check its execution result before retrying." : reply.text)+(acknowledgements.isEmpty ? "" : "\nApp outcomes: "+acknowledgements)
+            // Two conflicting displayed lists must not silently select one order.
+            if incomplete || (fullCollection && nativeOperation == .list && sequence.explicitList && !references.isEmpty && !completeReplacement) {state.referencesIncomplete=true}
+            response.agentTask = .init(action:state.attemptedChange || !state.durableActions.isEmpty ? "change" : "query",fields:state.taskFields,orderedIDs:state.selectionIsOrdered ? state.ordered : [],sourcePolicy:"public_if_missing",privateSelection:state.privateScope || state.privateHistory,outcomes:state.durableOutcomes.isEmpty ? nil : state.durableOutcomes,selectionIDs:state.selectionIsOrdered ? nil : state.ordered,referencesIncomplete:state.referencesIncomplete)
+            let acknowledgements=state.durableActions.map {"action \($0.id.uuidString) \($0.entity) \($0.operation) \($0.state.rawValue) targets \($0.targetIDs.joined(separator:","))"}.joined(separator:"; ")
+            response.publicConversationText=state.privateHistory || state.privateScope ? nil : (!state.unresolvedChanges.isEmpty ? "The requested change was not completed. Check its execution result before retrying." : reply.text)+(acknowledgements.isEmpty ? "" : "\nApp outcomes: "+acknowledgements)
             keepCollectionHistory(&response,text:reply.text+"\n"+acknowledgements)
             return response
         }
@@ -396,7 +471,7 @@ struct AskConversationLoop:Sendable {
             if let id,let candidate=available[id] {
                 if !candidates.contains(where:{$0.id==id}) {candidates.append(candidate)}
                 spans.append(.place(id))
-            }else{spans.append(.text("a place that is no longer available"))}
+            }else{spans.append(.text("a saved place I couldn’t match"))}
             cursor=NSMaxRange(match.range)
         }
         if cursor<source.length {spans.append(.text(source.substring(from:cursor)))}

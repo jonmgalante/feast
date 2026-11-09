@@ -7,6 +7,7 @@ struct AskAgentProvider:AskFeastProvider {
     let adapter:AskSavedCollection
     let engine:AskCollectionChangeEngine
     let searchMaps:@MainActor @Sendable (String)async throws->[ApplePlaceMatch]
+    var recoveryStore:AskTurnRecoveryStore?=nil
     var resolveMaps:@MainActor @Sendable (String)async throws->ApplePlaceMatch? = {_ in nil}
     private func localOrConsent(_ request:AskRequest,tools:AskReadTools)async throws->AskResponse {
         do {return try await fallback.answer(request,tools:tools)}
@@ -19,6 +20,27 @@ struct AskAgentProvider:AskFeastProvider {
         }
     }
     func answer(_ request:AskRequest,tools:AskReadTools)async throws->AskResponse {
+        if let recoveryStore,let turn=request.performanceID,let saved=try await recoveryStore.checkpoint(turn) {
+            guard let hosted=remote as? AskHostedProvider,await hosted.permission(),saved.endpoint==hosted.configuration.endpoint.absoluteString else{throw AskHostedError.consentRequired}
+            guard saved.resumable else{throw AskRecoveryError.stopped}
+            if saved.finalResponse==nil {
+                let minimum=saved.context?.collectionAccess=="permitted_details_v1" ? 7 : 6
+                let toolsReady=await hosted.libraryToolsEnabled(),version=await hosted.libraryPlanVersion()
+                if !toolsReady || version<minimum {await hosted.prepareCapabilities()}
+                guard await hosted.permission() else{throw AskHostedError.consentRequired}
+                let refreshedTools=await hosted.libraryToolsEnabled(),refreshedVersion=await hosted.libraryPlanVersion()
+                guard refreshedTools,refreshedVersion>=minimum else{throw AskRecoveryError.paused}
+            }
+            if saved.phase == .executingTool {throw AskRecoveryError.localStepUncertain}
+            try await recoveryStore.claim(turn)
+            do {
+                let response=try await AskRecoveryScope.$handle.withValue(.init(store:recoveryStore,turn:turn,permission:hosted.permission)) {
+                    try await AskProviderAttemptScope.$lease.withValue(.init(turn:turn,attempt:saved.attemptID)) {try await runRecovered(saved,tools:tools)}
+                }
+                try await recoveryStore.complete(turn,response:response);await recoveryStore.release(turn);return response
+            }catch {await recoveryStore.release(turn);throw error}
+        }
+
         if let hosted=remote as? AskHostedProvider,await hosted.permission(),let turn=request.performanceID {
             let lease=try await hosted.prepareProviderAttempt(turn:turn,retrying:request.providerRetry)
             var resumed=request
@@ -32,6 +54,24 @@ struct AskAgentProvider:AskFeastProvider {
         }
         return try await runAnswer(request,tools:tools)
     }
+    private func runRecovered(_ saved:AskTurnCheckpoint,tools:AskReadTools)async throws->AskResponse {
+        guard let context=saved.context ?? (saved.phase == .completed ? AskSemanticContext(index:[],recent:[]) : nil),let conversational=remote as? any AskConversationPlanning,let researcher=remote as? any AskBusinessResearching else{throw AskRecoveryError.unavailable}
+        let executor=await AskAgentExecutor(adapter:adapter,engine:engine,request:saved.executorRequest ?? saved.request,researcher:researcher,searchMaps:{query in try await searchMaps(query)},resolveMaps:resolveMaps,fullCollectionContext:context.collectionAccess=="permitted_details_v1")
+        // Fresh access checks protect retained private context. Do not silently
+        // rebuild a changed selection or send a different request under one ID.
+        let permitted=try await executor.permittedRecordIDs()
+        let external=Set((saved.request.mapChoices+(saved.state.latest?.mapChoices ?? [])+(saved.finalResponse?.mapChoices ?? [])).map(\.id))
+        let referenced=Set(context.index.map(\.id)+saved.cities.map(\.id)+Array(saved.state.available.keys)+saved.state.ordered+saved.request.collectionDialogueIDs+saved.retainedRecordIDs).subtracting(external)
+        let deleted=try await engine.recoveryDeletedRecordIDs(forTurn:saved.turnID,includingActionIDs:Set((saved.state.durableActions+(saved.finalResponse?.collectionActions ?? [])).map(\.id)))
+        guard referenced.isSubset(of:permitted.union(deleted)) else{throw AskHostedError.selectionUnavailable}
+        if let response=saved.finalResponse {return response}
+        if let data=saved.executor {try await executor.restoreRecoverySnapshot(data)}
+        return try await AskConversationLoop(planner:conversational,availableCandidates:saved.state.available,execute:{call in try await executor.executeConversation(call,planner:conversational)},retainFindings:{call,evidence in try await executor.retainPublicFindings(call,evidence:evidence)},recoverySnapshot:{try await executor.recoverySnapshot()},revalidateRecoveryAccess:{ actionIDs in
+            let permitted=try await executor.permittedRecordIDs()
+            let deleted=try await engine.recoveryDeletedRecordIDs(forTurn:saved.turnID,includingActionIDs:Set(actionIDs))
+            guard Set(context.index.map(\.id)+saved.cities.map(\.id)).isSubset(of:permitted.union(deleted)) else{throw AskHostedError.selectionUnavailable}
+        }).answer(saved.request,context:context,cities:saved.cities,findings:saved.findings)
+    }
     private func runAnswer(_ request:AskRequest,tools:AskReadTools)async throws->AskResponse {
 #if FEAST_AGENT_ROLLBACK
         return try await localOrConsent(request,tools:tools)
@@ -42,7 +82,7 @@ struct AskAgentProvider:AskFeastProvider {
         if let hosted=remote as? AskHostedProvider {let version=await hosted.libraryPlanVersion();let allowed=await hosted.permission();fullCollection = version>=7 && allowed}else{fullCollection=false}
         let contextStarted=DispatchTime.now().uptimeNanoseconds
         var reading=request.collectionReadVersion()
-        let snapshot=try await adapter.librarySnapshot()
+        let current=try await adapter.readView(),snapshot=current.snapshot
 
         var context=try AskSemanticContext.make(reading,catalog:snapshot,fullCollection:fullCollection)
         if !fullCollection {reading.collectionContinuation=nil}
@@ -67,7 +107,39 @@ struct AskAgentProvider:AskFeastProvider {
         }
         AskPipelineScope.record(.context,since:contextStarted)
         if let conversational=remote as? any AskConversationPlanning,await conversational.conversationAvailable() {
-            return try await AskConversationLoop(planner:conversational,availableCandidates:Dictionary(uniqueKeysWithValues:Set(context.index.map(\.id)+(reading.collectionContinuation?.candidates.map(\.id) ?? [])).compactMap {id in tools.localCandidate(id).map {(id,$0)}}),execute:{call in try await executor.executeConversation(call,planner:conversational)},retainFindings:{call,evidence in try await executor.retainPublicFindings(call,evidence:evidence)}).answer(reading,context:context,cities:cities,findings:findings)
+            // The bounded prompt catalog is not the full local identity catalog.
+            // Hydrate retained references by exact ID from the current permitted
+            // snapshot; never guess names or reuse an archived candidate's fields.
+            var retained=Set(context.index.map(\.id))
+            retained.formUnion(reading.agentTask?.selectionIDs ?? reading.agentTask?.orderedIDs ?? [])
+            retained.formUnion(reading.libraryContext?.selectionIDs ?? reading.libraryContext?.ids ?? [])
+            retained.formUnion(reading.referencedIDs)
+            retained.formUnion(reading.collectionDialogueIDs)
+            retained.formUnion(findings.map(\.recordID))
+            retained.formUnion(reading.collectionContinuation?.candidates.map(\.id) ?? [])
+            let permitted=Set(snapshot.places.map(\.id))
+            let available=AskReadTools.localCandidates(retained.intersection(permitted),in:current.index)
+            let recoveryContextIDs=Set(context.index.map(\.id)+cities.map(\.id))
+            let loop=AskConversationLoop(planner:conversational,availableCandidates:available,execute:{call in try await executor.executeConversation(call,planner:conversational)},retainFindings:{call,evidence in try await executor.retainPublicFindings(call,evidence:evidence)},recoverySnapshot:{try await executor.recoverySnapshot()},revalidateRecoveryAccess:{ actionIDs in
+                let permitted=try await executor.permittedRecordIDs()
+                let deleted=try await engine.recoveryDeletedRecordIDs(forTurn:request.performanceID ?? UUID(),includingActionIDs:Set(actionIDs))
+                guard recoveryContextIDs.isSubset(of:permitted.union(deleted)) else{throw AskHostedError.selectionUnavailable}
+            })
+            // Decide once, before the first request. No fallback after durable acceptance.
+            if let recoveryStore,let hosted=remote as? AskHostedProvider,await hosted.recoveryEnabled(),await hosted.nativeResearchAvailable(),let turn=reading.performanceID,let chat=reading.conversationID,let lease=AskProviderAttemptScope.lease {
+                var checkpoint=AskTurnCheckpoint(turnID:turn,chatID:chat,attemptID:lease.attempt,endpoint:hosted.configuration.endpoint.absoluteString,request:reading,createdAt:Date())
+                try Task.checkCancellation()
+                checkpoint.userRequest=request
+                checkpoint.executorRequest=executor.request
+                checkpoint.context=context;checkpoint.cities=cities;checkpoint.findings=findings
+                checkpoint.state.available=available
+                try await recoveryStore.save(checkpoint);try await recoveryStore.claim(turn)
+                do {
+                    let response=try await AskRecoveryScope.$handle.withValue(.init(store:recoveryStore,turn:turn,permission:hosted.permission)) {try await loop.answer(reading,context:context,cities:cities,findings:findings)}
+                    try await recoveryStore.complete(turn,response:response);await recoveryStore.release(turn);return response
+                }catch {await recoveryStore.release(turn);throw error}
+            }
+            return try await loop.answer(reading,context:context,cities:cities,findings:findings)
         }
         return try await AskAgentLoop(planner:planner,execute:{call,intent in try await executor.execute(call,intent:intent)},prepareIntent:{intent in try await executor.prepare(intent)}).answer(reading,context:context,cities:cities,findings:findings)
 #endif

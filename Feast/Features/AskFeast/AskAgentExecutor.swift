@@ -2,6 +2,20 @@ import Foundation
 import CoreData
 import CryptoKit
 
+/// A stable identity for one recovered tool call, never an authorization grant.
+struct AskRecoveryOperationIdentity:Codable,Equatable,Sendable {
+    let turnID:UUID,step:Int,callID:String
+    func key(entity:String,target:String?)throws->String {
+        guard (0..<12).contains(step),!callID.isEmpty,callID.utf8.count<=512 else {throw AskChangeError.journal}
+        struct Key:Encodable {let identity:AskRecoveryOperationIdentity,entity:String,target:String?}
+        let encoder=JSONEncoder();encoder.outputFormatting = .sortedKeys
+        return SHA256.hash(data:try encoder.encode(Key(identity:self,entity:entity,target:target))).map {String(format:"%02x",$0)}.joined()
+    }
+}
+enum AskRecoveryOperationScope {
+    @TaskLocal static var identity:AskRecoveryOperationIdentity?
+}
+
 /// Executes model-selected, typed operations against fresh data. No question-word routing.
 @MainActor final class AskAgentExecutor {
     let adapter:AskSavedCollection,engine:AskCollectionChangeEngine,request:AskRequest
@@ -43,6 +57,58 @@ import CryptoKit
         mapsQuery=request.mapChoices.first?.query
         if let page=request.collectionContinuation?.collectionPage,page.offset==0 {collectionPageProgress[page.snapshot]=page.returnedCount}
 
+    }
+    // Checkpoints contain values and receipts only. Core Data contexts and prepared
+    // authorization grants are deliberately never persisted or restored.
+    private struct RecoveryMap:Codable {
+        let applePlaceID,displayName,secondaryText:String
+        let latitude,longitude:Double?
+        let city,neighborhood,website,instagram:String?
+        let locality:ApplePlaceLocalityIdentity?
+        let placeType:String?
+        init(_ value:ApplePlaceMatch) {
+            applePlaceID=value.applePlaceID;displayName=value.displayName;secondaryText=value.secondaryText
+            latitude=value.coordinate?.latitude;longitude=value.coordinate?.longitude
+            city=value.suggestedSectionPath.cityOrRegion;neighborhood=value.suggestedSectionPath.neighborhood
+            website=value.websiteURL;instagram=value.instagramURL;locality=value.localityIdentity;placeType=value.suggestedPlaceType?.rawValue
+        }
+        func restored()throws->ApplePlaceMatch {
+            guard !applePlaceID.isEmpty,latitude==nil && longitude==nil || latitude.map({(-90...90).contains($0)})==true && longitude.map({(-180...180).contains($0)})==true,placeType==nil || PlaceType(rawValue:placeType!) != nil else {throw AskChangeError.journal}
+            return .init(applePlaceID:applePlaceID,displayName:displayName,secondaryText:secondaryText,coordinate:latitude.flatMap {lat in longitude.map {.init(latitude:lat,longitude:$0)}},suggestedSectionPath:.init(cityOrRegion:city,neighborhood:neighborhood),websiteURL:website,instagramURL:instagram,localityIdentity:locality,suggestedPlaceType:placeType.flatMap(PlaceType.init(rawValue:)))
+        }
+    }
+    private struct RecoverySnapshot:Codable {
+        var version=1
+        let requestDigest:String
+        let selection:[String],selectionIsOrdered:Bool,selectionIsPrivate:Bool
+        let findings:[AskVerifiedFinding],maps:[String:RecoveryMap]
+        let mutationOrder:[String],mutationStates:[String:String]
+        let completedLeaves:[String:AskCollectionAction],frozenUndoActions:[String:AskCollectionAction]
+        let mapsQuery:String?
+        let researchCache:[String:AskResponse],researchOrder:[String],researchResults:[String:AskResponse],researchFieldOrder:[String]
+        let retainedPublicKeys:Set<String>,createdCities:[String:String],collectionPageProgress:[String:Int]
+    }
+    private func recoveryRequestDigest()throws->String {
+        let encoder=JSONEncoder();encoder.outputFormatting = .sortedKeys
+        return SHA256.hash(data:try encoder.encode(request)).map {String(format:"%02x",$0)}.joined()
+    }
+    func recoverySnapshot()throws->Data {
+        let value=RecoverySnapshot(requestDigest:try recoveryRequestDigest(),selection:selection,selectionIsOrdered:selectionIsOrdered,selectionIsPrivate:selectionIsPrivate,findings:findings,maps:maps.mapValues(RecoveryMap.init),mutationOrder:mutationOrder,mutationStates:mutationStates,completedLeaves:completedLeaves,frozenUndoActions:frozenUndoActions,mapsQuery:mapsQuery,researchCache:researchCache,researchOrder:researchOrder,researchResults:researchResults,researchFieldOrder:researchFieldOrder,retainedPublicKeys:retainedPublicKeys,createdCities:createdCities,collectionPageProgress:collectionPageProgress)
+        let data=try JSONEncoder().encode(value)
+        guard data.count<=8*1024*1024 else {throw AskChangeError.journal}
+        return data
+    }
+    func restoreRecoverySnapshot(_ data:Data)throws {
+        guard data.count<=8*1024*1024 else {throw AskChangeError.journal}
+        let value=try JSONDecoder().decode(RecoverySnapshot.self,from:data)
+        guard value.version==1,value.requestDigest == (try recoveryRequestDigest()),value.selection.count<=2400,value.mutationOrder.count<=2400,value.collectionPageProgress.values.allSatisfy({$0>=0 && $0<=2400}) else {throw AskChangeError.journal}
+        let restoredMaps=try value.maps.mapValues {try $0.restored()}
+        selection=value.selection;selectionIsOrdered=value.selectionIsOrdered;selectionIsPrivate=value.selectionIsPrivate
+        findings=value.findings;maps=restoredMaps;mutationOrder=value.mutationOrder;mutationStates=value.mutationStates
+        completedLeaves=value.completedLeaves;frozenUndoActions=value.frozenUndoActions;mapsQuery=value.mapsQuery
+        researchCache=value.researchCache;researchOrder=value.researchOrder;researchResults=value.researchResults;researchFieldOrder=value.researchFieldOrder
+        retainedPublicKeys=value.retainedPublicKeys;createdCities=value.createdCities;collectionPageProgress=value.collectionPageProgress
+        prepared=[];conversationalReplacement=false;conversationalExecution=false;readContexts=[]
     }
     /// Per-operation optimistic concurrency guard, local only and never serialized
     /// into authorization/model context. Unrelated fields do not block narrow edits.
@@ -102,6 +168,11 @@ import CryptoKit
         return values
     }
     private func resolved(_ permission:AskAgentPermission,reference:[String]?=nil)throws->[String] {
+        // Capability fallback must not recover authority from a shortened list.
+        // Conversation writes already passed their independent selector check.
+        if !conversationalExecution,request.agentTask?.referencesIncomplete==true,!permission.operations.allSatisfy({$0=="create"}) {
+            guard let selector=permission.selector,selector.scope != "previous",(selector.positions ?? []).isEmpty else{throw AskChangeError.invalid}
+        }
         let selection=reference ?? self.selection
         if permission.selector?.positions?.isEmpty == false {guard reference == nil ? selectionIsOrdered : humanReferenceIsOrdered else {throw AskChangeError.missing}}
         let all=try objects(permission.entity)
@@ -174,10 +245,11 @@ import CryptoKit
             let pending=value.actionIDs.compactMap {id in request.pendingActions.first {$0.id==id && $0.state == .needsConfirmation}}
             guard !pending.isEmpty,pending.count==value.actionIDs.count,Set(value.actionIDs).count==value.actionIDs.count else {throw AskChangeError.missing}
             let decision=try await planner.authorizePendingConfirmation(pending,question:request.text,history:AskConversationProjection.authorizationHistory(request.dialogue,recent:request.recentQuestions))
+            try await AskRecoveryActivity.check()
             guard decision.approved,decision.reason=="accepted_pending" else {throw AskChangeError.permission}
             var applied:[AskCollectionAction]=[],failure:String?
             for action in pending {
-                do {try Task.checkCancellation();applied.append(try engine.performExplicitAction(action.id,undo:false))}
+                do {try Task.checkCancellation();try AskRecoveryActivity.checkNow();applied.append(try engine.performExplicitAction(action.id,undo:false))}
                 catch {if applied.isEmpty {throw error};failure=error is CancellationError ? "Stopped. Earlier changes were saved." : error.localizedDescription;break}
             }
             // Pending previews can contain local-only values: never project their contents.
@@ -194,6 +266,7 @@ import CryptoKit
                     response.mapChoices=request.mapChoices;response.pendingProposal=proposal;response.executionStatus="unresolved"
                     return .init(output:.init(status:"stale",complete:false,totalCount:0,records:[],findings:[],message:"unavailable",localOnly:false),response:response,orderedIDs:selection,selectionIsOrdered:selectionIsOrdered)
                 }
+                try await AskRecoveryActivity.check()
                 maps[choice.id]=fresh
             }
             var authorizationProposal=proposal
@@ -262,6 +335,7 @@ import CryptoKit
             let authorizationStarted=DispatchTime.now().uptimeNanoseconds
             let decision:AskHumanAuthorization
             do {defer {AskPipelineScope.record(.authorization,since:authorizationStarted)};decision=try await planner.authorizeConversationChange(authorizationProposal,question:request.text,history:AskConversationProjection.authorizationHistory(request.dialogue,recent:request.recentQuestions),targets:usesPrivateSelection ? [] : targets)}
+            try await AskRecoveryActivity.check()
             guard decision.approved else {return .init(output:.init(status:"needs_confirmation",complete:true,totalCount:0,records:[],findings:[],message:"needs_review",localOnly:false),response:plain(decision.reason=="ambiguous" ? "Which change would you like me to make?" : "Tell me what you’d like changed before I save anything."),orderedIDs:selection,selectionIsPrivate:selectionIsPrivate,selectionIsOrdered:selectionIsOrdered)}
             try Task.checkCancellation()
             guard try authorizationState(proposal)==pinnedSource else{throw AskChangeError.conflict}
@@ -279,6 +353,13 @@ import CryptoKit
                 if pinned.inferredParent {
                     let sources=try objects("place").filter {($0.value(forKey:"id") as? UUID).map {proposal.targetIDs.contains($0.uuidString)} == true}
                     guard sources.count==Set(proposal.targetIDs).count,Set(sources.compactMap {($0.value(forKey:"feastList") as? FeastList)?.id?.uuidString})==[pinned.parent] else{throw AskChangeError.conflict}
+                }
+            }
+            if proposal.operation != "create",request.agentTask?.referencesIncomplete==true {
+                // A missing selector cannot turn an ambiguous earlier answer into
+                // permission. Newly named targets can still resolve independently.
+                guard let selector=decision.targetSelector,selector.scope != "previous",(selector.positions ?? []).isEmpty else {
+                    return .init(output:.init(status:"needs_confirmation",complete:false,totalCount:0,records:[],findings:[],message:"needs_review",localOnly:false),response:plain("I couldn’t match every place in that earlier answer. Please name the places you want changed, or ask me to show the list again."),orderedIDs:selection,selectionIsPrivate:selectionIsPrivate,selectionIsOrdered:selectionIsOrdered)
                 }
             }
             if proposal.operation != "create",let selector=decision.targetSelector {
@@ -367,6 +448,7 @@ import CryptoKit
         let stage:AskPipelineStage = call.name=="query_collection" ? .collectionRead : call.name=="research_businesses" ? .businessLookup : call.name=="search_maps" ? .mapsLookup : .mutation
         defer {AskPipelineScope.record(stage,since:started)}
         try Task.checkCancellation()
+        try await AskRecoveryActivity.check()
         switch call.name {
         case "query_collection":return try query(Data(call.arguments.utf8),intent:intent)
         case "research_businesses":return try await research(Data(call.arguments.utf8),intent:intent)
@@ -388,6 +470,7 @@ import CryptoKit
                 return .init(output:.init(status:"unavailable",complete:false,totalCount:0,records:[],findings:[],message:"unavailable",localOnly:false),response:plain("Apple Maps couldn’t complete that search. Earlier changes remain saved."),orderedIDs:selection,appendPreviousResults:true,selectionIsPrivate:selectionIsPrivate,selectionIsOrdered:selectionIsOrdered)
             }
             try Task.checkCancellation()
+            try await AskRecoveryActivity.check()
             let namespace=UUID(uuidString:"00000000-0000-4000-8000-000000000001")!
             var choices:[AskMapChoice]=[]
             for match in results.prefix(6) where !choices.contains(where:{$0.applePlaceID==match.applePlaceID}) {
@@ -652,6 +735,7 @@ import CryptoKit
                 let distinctWebsite=website != nil && branches.filter {$0.websiteURL.flatMap {InstagramWebsiteClient.websiteURL($0)?.absoluteString}==website}.count==1
                 let unambiguous=branches.count==1
                 var response=try await AskBusinessLookup.answer(item,plan:plan,record:record,tools:tools,allowExternalLookups:value.sourcePolicy=="public_if_missing" && (unambiguous||distinctWebsite),allowHostedResearch:unambiguous,externalLimitation:unambiguous ? nil : "I need a branch-specific source to verify these details for this saved location.",researcher:researcher,resolvePlace:{id in try await self.resolveMaps(id)})
+                try await AskRecoveryActivity.check()
                 response.verifiedPublicFindings=response.verifiedPublicFindings?.map {finding in var f=finding;f.externallyReusable=true;return f}
                 responses.append(response);researchCache[cacheKey]=response
                 for finding in response.verifiedPublicFindings ?? [] {findings.removeAll {$0.recordID==finding.recordID&&$0.field==finding.field};findings.append(finding)}
@@ -720,6 +804,7 @@ import CryptoKit
         for target in targets {
             do {
             try Task.checkCancellation()
+            try AskRecoveryActivity.checkNow()
             var item=p;item.targetIDs=target.map {[$0]} ?? []
             if let target {
                 item.changes=item.changes.map {c in guard expected.contains(where:{$0.field==c.field&&$0.source=="verified_finding"}),let finding=findings.last(where:{$0.recordID==target&&$0.field==c.field}) else{return c};return .init(field:c.field,value:finding.value,values:nil,findingID:finding.id.uuidString)}
@@ -733,7 +818,12 @@ import CryptoKit
                 let encoded=(try JSONSerialization.data(withJSONObject:identity,options:.sortedKeys)).base64EncodedString()
                 return item.entity+":"+item.operation+":"+(target ?? "new")+":"+field+":"+encoded
             }
-            for (field,key) in zip(leafFields,leafKeys) {if let cached=completedLeaves[key],try !engine.canReuseReceipt(cached.id,fields:field=="operation" ? [] : [field]) {throw AskChangeError.conflict}}
+            for (field,key) in zip(leafFields,leafKeys) {
+                if let cached=completedLeaves[key] {
+                    guard try engine.canReuseReceipt(cached.id,fields:field=="operation" ? [] : [field]) else{throw AskChangeError.conflict}
+                    completedLeaves[key]=try engine.actionStatus(cached.id)
+                }
+            }
             let cached=leafKeys.compactMap {completedLeaves[$0]}
             var activeKeys=leafKeys
             if !cached.isEmpty {
@@ -752,7 +842,7 @@ import CryptoKit
                 var grant=bound;grant.boundProposal=undo
                 actions.append(try engine.undo(action.id,authorization:grant))
             }else {
-                let ready=try engine.prepare(item,question:request.text,authorization:bound,findings:findings,turnID:request.performanceID,chatID:request.conversationID)
+                let ready=try engine.prepare(item,question:request.text,authorization:bound,findings:findings,turnID:request.performanceID,chatID:request.conversationID,recoveryOperationID:try AskRecoveryOperationScope.identity?.key(entity:item.entity,target:target))
                 actions.append(try engine.apply(ready.id,authorization:bound,maps:maps))
             }
             if let applied=actions.last {for key in activeKeys {completedLeaves[key]=applied}}
