@@ -28,7 +28,7 @@ test('compaction never launders malformed or oversized optional sources and reta
  for(const url of ['http://unsafe.invalid','https://user:password@example.org/','https://example.org/'+ 'x'.repeat(2048)]){const w=web('bad',0);w.action.sources[40].url=url;assert.throws(()=>checkedNativeItem(w,'Public query'),/sources_shape/)}
  const w=web('too-many',0,81);assert.throws(()=>checkedNativeItem(w,'Public query'),/sources_shape/);
  const items=[web('a',0),web('b',41),message()];const before=structuredClone(items);await nativeEvidence(records(items));assert.deepEqual(items,before);
- await assert.rejects(boundedResponse(Response.json({padding:'x'.repeat(65536)})),/upstream_limit/);
+ await assert.rejects(boundedResponse(Response.json({padding:'x'.repeat(1048576)})),/upstream_limit/);
 });
 test('private phase text and annotation metadata never enter projected evidence',async()=>{
  const privateResult={type:'function_call_output',call_id:'read',output:JSON.stringify({localOnly:true})};
@@ -57,8 +57,10 @@ test('existing client 60-block capacity is enforced without dropping essential a
  const metrics={};await assert.rejects(nativeEvidence(records(items),false,(k,v)=>metrics[k]=v),/native_evidence_block_limit/);assert.equal(metrics.evidenceBlocks,61);
  items.pop();const e=await nativeEvidence(records(items));assert.equal(e.blocks.length,60);assert.equal(e.sources.length,1);
 });
-test('combined continuation/projection respects existing client byte budget with precise known-settlement failure',async()=>{
+test('combined continuation/projection fits expanded direct budget while pilot retains historical known-settlement failure',async()=>{
+ for(const pilot of [false,true]){
  const {env,ledger}=setup(),payload=p();let paid=0,next=payload;
+ const options=pilot?{pilotExecutionModel:'gpt-6.1-sol'}:{};if(pilot)Object.assign(env,{RESEARCH_PILOT_ENABLED:'true',RESEARCH_PILOT_KIND:'sol-astra-v2'});
  const send=async(url,o)=>{
   if(url.endsWith('input_tokens'))return Response.json({input_tokens:100});const n=paid++;
   const urls=Array.from({length:20},(_,i)=>'https://example.org/'+('x'.repeat(1960))+'?item='+String(n*20+i));
@@ -68,16 +70,18 @@ test('combined continuation/projection respects existing client byte budget with
  };
  let final;
  for(let step=0;step<4;step++){
-  const response=await nativeConversationAnswer(next,'a'.repeat(64),env,send),value=await response.json();
+  const response=await nativeConversationAnswer(next,'a'.repeat(64),env,send,options),value=await response.json();
   if(!response.ok){final=value;break}
-  assert.equal(step<3,true);next={...payload,step:step+1,continuation:value.continuation,result:{callID:'read-'+step,output:{status:'empty',complete:true,totalCount:0,records:[],findings:[],message:'not_found',localOnly:false}}};
+  if(step===3){final=value;assert.equal(pilot,false);assert.equal(value.kind,'answer');assert(new TextEncoder().encode(JSON.stringify(value)).byteLength>400000);break}
+  next={...payload,step:step+1,continuation:value.continuation,result:{callID:'read-'+step,output:{status:'empty',complete:true,totalCount:0,records:[],findings:[],message:'not_found',localOnly:false}}};
  }
- assert.equal(final?.error,'native_reply_limit');assert.equal(paid,4);
+ assert.equal(final?.error,pilot?'native_reply_limit':undefined);assert.equal(paid,4);
  const status=await(await ledger.fetch(new Request('https://ledger/status-v2'))).json();assert.equal(status.pendingMicroUSD,0);assert.equal(status.chargedMicroUSD,149600);
+ }
 });
 test('oversized unverifiable provider output keeps exposure held and blocks a fresh attempt on the same human turn',async()=>{
- const {env,ledger}=setup(),payload=p();let paid=0;const send=async url=>{if(url.endsWith('input_tokens'))return Response.json({input_tokens:100});paid++;return Response.json({padding:'x'.repeat(65536)})};
- const first=await nativeConversationAnswer(payload,'a'.repeat(64),env,send);assert.equal((await first.json()).error,'upstream_limit');
+ const {env,ledger}=setup(),payload=p();let paid=0;const send=async url=>{if(url.endsWith('input_tokens'))return Response.json({input_tokens:100});paid++;return Response.json({padding:'x'.repeat(1048576)})};
+ const first=await nativeConversationAnswer(payload,'a'.repeat(64),env,send);assert.equal(first.status,502);assert.equal((await first.json()).error,'native_provider_response_limit');
  const status=await(await ledger.fetch(new Request('https://ledger/status-v2'))).json();assert.equal(status.chargedMicroUSD,0);assert.equal(status.pendingMicroUSD,1400288);
  const retry=await nativeConversationAnswer({...payload,requestID:crypto.randomUUID()},'a'.repeat(64),env,send);assert.equal(retry.status,503);assert.equal(paid,1);
 });

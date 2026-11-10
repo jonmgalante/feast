@@ -1,3 +1,4 @@
+import {DIRECT_NATIVE_LIMITS} from './native-research.mjs';
 import {ACTIVE_MODEL} from './active-model.mjs';
 import {VALIDATION_CAP_MICRO_USD} from './budget-policy.mjs';
 import {json,brokerAnswer} from './broker.mjs';
@@ -8,7 +9,7 @@ import {answerJobsEnabled} from './answer-job-contract.mjs';
 export async function publicFetch(request,env,send=fetch){
   const path=new URL(request.url).pathname;
   const enabled=phoneGrants(env)!==null,live=enabled&&env.ENVIRONMENT==='production'&&env.OWNER_VALIDATION_ENABLED==='true'&&env.LIVE_AI==='true'&&env.ALLOW_RECONCILED_BUDGET==='true';
-  if(request.method==='GET'&&path==='/health')return json({service:'feast-production',environment:'production',requestsEnabled:live,enrollmentEnabled:enabled,ownerValidationEnabled:env?.OWNER_VALIDATION_ENABLED==='true',validationCapMicroUSD:VALIDATION_CAP_MICRO_USD,model:ACTIVE_MODEL,reasoning:'medium',...(enabled?{savedMetadataEnabled:true,savedToolsEnabled:live,savedToolsVersion:3,collectionContextVersion:1,agentProtocolVersion:8,agentProtocolVersions:env.NATIVE_RESEARCH_ENABLED==='true'?[8,9,10]:[8,9],agentToolsEnabled:live,publicBusinessToolsVersion:1,publicBusinessLookupEnabled:live&&env.ALLOW_PUBLIC_LOOKUP==='true',nativeResearchEnabled:live&&env.NATIVE_RESEARCH_ENABLED==='true'&&env.ALLOW_PUBLIC_LOOKUP==='true',...(answerJobsEnabled(env)?{answerJobsVersion:1}:{}),selectedScreenshotEnabled:false,webDiscoveryEnabled:false}:{})});
+  if(request.method==='GET'&&path==='/health')return json({service:'feast-production',environment:'production',requestsEnabled:live,enrollmentEnabled:enabled,ownerValidationEnabled:env?.OWNER_VALIDATION_ENABLED==='true',validationCapMicroUSD:VALIDATION_CAP_MICRO_USD,model:ACTIVE_MODEL,reasoning:'medium',...(enabled?{savedMetadataEnabled:true,savedToolsEnabled:live,savedToolsVersion:3,collectionContextVersion:1,...(env.NATIVE_RESEARCH_ENABLED==='true'?{collectionQueryVersion:2}:{}),agentProtocolVersion:8,agentProtocolVersions:env.NATIVE_RESEARCH_ENABLED==='true'?[8,9,10]:[8,9],agentToolsEnabled:live,publicBusinessToolsVersion:1,publicBusinessLookupEnabled:live&&env.ALLOW_PUBLIC_LOOKUP==='true',nativeResearchEnabled:live&&env.NATIVE_RESEARCH_ENABLED==='true'&&env.ALLOW_PUBLIC_LOOKUP==='true',...(answerJobsEnabled(env)?{answerJobsVersion:1}:{}),selectedScreenshotEnabled:false,webDiscoveryEnabled:false}:{})});
   if(!enabled)return json({error:'public_enrollment_not_activated'},503);
   try{
    if(path==='/v1/access/activate'&&request.method==='POST'){
@@ -25,7 +26,7 @@ export async function publicFetch(request,env,send=fetch){
     return await answerJobsRequest(command,actor,await phoneHash('device',credential),env);
    }
    if(!live)return json({error:'dispatch_disabled'},503);
-   const protocol=request.headers.get('X-Feast-Agent-Protocol'),p=await accessJSON(request,protocol===null?4096:512000);
+   const protocol=request.headers.get('X-Feast-Agent-Protocol'),p=await accessJSON(request,protocol===null?4096:protocol==='10'?DIRECT_NATIVE_LIMITS.maxRequestBytes:512000,protocol==='10'?'request_limit':'invalid_access');
    // The existing native-off rollback uses this public-only, headerless v7 request.
    // Do not enable the older general library protocols or accept private context here.
    const legacyLookup=protocol===null&&typeof p?.requestID==='string'&&validPublicRequest(p);
@@ -37,6 +38,6 @@ export async function publicFetch(request,env,send=fetch){
    // global usage or other devices' holds to invited clients.
    const body=await response.json();delete body.budget;
    return json(body,response.status);
-  }catch{return json({error:'access_unavailable'},503)}
+  }catch(error){if(error?.message==='request_limit')return json({error:'request_limit'},413);return json({error:'access_unavailable'},503)}
 }
 export default {fetch(request,env){return publicFetch(request,env)}};

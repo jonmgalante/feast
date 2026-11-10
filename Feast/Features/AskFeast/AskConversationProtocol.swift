@@ -2,6 +2,14 @@ import Foundation
 import Darwin
 import CryptoKit
 
+/// One fixed contract for ordinary native answers. Legacy tools and dormant recovery
+/// keep their existing independent bounds; no user-selectable capacity modes.
+enum AskNativeCapacity {
+    static let requestBytes = 2 * 1024 * 1024
+    static let replyBytes = 2 * 1024 * 1024
+    static let continuationBytes = 1024 * 1024
+}
+
 /// Bounded metadata only: never records question text, tool arguments, reasoning,
 /// record names, URLs, headers, credential bytes or provider error messages.
 struct AskConversationReceipt:Codable,Sendable {
@@ -21,10 +29,10 @@ struct AskConversationReceipt:Codable,Sendable {
     var queryOperation:String?=nil
     var queryGroupBy:String?=nil
     var queryFields:[String]?=nil
-    init(requestID:String,mode:String,step:Int?,status:Int,data:Data,elapsed:Double) {
+    init(requestID:String,mode:String,step:Int?,status:Int,data:Data,elapsed:Double,maximumResponseBytes:Int=400000) {
         self.requestID=UUID(uuidString:requestID)?.uuidString ?? "unknown";self.mode=["conversationStep","authorizeChange","webSearch"].contains(mode) ? mode : "unknown";self.step=step
         at=Date();elapsedMilliseconds=elapsed.isFinite ? min(max(elapsed,0),240000) : 0;self.status=status
-        let value=data.count<=400000 ? ((try? JSONSerialization.jsonObject(with:data)) as? [String:Any] ?? [:]) : [:]
+        let value=data.count<=maximumResponseBytes ? ((try? JSONSerialization.jsonObject(with:data)) as? [String:Any] ?? [:]) : [:]
         AskBackendPerformance(value["performance"])?.record()
         func bounded(_ value:Any?,_ pattern:String)->String? {guard let text=value as? String,text.range(of:pattern,options:.regularExpression) != nil else{return nil};return text}
         code=bounded(value["error"],"^[a-z_]{1,80}$") ?? (status==200 ? "ok" : "request_failed")
@@ -75,24 +83,42 @@ actor AskConversationReceipts {
 }
 struct AskProviderAttemptLease:Sendable {let turn:UUID;let attempt:UUID}
 enum AskProviderAttemptScope {@TaskLocal static var lease:AskProviderAttemptLease?}
-enum AskRetryError:LocalizedError {
-    case unverified,active,mutations,storage
+enum AskRetryError:LocalizedError,Equatable {
+    case unverified,active,mutations,storage,capacity
+    var retryable:Bool {if case .capacity=self {return false};return true}
     var errorDescription:String? {switch self {
     case .unverified:"The previous attempt’s outcome isn’t verified yet. It hasn’t been sent again."
     case .active:"The previous attempt is still running or has unsettled usage. It hasn’t been sent again."
     case .mutations:"This request has recorded app actions. Continue in a new message so completed changes aren’t replayed."
-    case .storage:"Retry state couldn’t be saved. Nothing new was sent."
+    case .storage:"Retry state couldn’t be saved or verified. No further step was sent."
+    case .capacity:"This step exceeds Feast’s local retry-context capacity. Earlier saved results were kept. No further step was sent."
     }}
 }
 /// Local attempt IDs and completed read context only; no credentials or automatic request replay.
 actor AskProviderAttempts {
-    struct Entry:Codable {var attempt:UUID;var roots:[UUID];var frozen:Bool;var checkpoint:AskResponse?=nil}
+    struct Entry:Codable {
+        var attempt:UUID;var roots:[UUID];var frozen:Bool;var checkpoint:AskResponse?=nil
+        // Optional for existing small v1 files. A new checkpoint always gets a new revision.
+        var checkpointRevision:UUID?=nil
+    }
+    struct ArchiveTicket:Equatable,Sendable {let turn:UUID,attempt:UUID;let revision:UUID?}
+    /// Synchronous session deletion fences even a preflight that has not reached this actor yet.
+    private final class Deletions:@unchecked Sendable {
+        private let lock=NSLock()
+        private var turns=Set<UUID>()
+        func insert(_ ids:[UUID]) {lock.lock();defer{lock.unlock()};turns.formUnion(ids)}
+        func contains(_ id:UUID)->Bool {lock.lock();defer{lock.unlock()};return turns.contains(id)}
+    }
     static let shared=AskProviderAttempts()
+    static let maximumBytes=8*1024*1024
     let url:URL?
     let requirePersistence:Bool
+    // Persisted actors cache only small fencing metadata, never the bulky checkpoint.
     var entries:[UUID:Entry]=[:]
     var readable=true
-    var preparing=Set<UUID>()
+    private var preparing=Set<UUID>()
+    private var running:[UUID:UUID]=[:]
+    private let deletions=Deletions()
     init(url:URL?=nil,requirePersistence:Bool?=nil) {
 #if FEAST_TESTS
         self.requirePersistence=requirePersistence ?? false
@@ -102,59 +128,164 @@ actor AskProviderAttempts {
         self.url=url ?? FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask).first?.appendingPathComponent("AskFeast/provider-attempts-v1")
 #endif
     }
-    private func load(_ turn:UUID)throws {
-        guard entries[turn]==nil,let file=url?.appendingPathComponent(turn.uuidString+".json"),FileManager.default.fileExists(atPath:file.path) else{return}
-        do {let data=try Data(contentsOf:file);guard data.count<=1024*1024 else{throw AskRetryError.storage};let entry=try JSONDecoder().decode(Entry.self,from:data);guard entry.roots.count<=64,Set(entry.roots).count==entry.roots.count else{throw AskRetryError.storage};entries[turn]=entry}catch{throw AskRetryError.storage}
+    private func cache(_ entry:Entry,turn:UUID) {
+        var metadata=entry;if url != nil {metadata.checkpoint=nil};entries[turn]=metadata
     }
-    private func save(_ turn:UUID)throws {
-        guard !requirePersistence || url != nil,let entry=entries[turn] else{throw AskRetryError.storage}
-        if let url {do {
-            // Per-turn files avoid an ever-growing aggregate blocking unrelated turns.
-            let data=try JSONEncoder().encode(entry);guard data.count<=1024*1024 else{throw AskRetryError.storage}
-            try FileManager.default.createDirectory(at:url,withIntermediateDirectories:true)
-            let file=url.appendingPathComponent(turn.uuidString+".json")
-            try data.write(to:file,options:.atomic)
-            let handle=try FileHandle(forWritingTo:file);try handle.synchronize();try handle.close()
-            let fd=Darwin.open(url.path,O_RDONLY);guard fd>=0 else{throw AskRetryError.storage};defer{Darwin.close(fd)}
-            guard fsync(fd)==0 else{throw AskRetryError.storage}
-            let parent=Darwin.open(url.deletingLastPathComponent().path,O_RDONLY);guard parent>=0 else{throw AskRetryError.storage};defer{Darwin.close(parent)};guard fsync(parent)==0 else{throw AskRetryError.storage}
-        }catch{entries[turn]?.frozen=true;throw AskRetryError.storage}}
+    private func load(_ turn:UUID)throws->Entry? {
+        guard readable else{throw AskRetryError.storage}
+        guard let file=url?.appendingPathComponent(turn.uuidString+".json") else{return entries[turn]}
+        guard FileManager.default.fileExists(atPath:file.path) else {
+            // A previously durable identity disappearing is not a fresh turn.
+            guard entries[turn]==nil else{entries[turn]?.frozen=true;throw AskRetryError.storage};return nil
+        }
+        do {
+            guard let size=try file.resourceValues(forKeys:[.fileSizeKey]).fileSize,size<=Self.maximumBytes else{throw AskRetryError.capacity}
+            let data=try Data(contentsOf:file);guard data.count<=Self.maximumBytes else{throw AskRetryError.capacity}
+            var entry=try JSONDecoder().decode(Entry.self,from:data)
+            guard entry.roots.count<=64,Set(entry.roots).count==entry.roots.count else{throw AskRetryError.storage}
+            if let cached=entries[turn] {
+                guard cached.attempt==entry.attempt,cached.roots==entry.roots,cached.checkpointRevision==entry.checkpointRevision else{throw AskRetryError.storage}
+                entry.frozen = entry.frozen || cached.frozen
+            }
+            cache(entry,turn:turn);return entry
+        }catch let error as AskRetryError {entries[turn]?.frozen=true;throw error}
+        catch {entries[turn]?.frozen=true;throw AskRetryError.storage}
+    }
+    private func protect(_ path:URL)throws {
+        var local=path,values=URLResourceValues();values.isExcludedFromBackup=true;try local.setResourceValues(values)
+#if os(iOS)
+        try FileManager.default.setAttributes([.protectionKey:FileProtectionType.completeUntilFirstUserAuthentication],ofItemAtPath:path.path)
+#endif
+    }
+    private func write(_ data:Data,to file:URL)throws {
+        guard let url else{throw AskRetryError.storage}
+        try FileManager.default.createDirectory(at:url,withIntermediateDirectories:true)
+        try protect(url)
+#if os(iOS)
+        try data.write(to:file,options:[.atomic,.completeFileProtectionUntilFirstUserAuthentication])
+#else
+        try data.write(to:file,options:.atomic)
+#endif
+        try protect(file)
+        let handle=try FileHandle(forWritingTo:file);defer{try? handle.close()};try handle.synchronize()
+        let fd=Darwin.open(url.path,O_RDONLY);guard fd>=0 else{throw AskRetryError.storage};defer{Darwin.close(fd)}
+        guard fsync(fd)==0 else{throw AskRetryError.storage}
+        let parent=Darwin.open(url.deletingLastPathComponent().path,O_RDONLY);guard parent>=0 else{throw AskRetryError.storage};defer{Darwin.close(parent)}
+        guard fsync(parent)==0 else{throw AskRetryError.storage}
+    }
+    private func save(_ entry:Entry,turn:UUID)throws {
+        do {
+            guard !requirePersistence || url != nil else{throw AskRetryError.storage}
+            let data=try JSONEncoder().encode(entry);guard data.count<=Self.maximumBytes else{throw AskRetryError.capacity}
+            if let url {try write(data,to:url.appendingPathComponent(turn.uuidString+".json"))}
+            cache(entry,turn:turn)
+        }catch {
+            // Do not replace the last readable checkpoint with an oversized candidate.
+            var frozen=entries[turn] ?? entry;frozen.frozen=true;cache(frozen,turn:turn)
+            if let error=error as? AskRetryError {throw error};throw AskRetryError.storage
+        }
+    }
+    private func deleted(_ turn:UUID)->Bool {
+        if deletions.contains(turn) {return true}
+        if let marker=url?.appendingPathComponent(turn.uuidString+".deleted"),FileManager.default.fileExists(atPath:marker.path) {
+            deletions.insert([turn]);return true
+        }
+        return false
     }
     func begin(turn:UUID,retrying:Bool,legacySettled:Bool,fence:@Sendable ([UUID])async throws->Void)async throws->AskProviderAttemptLease {
-        try load(turn)
-        guard readable else{throw AskRetryError.storage}
-        guard !preparing.contains(turn) else{throw AskRetryError.active}
+        guard !deleted(turn),!preparing.contains(turn) else{throw AskRetryError.active}
+        let previous=try load(turn)
         preparing.insert(turn);defer{preparing.remove(turn)}
-        let checkpoint=entries[turn]?.checkpoint
-        if var old=entries[turn] {
-            old.frozen=true;entries[turn]=old;try save(turn)
-            do {if !old.roots.isEmpty {try await fence(old.roots)}}catch {entries[turn]=old;throw error}
+        if var old=previous {
+            old.frozen=true;try save(old,turn:turn)
+            if !old.roots.isEmpty {try await fence(old.roots)}
         }else if retrying {
             guard legacySettled else{throw AskRetryError.unverified}
-            entries[turn]=Entry(attempt:turn,roots:[turn],frozen:true);try save(turn)
+            try save(Entry(attempt:turn,roots:[turn],frozen:true),turn:turn)
             try await fence([turn])
         }
-        let attempt=UUID();entries[turn]=Entry(attempt:attempt,roots:[],frozen:false,checkpoint:checkpoint);try save(turn)
+        // Fence awaits are reentrant: deletion or an old completion must never revive this turn.
+        guard !deleted(turn) else{throw AskRetryError.active}
+        let attempt=UUID()
+        let entry=Entry(attempt:attempt,roots:[],frozen:false,checkpoint:previous?.checkpoint,checkpointRevision:previous?.checkpointRevision)
+        try save(entry,turn:turn);running[turn]=attempt
         return .init(turn:turn,attempt:attempt)
     }
-    func readContext(for lease:AskProviderAttemptLease)->AskResponse? {guard entries[lease.turn]?.attempt==lease.attempt else{return nil};return entries[lease.turn]?.checkpoint}
-    func keepReadContext(_ response:AskResponse,lease:AskProviderAttemptLease)throws {
-        guard var entry=entries[lease.turn],entry.attempt==lease.attempt,!entry.frozen else{throw AskRetryError.active}
+    func readContext(for lease:AskProviderAttemptLease)throws->AskResponse? {
+        guard !deleted(lease.turn) else{throw AskRetryError.active}
+        guard let entry=try load(lease.turn),entry.attempt==lease.attempt else{return nil};return entry.checkpoint
+    }
+    private static func context(_ response:AskResponse)->AskResponse {
         var context=AskResponse(summary:"Completed read context retained.",candidates:[],listedCandidateIDs:[],usesLocalCatalog:true)
         context.publicResearch=Array((response.publicResearch ?? []).suffix(4));context.verifiedPublicFindings=response.verifiedPublicFindings;context.agentTask=response.agentTask;context.mapChoices=response.mapChoices
-        entry.checkpoint=context;entries[lease.turn]=entry;try save(lease.turn)
+        return context
+    }
+    func keepReadContext(_ response:AskResponse,lease:AskProviderAttemptLease)throws {
+        guard !deleted(lease.turn),var entry=try load(lease.turn),entry.attempt==lease.attempt,!entry.frozen else{throw AskRetryError.active}
+        entry.checkpoint=Self.context(response);entry.checkpointRevision=UUID();try save(entry,turn:lease.turn)
     }
     func register(_ root:UUID,lease:AskProviderAttemptLease)throws {
-        guard var entry=entries[lease.turn],entry.attempt==lease.attempt,!entry.frozen else{throw AskRetryError.active}
-        if !entry.roots.contains(root){guard entry.roots.count<64 else{throw AskRetryError.storage};entry.roots.append(root);entries[lease.turn]=entry;try save(lease.turn)}
+        guard !deleted(lease.turn),var entry=try load(lease.turn),entry.attempt==lease.attempt,!entry.frozen else{throw AskRetryError.active}
+        if !entry.roots.contains(root) {
+            guard entry.roots.count<64 else{entries[lease.turn]?.frozen=true;throw AskRetryError.storage}
+            entry.roots.append(root);try save(entry,turn:lease.turn)
+        }
+    }
+    /// Called only after the leased provider work has returned or thrown, not when Stop is tapped.
+    func finish(_ lease:AskProviderAttemptLease) {
+        guard running[lease.turn]==lease.attempt else{return}
+        running.removeValue(forKey:lease.turn)
+        guard !deleted(lease.turn) else{return}
+        do {guard var entry=try load(lease.turn),entry.attempt==lease.attempt else{return};entry.frozen=true;try save(entry,turn:lease.turn)}
+        catch {entries[lease.turn]?.frozen=true}
+    }
+    func archiveTicket(turn:UUID)throws->ArchiveTicket? {
+        guard !deleted(turn),!preparing.contains(turn),running[turn]==nil,
+              let entry=try load(turn),entry.frozen,entry.checkpoint != nil else{return nil}
+        return .init(turn:turn,attempt:entry.attempt,revision:entry.checkpointRevision)
+    }
+    /// The caller has read back a successful archive commit containing this response.
+    /// Only its exact, quiescent attempt/revision can release the redundant payload.
+    @discardableResult func archiveCommitted(_ ticket:ArchiveTicket,response:AskResponse)throws->Bool {
+        guard !deleted(ticket.turn),!preparing.contains(ticket.turn),running[ticket.turn]==nil,
+              var entry=try load(ticket.turn),entry.attempt==ticket.attempt,entry.checkpointRevision==ticket.revision,
+              entry.frozen,let checkpoint=entry.checkpoint else{return false}
+        guard (checkpoint.publicResearch ?? []).allSatisfy({response.publicResearch?.contains($0)==true}),
+              (checkpoint.verifiedPublicFindings ?? []).allSatisfy({response.verifiedPublicFindings?.contains($0)==true}),
+              (checkpoint.mapChoices ?? []).allSatisfy({response.mapChoices?.contains($0)==true}),
+              checkpoint.agentTask==nil || response.agentTask != nil else{return false}
+        // The final task may supersede/reorder the read task. Evidence and Maps choices may not disappear.
+        entry.checkpoint=nil;entry.checkpointRevision=nil;try save(entry,turn:ticket.turn);return true
+    }
+    nonisolated func markDeleted(_ turns:[UUID]) {deletions.insert(turns)}
+    /// Keep accounting roots and a permanent small tombstone, including for preflight-only turns.
+    func delete(_ turns:[UUID])throws {
+        markDeleted(turns)
+        var failed=false
+        for turn in Set(turns) {
+            running.removeValue(forKey:turn)
+            do {
+                if let url {try write(Data(turn.uuidString.utf8),to:url.appendingPathComponent(turn.uuidString+".deleted"))}
+                else if requirePersistence {throw AskRetryError.storage}
+                var entry=try load(turn) ?? Entry(attempt:turn,roots:[],frozen:true)
+                entry.frozen=true;entry.checkpoint=nil;entry.checkpointRevision=nil;try save(entry,turn:turn)
+            }catch {entries[turn]?.frozen=true;failed=true}
+        }
+        if failed {throw AskRetryError.storage}
     }
 }
 
 struct AskConversationFailure:LocalizedError {
     let status:Int,code:String
-    var retryable:Bool {![401,403,409,429,503].contains(status)}
+    var isCapacityFailure:Bool {Self.capacityCodes.contains(code)}
+    static let capacityCodes:Set<String> = ["native_input_limit","native_request_limit","request_limit","native_reply_limit","native_context_limit","native_provider_response_limit","native_evidence_block_limit","native_final_citation_limit","native_required_sources_limit","native_evidence_text_limit","native_evidence_action_limit"]
+    var retryable:Bool {!isCapacityFailure && ![401,403,409,413,429,503].contains(status)}
     var errorDescription:String? {
-        if code=="native_reply_limit" || code=="native_context_limit" {return "The combined research evidence and continuation for this step exceed Feast’s capacity. Earlier results may still be available."}
+        if code=="native_input_limit" {return "The accumulated context is too large to continue this answer. No additional model call was made. Start a more focused question."}
+        if code=="native_request_limit" || code=="request_limit" {return "The accumulated request is too large to send. No additional model call was made. Start a more focused question."}
+        if code=="native_context_limit" {return "The accumulated context exceeds what Feast can retain, so this answer could not be finished. Start a more focused question."}
+        if code=="native_reply_limit" {return "The answer and its supporting evidence exceed what Feast can receive, so this answer could not be finished. Start a more focused question."}
+        if code=="native_provider_response_limit" {return "The AI response exceeded what Feast can safely receive. Its outcome is not fully verified, and it has not been sent again."}
         if code=="native_evidence_block_limit" {return "This step has more supporting evidence blocks than Feast can retain. Earlier results may still be available."}
         if code=="native_final_citation_limit" {return "This step has more inline citations than Feast can retain. Earlier results may still be available."}
         if code=="native_required_sources_limit" {return "Feast couldn’t retain all supporting sources for this step. Earlier results may still be available."}
@@ -164,7 +295,7 @@ struct AskConversationFailure:LocalizedError {
         if code=="provider_billing_setup" {return "OpenAI reports that API billing isn’t active. Check your OpenAI API billing settings."}
         if code=="provider_rate_limit" {return "OpenAI is receiving too many requests. Try again shortly."}
         if code=="provider_authentication" {return "The AI service credentials need attention."}
-        if code=="conversation_input_count" {return "The AI service couldn’t prepare the next step. No further model call was made."}
+        if code=="conversation_input_count" || code=="native_input_unverified" {return "The AI service couldn’t verify the next step’s input size. No additional model call was made."}
         if code=="conversation_provider" {return "The AI service couldn’t finish this step. Check its outcome before trying again."}
         if code.hasPrefix("conversation_"),status==503 {return "Feast couldn’t continue this answer."}
         return AskHostedError.service(status).localizedDescription
@@ -205,6 +336,7 @@ struct AskConversationStep:Codable,Sendable {
     var historyCount:Int=0
     var webAllowed:Bool? = nil
     var turnID:String? = nil
+    var collectionQueryVersion:Int? = nil
 }
 struct AskToolPresentation:Codable,Sendable {
     let kind:String,requestedFields:[String],returnedFields:[String],complete:Bool,renderedLocally:Bool
@@ -222,6 +354,7 @@ struct AskHumanAuthorization:Decodable,Sendable {let approved,replaceExisting,de
 protocol AskConversationPlanning:Sendable {
     func conversationAvailable()async->Bool
     func nativeResearchAvailable()async->Bool
+    func collectionQueryVersion()async->Int
     func conversationStep(_ step:AskConversationStep)async throws->AskConversationReply
     func searchConversationWeb(_ query:String)async throws->AskWebResearchResult
     func authorizePendingConfirmation(_ actions:[AskCollectionAction],question:String,history:[String])async throws->AskHumanAuthorization
@@ -229,6 +362,7 @@ protocol AskConversationPlanning:Sendable {
 }
 extension AskConversationPlanning {
     func nativeResearchAvailable()async->Bool {false}
+    func collectionQueryVersion()async->Int {0}
 }
 extension AskHostedProvider:AskConversationPlanning {
     func prepareProviderAttempt(turn:UUID,retrying:Bool)async throws->AskProviderAttemptLease {
@@ -243,6 +377,7 @@ extension AskHostedProvider:AskConversationPlanning {
         }
     }
     func nativeResearchAvailable()async->Bool {guard await permission() else{return false};return await nativeResearchEnabled()}
+    func collectionQueryVersion()async->Int {guard await permission() else{return 0};return await collectionQueriesEnabled() ? 2 : 0}
     func conversationAvailable()async->Bool {let allowed=await permission();let version=await libraryPlanVersion();return allowed && version>=6}
     private func conversationRequest<T:Decodable>(_ payload:[String:Any],as:T.Type)async throws->T {
         let preparation=DispatchTime.now().uptimeNanoseconds
@@ -250,8 +385,12 @@ extension AskHostedProvider:AskConversationPlanning {
         guard configuration.scope == .savedMetadata,await permission(),await libraryToolsEnabled() else {throw AskHostedError.consentRequired}
         let credential=try await token()
         guard (43...128).contains(credential.count),credential.allSatisfy({$0.isASCII&&($0.isLetter||$0.isNumber||$0=="_"||$0=="-")}) else {throw AskHostedError.disabled}
+        let directNative=payload["version"] as? Int == 10 && payload["mode"] as? String == "conversationStep"
+        let maximumReplyBytes=directNative ? AskNativeCapacity.replyBytes : 400000
         let body=try JSONSerialization.data(withJSONObject:payload,options:.sortedKeys)
-        guard body.count<=512000 else {throw AskError.inputLimit}
+        guard body.count <= (directNative ? AskNativeCapacity.requestBytes : 512000) else {
+            throw AskConversationFailure(status:413,code:directNative ? "native_request_limit" : "request_limit")
+        }
         var http=URLRequest(url:configuration.endpoint);http.httpMethod="POST";http.httpBody=body;http.timeoutInterval=220
         http.setValue(String(payload["version"] as? Int ?? 9),forHTTPHeaderField:"X-Feast-Agent-Protocol");http.setValue("application/json",forHTTPHeaderField:"Content-Type");http.setValue("Feast/1.0",forHTTPHeaderField:"User-Agent");http.setValue("Bearer "+credential,forHTTPHeaderField:"Authorization")
         let started=DispatchTime.now().uptimeNanoseconds
@@ -264,10 +403,11 @@ extension AskHostedProvider:AskConversationPlanning {
         }
         AskPipelineScope.trace?.elapsed(.transport,since:started,counters:[.requestBytes:body.count,.responseBytes:data.count])
         let decodeStarted=DispatchTime.now().uptimeNanoseconds
-        var receipt=AskConversationReceipt(requestID:payload["requestID"] as? String ?? "",mode:payload["mode"] as? String ?? "",step:payload["step"] as? Int,status:response.statusCode,data:data,elapsed:AskPerformanceRecorder.milliseconds(since:started))
+        var receipt=AskConversationReceipt(requestID:payload["requestID"] as? String ?? "",mode:payload["mode"] as? String ?? "",step:payload["step"] as? Int,status:response.statusCode,data:data,elapsed:AskPerformanceRecorder.milliseconds(since:started),maximumResponseBytes:maximumReplyBytes)
         AskPipelineScope.record(.decode,since:decodeStarted)
         guard response.statusCode==200 else {await AskConversationReceipts.shared.record(receipt);throw AskConversationFailure(status:response.statusCode,code:receipt.code)}
-        guard response.url==configuration.endpoint,response.mimeType=="application/json",data.count<=400000 else {receipt.code="response_shape";await AskConversationReceipts.shared.record(receipt);throw AskHostedError.invalidResponse}
+        guard response.url==configuration.endpoint,response.mimeType=="application/json" else {receipt.code="response_shape";await AskConversationReceipts.shared.record(receipt);throw AskHostedError.invalidResponse}
+        guard data.count<=maximumReplyBytes else {receipt.code=directNative ? "native_reply_limit" : "response_limit";await AskConversationReceipts.shared.record(receipt);throw AskConversationFailure(status:413,code:receipt.code)}
         let result:T
         do {let start=DispatchTime.now().uptimeNanoseconds;defer {AskPipelineScope.record(.decode,since:start)};result=try JSONDecoder().decode(T.self,from:data)}
         catch {receipt.code="response_decode";await AskConversationReceipts.shared.record(receipt);throw error}
@@ -278,6 +418,9 @@ extension AskHostedProvider:AskConversationPlanning {
     }
     func conversationStep(_ step:AskConversationStep)async throws->AskConversationReply {
         guard [9,10].contains(step.version) else {throw AskHostedError.invalidResponse}
+        if let queryVersion=step.collectionQueryVersion {
+            guard queryVersion==2,step.version==10,step.context.collectionAccess=="permitted_details_v1",AskRecoveryScope.handle==nil else{throw AskHostedError.invalidResponse}
+        }
         if step.context.collectionAccess != nil {
             guard step.context.collectionAccess=="permitted_details_v1",await libraryPlanVersion()>=7 else{throw AskHostedError.disabled}
         }
@@ -290,10 +433,11 @@ extension AskHostedProvider:AskConversationPlanning {
         for key in ["task","continuation","result"] where p[key]==nil {p[key]=NSNull()}
         if let handle=AskRecoveryScope.handle {return try await recoveredConversationStep(step,handle:handle)}
         let value=try await conversationRequest(p,as:AskConversationReply.self)
-        return try checkedConversationReply(value,step:step)
+        return try checkedConversationReply(value,step:step,maximumContinuationBytes:step.version==10 ? AskNativeCapacity.continuationBytes : 350000)
     }
-    func checkedConversationReply(_ value:AskConversationReply,step:AskConversationStep)throws->AskConversationReply {
-        guard value.version==step.version,value.requestID==step.requestID,value.step==step.step,["answer","tool"].contains(value.kind),(value.kind=="tool")==(value.call != nil),value.text.count<=16000,value.continuation.utf8.count<=350000,value.model=="gpt-6-astra"||value.model.hasPrefix("gpt-6-astra-")||value.model=="gpt-6.1-sol"||value.model.hasPrefix("gpt-6.1-sol-") else {throw AskHostedError.invalidResponse}
+    func checkedConversationReply(_ value:AskConversationReply,step:AskConversationStep,maximumContinuationBytes:Int=350000)throws->AskConversationReply {
+        guard value.continuation.utf8.count<=maximumContinuationBytes else{throw AskConversationFailure(status:413,code:"native_context_limit")}
+        guard value.version==step.version,value.requestID==step.requestID,value.step==step.step,["answer","tool"].contains(value.kind),(value.kind=="tool")==(value.call != nil),value.text.count<=16000,value.model=="gpt-6-astra"||value.model.hasPrefix("gpt-6-astra-")||value.model=="gpt-6.1-sol"||value.model.hasPrefix("gpt-6.1-sol-") else {throw AskHostedError.invalidResponse}
         if step.version==10 {
             guard let evidence=value.nativeEvidence else {throw AskHostedError.invalidResponse}
             _ = try evidence.checked()

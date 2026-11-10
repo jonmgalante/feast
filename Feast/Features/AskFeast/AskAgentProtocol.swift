@@ -28,8 +28,53 @@ struct AskAgentTask:Codable,Equatable,Sendable {
 struct AskAgentRecord:Codable,Equatable,Sendable {
     let id,name,city:String;let cuisines:[String];let kind:String;var detail:String?=nil
     var neighborhood:String?=nil,status:String?=nil,placeType:String?=nil,note:String?=nil,tags:[String]?=nil,website:String?=nil,instagram:String?=nil
+    // Wire null means requested and confirmed absent. Omission means not requested
+    // or unavailable, never a missing saved value. This bookkeeping stays local.
+    var missingFields:[String]=[]
+    enum CodingKeys:String,CodingKey {case id,name,city,cuisines,kind,detail,neighborhood,status,placeType,note,tags,website,instagram}
     static func collection(_ record:AskPersonalPlace)->Self {
         .init(id:record.id,name:record.name,city:record.city,cuisines:record.cuisines,kind:"place",neighborhood:record.neighborhood,status:record.status,placeType:record.type,note:record.note,tags:record.tags,website:record.websiteURL,instagram:record.instagramURL)
+    }
+    static func collection(_ record:AskPersonalPlace,fields:[String])->Self {
+        var value=Self(id:record.id,name:record.name,city:record.city,cuisines:record.cuisines,kind:"place")
+        var missing:[String]=[]
+        func stored(_ raw:String?,key:String)->String? {
+            guard raw?.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty == false else {missing.append(key);return nil}
+            return raw
+        }
+        for field in fields {
+            switch field {
+            case "neighborhood":value.neighborhood=stored(record.neighborhood,key:"neighborhood")
+            case "status":value.status=stored(record.status,key:"status")
+            case "type":value.placeType=stored(record.type,key:"placeType")
+            case "note":value.note=stored(record.note,key:"note")
+            case "tags":value.tags=record.tags;if record.tags==nil {missing.append("tags")}
+            case "website":value.website=stored(record.websiteURL,key:"website")
+            case "instagram":value.instagram=stored(record.instagramURL,key:"instagram")
+            default:continue // Required identity stays; unsupported fields are not falsely null.
+            }
+        }
+        value.missingFields=missing.sorted()
+        return value
+    }
+}
+extension AskAgentRecord {
+    init(from decoder:Decoder)throws {
+        let c=try decoder.container(keyedBy:CodingKeys.self)
+        self.init(id:try c.decode(String.self,forKey:.id),name:try c.decode(String.self,forKey:.name),city:try c.decode(String.self,forKey:.city),cuisines:try c.decode([String].self,forKey:.cuisines),kind:try c.decode(String.self,forKey:.kind))
+        detail=try c.decodeIfPresent(String.self,forKey:.detail)
+        neighborhood=try c.decodeIfPresent(String.self,forKey:.neighborhood);status=try c.decodeIfPresent(String.self,forKey:.status);placeType=try c.decodeIfPresent(String.self,forKey:.placeType)
+        note=try c.decodeIfPresent(String.self,forKey:.note);tags=try c.decodeIfPresent([String].self,forKey:.tags);website=try c.decodeIfPresent(String.self,forKey:.website);instagram=try c.decodeIfPresent(String.self,forKey:.instagram)
+        for key:CodingKeys in [.neighborhood,.status,.placeType,.note,.tags,.website,.instagram] where c.contains(key) {if try c.decodeNil(forKey:key) {missingFields.append(key.rawValue)}}
+        missingFields.sort()
+    }
+    func encode(to encoder:Encoder)throws {
+        var c=encoder.container(keyedBy:CodingKeys.self)
+        try c.encode(id,forKey:.id);try c.encode(name,forKey:.name);try c.encode(city,forKey:.city);try c.encode(cuisines,forKey:.cuisines);try c.encode(kind,forKey:.kind)
+        try c.encodeIfPresent(detail,forKey:.detail)
+        try c.encodeIfPresent(neighborhood,forKey:.neighborhood);try c.encodeIfPresent(status,forKey:.status);try c.encodeIfPresent(placeType,forKey:.placeType)
+        try c.encodeIfPresent(note,forKey:.note);try c.encodeIfPresent(tags,forKey:.tags);try c.encodeIfPresent(website,forKey:.website);try c.encodeIfPresent(instagram,forKey:.instagram)
+        for field in missingFields {if let key=CodingKeys(rawValue:field) {try c.encodeNil(forKey:key)}}
     }
 }
 struct AskAgentFinding:Codable,Equatable,Sendable {let id,recordID,field,value,sourceURL:String}

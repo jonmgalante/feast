@@ -1,3 +1,4 @@
+import {DIRECT_NATIVE_LIMITS} from '../feast-production/native-research.mjs';
 import {ACTIVE_MODEL} from '../feast-production/active-model.mjs';
 import {VALIDATION_CAP_MICRO_USD} from '../feast-production/budget-policy.mjs';
 import {digest,json} from '../feast-production/broker.mjs';
@@ -12,7 +13,7 @@ export async function ownerIdentity(token,recordJSON,now=Date.now()){
 export default {
  async fetch(request,env){
   const path=new URL(request.url).pathname;
-  if(path==='/health'&&request.method==='GET')return json({service:'feast-owner-validation',requestsEnabled:env.ENABLED==='true'&&env.LIVE_AI==='true',liveAI:env.ENABLED==='true'&&env.LIVE_AI==='true',savedMetadataEnabled:true,savedToolsEnabled:env.ENABLED==='true'&&env.LIVE_AI==='true',savedToolsVersion:3,collectionContextVersion:1,agentProtocolVersion:8,agentProtocolVersions:env.NATIVE_RESEARCH_ENABLED==='true'?[8,9,10]:[8,9],nativeResearchEnabled:env.NATIVE_RESEARCH_ENABLED==='true'&&env.ALLOW_PUBLIC_LOOKUP==='true'&&env.ALLOW_RECONCILED_BUDGET==='true'&&env.LIVE_AI==='true'&&env.ENABLED==='true',agentToolsEnabled:env.ENABLED==='true'&&env.LIVE_AI==='true'&&env.ALLOW_RECONCILED_BUDGET==='true',publicBusinessToolsVersion:1,publicBusinessLookupEnabled:env.ENABLED==='true'&&env.LIVE_AI==='true'&&env.ALLOW_PUBLIC_LOOKUP==='true'&&env.ALLOW_RECONCILED_BUDGET==='true',selectedScreenshotEnabled:false,webDiscoveryEnabled:false,model:ACTIVE_MODEL,validationCapMicroUSD:VALIDATION_CAP_MICRO_USD});
+  if(path==='/health'&&request.method==='GET')return json({service:'feast-owner-validation',requestsEnabled:env.ENABLED==='true'&&env.LIVE_AI==='true',liveAI:env.ENABLED==='true'&&env.LIVE_AI==='true',savedMetadataEnabled:true,savedToolsEnabled:env.ENABLED==='true'&&env.LIVE_AI==='true',savedToolsVersion:3,collectionContextVersion:1,...(env.NATIVE_RESEARCH_ENABLED==='true'?{collectionQueryVersion:2}:{}),agentProtocolVersion:8,agentProtocolVersions:env.NATIVE_RESEARCH_ENABLED==='true'?[8,9,10]:[8,9],nativeResearchEnabled:env.NATIVE_RESEARCH_ENABLED==='true'&&env.ALLOW_PUBLIC_LOOKUP==='true'&&env.ALLOW_RECONCILED_BUDGET==='true'&&env.LIVE_AI==='true'&&env.ENABLED==='true',agentToolsEnabled:env.ENABLED==='true'&&env.LIVE_AI==='true'&&env.ALLOW_RECONCILED_BUDGET==='true',publicBusinessToolsVersion:1,publicBusinessLookupEnabled:env.ENABLED==='true'&&env.LIVE_AI==='true'&&env.ALLOW_PUBLIC_LOOKUP==='true'&&env.ALLOW_RECONCILED_BUDGET==='true',selectedScreenshotEnabled:false,webDiscoveryEnabled:false,model:ACTIVE_MODEL,validationCapMicroUSD:VALIDATION_CAP_MICRO_USD});
   const token=request.headers.get('Authorization')?.match(/^Bearer ([A-Za-z0-9_-]+)$/)?.[1],user=await ownerIdentity(token,env.OWNER_TOKEN_HASHES_JSON);
   if(!user)return json({error:'unauthorized'},401);
   if(env.ENABLED!=='true')return json({error:'disabled'},503);
@@ -22,7 +23,7 @@ export default {
    if(env.LIVE_AI!=='true')return json({error:'dispatch_disabled'},503);
    if(request.headers.get('Content-Type')?.split(';')[0]!=='application/json')return json({error:'invalid_request'},400);
    const reader=request.body?.getReader();if(!reader)return json({error:'invalid_request'},400);
-   const protocol=request.headers.get('X-Feast-Agent-Protocol'),agent=['8','9','10','11'].includes(protocol),limit=agent?512000:50000;
+   const protocol=request.headers.get('X-Feast-Agent-Protocol'),agent=['8','9','10','11'].includes(protocol),limit=protocol==='10'?DIRECT_NATIVE_LIMITS.maxRequestBytes:agent?512000:50000;
    const chunks=[];let size=0;while(true){const chunk=await reader.read();if(chunk.done)break;size+=chunk.value.byteLength;if(size>limit){await reader.cancel();return json({error:'request_limit'},413)}chunks.push(chunk.value)}
    const body=new Uint8Array(size);let offset=0;for(const chunk of chunks){body.set(chunk,offset);offset+=chunk.byteLength}
    const payload=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(body));

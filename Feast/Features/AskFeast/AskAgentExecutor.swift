@@ -23,6 +23,7 @@ enum AskRecoveryOperationScope {
     let searchMaps:(String) async throws->[ApplePlaceMatch]
     let resolveMaps:@MainActor @Sendable (String) async throws -> ApplePlaceMatch?
     let fullCollectionContext:Bool
+    let supportsCollectionQueryV2:Bool
     private var prepared:[(AskAgentPermission,[String])]=[]
     private var conversationalReplacement=false
     private var conversationalExecution=false
@@ -46,8 +47,9 @@ enum AskRecoveryOperationScope {
     private var createdCities:[String:String]=[:]
     private var collectionPageProgress:[String:Int]=[:]
     private var readContexts:[NSManagedObjectContext]=[]
-    init(adapter:AskSavedCollection,engine:AskCollectionChangeEngine,request:AskRequest,researcher:any AskBusinessResearching,searchMaps:@escaping (String)async throws->[ApplePlaceMatch],resolveMaps:@escaping @MainActor @Sendable (String)async throws->ApplePlaceMatch? = {_ in nil},fullCollectionContext:Bool=false) {
+    init(adapter:AskSavedCollection,engine:AskCollectionChangeEngine,request:AskRequest,researcher:any AskBusinessResearching,searchMaps:@escaping (String)async throws->[ApplePlaceMatch],resolveMaps:@escaping @MainActor @Sendable (String)async throws->ApplePlaceMatch? = {_ in nil},fullCollectionContext:Bool=false,supportsCollectionQueryV2:Bool=false) {
         self.fullCollectionContext=fullCollectionContext
+        self.supportsCollectionQueryV2=fullCollectionContext && supportsCollectionQueryV2
         self.adapter=adapter;self.engine=engine;self.request=request;self.researcher=researcher;self.searchMaps=searchMaps;self.resolveMaps=resolveMaps
         humanReferenceSelection=request.agentTask?.selectionIDs ?? request.agentTask?.orderedIDs ?? request.libraryContext?.selectionIDs ?? request.libraryContext?.ids ?? []
         humanReferenceIsOrdered=request.agentTask.map {$0.selectionIDs == nil} ?? (request.libraryContext?.selectionIDs == nil)
@@ -490,6 +492,7 @@ enum AskRecoveryOperationScope {
     /// The fingerprint pins membership, order AND current values across successive pages.
     private func collectionQuery(_ entity:String,plan:AskLibraryPlan,selectionIDs:[String]?)throws->AskAgentExecution {
         _ = try plan.validated()
+        guard plan.fieldPresence == nil || (supportsCollectionQueryV2 && entity=="place") else{throw AskError.invalidEvidence}
         let offset=plan.offset ?? 0,limit=plan.limit ?? 200
         let aggregate=[AskLibraryPlan.Operation.count,.group,.catalog].contains(plan.operation)
         let view=try adapter.readView(includeDetails:true)
@@ -499,7 +502,7 @@ enum AskRecoveryOperationScope {
             if let selected {guard Set(selected).count==selected.count,Set(selected).isSubset(of:Set(view.snapshot.places.map(\.id))) else{return .init(output:.init(status:"stale",complete:false,totalCount:0,records:[],findings:[],message:"target_mismatch",localOnly:false),response:plain("Those results have changed. Ask for the list again."),orderedIDs:[],selectionIsOrdered:false)}}
             let context=selected.map {AskLibraryContext(ids:selectionIsOrdered && $0.count<=AskCollectionPage.maximumRenderedRecords ? $0 : [],filters:plan,selectionIDs:$0)}
             let filtered=selected.map {ids in AskLibrarySnapshot(places:view.snapshot.places.filter {ids.contains($0.id)},totalCount:ids.count,cityNames:view.snapshot.cityNames)} ?? view.snapshot
-            result=try AskLibraryReadTools.execute(plan,snapshot:filtered,context:context,requireUniqueDetails:false,allowLargeResults:true)
+            result=try AskLibraryReadTools.execute(plan,snapshot:filtered,context:context,requireUniqueDetails:false,allowLargeResults:true,allowStoredFieldPresence:supportsCollectionQueryV2)
             guard result!.status == .success else {
                 return .init(output:.init(status:result!.status == .stale ? "stale" : result!.status == .ambiguous ? "ambiguous" : "partial",complete:false,totalCount:result!.totalCount,records:[],findings:[],message:"unavailable",localOnly:false),response:try AskLibraryReadTools.response(result!,tools:AskReadTools(request:request.collectionReadVersion(),index:view.index)),orderedIDs:[],selectionIsOrdered:false)
             }
@@ -540,17 +543,42 @@ enum AskRecoveryOperationScope {
             }
             guard plan.status==nil,plan.placeType==nil,plan.cuisine==nil,plan.tag==nil else{throw AskError.invalidEvidence}
         }
+        let defaultFields=["neighborhood","status","type","website","instagram"] + ([.details,.compare,.answer].contains(plan.operation) ? ["note","tags"] : [])
+        let projectionFields=plan.fields.isEmpty ? defaultFields : plan.fields
         let records=matched.map {record->AskAgentRecord in
             if entity=="place" {
+                if supportsCollectionQueryV2 {return .collection(record,fields:aggregate ? [] : projectionFields)}
                 var value=AskAgentRecord.collection(record)
                 if aggregate || (!plan.fields.contains("note") && !(plan.fields.isEmpty && [.details,.compare,.answer].contains(plan.operation))) {value.note=nil}
                 if aggregate || (!plan.fields.contains("tags") && !(plan.fields.isEmpty && [.details,.compare,.answer].contains(plan.operation))) {value.tags=nil}
                 return value
             }
-            return .init(id:record.id,name:record.name,city:record.city,cuisines:[],kind:entity,neighborhood:entity=="neighborhood" ? record.neighborhood : nil)
+            return .init(id:record.id,name:record.name,city:record.city,cuisines:[],kind:entity,neighborhood:entity=="neighborhood" && (!supportsCollectionQueryV2 || projectionFields.contains("neighborhood")) ? record.neighborhood : nil)
         }
         let encoder=JSONEncoder();encoder.outputFormatting=[.sortedKeys]
-        let fingerprint=SHA256.hash(data:try encoder.encode(records)).map {String(format:"%02x",$0)}.joined()
+        let snapshotData:Data
+        if supportsCollectionQueryV2 {
+            // Pin the query's identity as well as its output. Otherwise distinct
+            // lists with the same projected rows can be appended as one page set.
+            var identity=plan;identity.offset=nil;identity.limit=nil;identity.snapshot=nil
+            var relevant=Set<String>()
+            if plan.searchText != nil {relevant.formUnion(["neighborhood","note","status","type","tags"])}
+            if plan.tag != nil {relevant.insert("tags")}
+            if plan.neighborhood != nil {relevant.insert("neighborhood")}
+            if plan.status != nil {relevant.insert("status")}
+            if plan.placeType != nil {relevant.insert("type")}
+            if let groupBy=plan.groupBy {relevant.insert(groupBy)}
+            // Keep raw filter values, including blank and invalid stored links.
+            // Hash the eligible catalog independently of a narrowing previous
+            // selection, so subsequent pages cannot lose the original scope.
+            struct FilterRecord:Encodable {let record:AskAgentRecord;let storedPresenceValue:String?}
+            struct Snapshot:Encodable {let entity:String,query:AskLibraryPlan;let selectionIDs:[String]?;let records:[AskAgentRecord];let filterRecords:[FilterRecord]}
+            let filterRecords=view.snapshot.places.sorted {$0.id<$1.id}.map {record in
+                FilterRecord(record:.collection(record,fields:relevant.sorted()),storedPresenceValue:plan.fieldPresence.map {$0.field == .instagram ? record.instagramURL : record.websiteURL} ?? nil)
+            }
+            snapshotData=try encoder.encode(Snapshot(entity:entity,query:identity,selectionIDs:selectionIDs,records:records,filterRecords:filterRecords))
+        } else {snapshotData=try encoder.encode(records)}
+        let fingerprint=SHA256.hash(data:snapshotData).map {String(format:"%02x",$0)}.joined()
         guard offset<=records.count,(offset==0 || plan.snapshot==fingerprint),(plan.snapshot==nil || plan.snapshot==fingerprint) else {
             return .init(output:.init(status:"stale",complete:false,totalCount:records.count,records:[],findings:[],message:"target_mismatch",localOnly:false),response:plain("The collection changed while reading these results. Ask for the list again to get a complete current answer."),orderedIDs:[],selectionIsOrdered:false)
         }
@@ -598,7 +626,7 @@ enum AskRecoveryOperationScope {
         struct Query:Decodable {let entity:String,query:AskLibraryPlan,selectionIDs:[String]?}
         let supplied=try JSONDecoder().decode(Query.self,from:data)
         if fullCollectionContext {return try collectionQuery(supplied.entity,plan:supplied.query,selectionIDs:supplied.selectionIDs)}
-        guard supplied.query.offset==nil,supplied.query.limit==nil,supplied.query.searchText==nil,supplied.query.tag==nil,supplied.query.snapshot==nil else{throw AskError.invalidEvidence}
+        guard supplied.query.offset==nil,supplied.query.limit==nil,supplied.query.searchText==nil,supplied.query.tag==nil,supplied.query.snapshot==nil,supplied.query.fieldPresence==nil else{throw AskError.invalidEvidence}
         if supplied.entity != "place" {
             guard ["city","neighborhood"].contains(supplied.entity) else {throw AskError.invalidEvidence}
             var records=try objects(supplied.entity)

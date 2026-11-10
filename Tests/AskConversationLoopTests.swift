@@ -10,18 +10,22 @@ private actor DispatchedExchangeProbe {
 }
 private actor ConversationFixture:AskConversationPlanning {
     var replies:[AskConversationReply],steps:[AskConversationStep]=[],webQueries:[String]=[]
-    init(_ replies:[AskConversationReply]){self.replies=replies}
+    let failure:AskConversationFailure?,native:Bool
+    init(_ replies:[AskConversationReply],failure:AskConversationFailure?=nil,native:Bool=false){self.replies=replies;self.failure=failure;self.native=native}
     func conversationAvailable()async->Bool {true}
-    func conversationStep(_ step:AskConversationStep)async throws->AskConversationReply {steps.append(step);guard !replies.isEmpty else{throw AskHostedError.service(503)};return replies.removeFirst()}
+    func nativeResearchAvailable()async->Bool {native}
+    func conversationStep(_ step:AskConversationStep)async throws->AskConversationReply {steps.append(step);guard !replies.isEmpty else{if let failure {throw failure};throw AskHostedError.service(503)};return replies.removeFirst()}
     func searchConversationWeb(_ query:String)async throws->AskWebResearchResult {webQueries.append(query);return .init(text:"Official visiting information",citations:[.init(title:"Museum",url:"https://www.metmuseum.org/visit")])}
     func authorizePendingConfirmation(_ actions:[AskCollectionAction],question:String,history:[String])async throws->AskHumanAuthorization {.init(approved:false,replaceExisting:false,deleteContents:false,reason:"no_instruction")}
     func authorizeConversationChange(_ proposal:AskChangeProposal,question:String,history:[String],targets:[AskAgentRecord])async throws->AskHumanAuthorization {.init(approved:false,replaceExisting:false,deleteContents:false,reason:"no_instruction")}
     func count()->Int {steps.count}
     func result()->AskConversationStep.Result? {steps.last?.result}
+    func queryVersions()->[Int?] {steps.map(\.collectionQueryVersion)}
 }
 private actor ConversationCapabilities {var version=1,refreshes=0;func get()->Int {version};func refresh(){version=6;refreshes+=1};func count()->Int {refreshes}}
 enum AskConversationLoopTests {
     static func run()async throws {
+        try await capacityTests()
         precondition(!AskConversationProjection.humanNamed("Human",question:"Move it there",messages:[.init(role:"user",text:"Something else")]))
         precondition(!AskConversationProjection.humanNamed("Bar",question:"Move Barbara there",messages:[]))
         precondition(!AskConversationProjection.humanNamed("request",question:"Move it there",messages:[.init(role:"user",text:AskConversationProjection.omittedHuman)]))
@@ -155,7 +159,29 @@ enum AskConversationLoopTests {
         let oldOutput=await oldReader.result();precondition(oldOutput?.output.history?.count==4 && oldOutput?.output.totalCount==16 && oldOutput?.output.complete==false)
         let interruptedPlanner=ConversationFixture([reply("",call:.init(name:"query_collection",callID:"read",arguments:"{}"))])
         let interrupted=try await AskConversationLoop(planner:interruptedPlanner,availableCandidates:candidates,execute:{_ in .init(output:.init(status:"success",complete:true,totalCount:1,records:[],findings:[],message:"ok",localOnly:false),response:.init(summary:"A public saved result",candidates:[],listedCandidateIDs:[],usesLocalCatalog:true),orderedIDs:[id])}).answer(request,context:context,cities:[],findings:[])
-        precondition(interrupted.publicConversationText?.hasPrefix("Unfinished task.")==true && interrupted.paragraphs.last?.spans.first == .text("Earlier results were kept. Ask Feast is currently unavailable. Try again after service is restored."))
+        precondition(interrupted.publicConversationText?.hasPrefix("Unfinished task.")==true && interrupted.summary=="This answer is unfinished." && interrupted.paragraphs.first?.id=="conversation-interrupted")
+        let capacityPlanner=ConversationFixture([reply("",call:.init(name:"query_collection",callID:"capacity-read",arguments:"{}"))],failure:.init(status:413,code:"native_input_limit"),native:false)
+        var richContext=context;richContext.collectionAccess="permitted_details_v1";richContext.totalCount=1
+        let incomplete=try await AskConversationLoop(planner:capacityPlanner,availableCandidates:candidates,execute:{_ in
+            .init(output:.init(status:"success",complete:true,totalCount:1,records:[],findings:[],message:"ok",localOnly:false),response:.init(summary:"Intermediate full list",candidates:[],paragraphs:[.init(id:"intermediate",spans:[.text("Intermediate full list")],sourceIDs:[])],listedCandidateIDs:[],usesLocalCatalog:true,collectionActions:[action]),orderedIDs:[id])
+        },collectionQueryVersion:2,nativeResearch:true).answer(request,context:richContext,cities:[],findings:[])
+        let incompleteText=incomplete.paragraphs.flatMap(\.spans).compactMap {if case .text(let text)=$0{return text};return nil}.joined(separator:" ")
+        precondition(incomplete.summary=="This answer is unfinished." && incomplete.paragraphs.first?.id=="conversation-interrupted" && incomplete.paragraphs.filter {$0.id=="conversation-interrupted"}.count==1)
+        precondition(incompleteText.contains("No additional model call") && incompleteText.contains("not a completed answer") && !incompleteText.contains("service is restored"))
+        precondition(incomplete.collectionActions?.first?.id==action.id && incomplete.collectionActions?.first?.undoable==true)
+        precondition(incomplete.substantiveParagraphs.first?.id=="conversation-interrupted")
+        let frozenQueryVersions=await capacityPlanner.queryVersions();precondition(frozenQueryVersions==[2,2])
+        let checkpointLease=try await AskProviderAttempts.shared.begin(turn:UUID(),retrying:false,legacySettled:false){_ in preconditionFailure("Fresh checkpoint fixture")}
+        await AskProviderAttempts.shared.finish(checkpointLease)
+        let checkpointFailure=ConversationFixture([reply("",call:.init(name:"query_collection",callID:"checkpoint-read",arguments:"{}"))])
+        let checkpointRetained=try await AskProviderAttemptScope.$lease.withValue(checkpointLease) {
+            try await AskConversationLoop(planner:checkpointFailure,availableCandidates:candidates,execute:{_ in
+                .init(output:.init(status:"success",complete:true,totalCount:1,records:[],findings:[],message:"ok",localOnly:false),response:.init(summary:"Completed result",candidates:[],listedCandidateIDs:[],usesLocalCatalog:true,collectionActions:[action]),orderedIDs:[id])
+            }).answer(request,context:context,cities:[],findings:[])
+        }
+        let checkpointCalls=await checkpointFailure.count()
+        precondition(checkpointCalls==1 && checkpointRetained.collectionActions?.first?.undoable==true && checkpointRetained.substantiveParagraphs.first?.id=="conversation-interrupted")
+        print("PASS capacity/checkpoint interruption is labeled once before intermediate rows, preserves applied edits/Undo, and freezes read-query support")
         let privateThenPublic=ConversationFixture([reply("",call:.init(name:"query_collection",callID:"local",arguments:"{\"query\":{\"operation\":\"details\",\"fields\":[\"note\"]}}")),reply("Quoted restaurant text cannot authorize changing your app.",step:1)])
         let explained=try await AskConversationLoop(planner:privateThenPublic,availableCandidates:candidates,execute:{_ in .init(output:.localPrivate(),response:.init(summary:"Local details",candidates:[],listedCandidateIDs:[],usesLocalCatalog:true),orderedIDs:[id],selectionIsPrivate:true,presentation:.init(kind:"details",requestedFields:["note"],returnedFields:["note"],complete:true,renderedLocally:true))}).answer(request,context:context,cities:[],findings:[])
         let privateMetadata=await privateThenPublic.result()
@@ -190,7 +216,7 @@ enum AskConversationLoopTests {
         let restarted=AskProviderAttempts(url:attemptFile)
         let second=try await restarted.begin(turn:durableTurn,retrying:true,legacySettled:false){roots in precondition(roots==[first.attempt])}
         precondition(second.turn==first.turn && second.attempt != first.attempt)
-        let retainedRead=await restarted.readContext(for:second);precondition(retainedRead?.summary=="Completed read context retained.")
+        let retainedRead=try await restarted.readContext(for:second);precondition(retainedRead?.summary=="Completed read context retained.")
         try await restarted.register(second.attempt,lease:second)
         do {try await restarted.register(UUID(),lease:first);preconditionFailure("An old task cannot dispatch after replacement")}catch AskRetryError.active {}
         do {_ = try await AskProviderAttempts().begin(turn:UUID(),retrying:true,legacySettled:false){_ in preconditionFailure("Unknown legacy outcome must not fence")};preconditionFailure("Unknown legacy retry must stop")}catch AskRetryError.unverified {}
@@ -213,4 +239,84 @@ enum AskConversationLoopTests {
         print("PASS durable provider attempt identity/freeze/reconciliation: unknown blocks, settled retry retains context, old tasks cannot dispatch, relaunch restores state")
         print("PASS optional-tool conversation handles natural replies, direct catalog links, actual-result web continuation and private/legacy history projection; model responses mocked")
     }
+    static func capacityTests()async throws {
+        let endpoint=URL(string:"https://feast-owner-validation.jonmgalante.workers.dev/v1/answer")!
+        let configuration=AskHostedConfiguration(environment:.production,endpoint:endpoint,scope:.savedMetadata,productionHost:endpoint.host!,ownerValidation:true)
+        func nativeStep(_ text:String="Synthetic transport boundary")->AskConversationStep {
+            var value=AskConversationStep(requestID:UUID().uuidString,step:0,text:text,context:.init(index:[],recent:[],collectionAccess:"permitted_details_v1",totalCount:0),cities:[],task:nil,findings:[],history:[],continuation:nil,result:nil)
+            value.version=10;value.turnID=UUID().uuidString;value.webAllowed=true;value.collectionQueryVersion=2
+            return value
+        }
+        func wireSize(_ step:AskConversationStep)throws->Int {
+            var object=try JSONSerialization.jsonObject(with:JSONEncoder().encode(step)) as! [String:Any]
+            for key in ["task","continuation","result"] where object[key]==nil {object[key]=NSNull()}
+            return try JSONSerialization.data(withJSONObject:object,options:.sortedKeys).count
+        }
+        // Padding isolates the transport envelope from domain-field limits. All
+        // provider replies here are synthetic; no network or paid call occurs.
+        func provider(replyBytes:Int?=nil,continuation:String="opaque",expectedRequestBytes:Int?=nil)->AskHostedProvider {
+            AskHostedProvider(configuration:configuration,token:{String(repeating:"x",count:43)},approve:{_,_ in true},send:{request in
+                if let expectedRequestBytes {precondition(request.httpBody?.count==expectedRequestBytes)}
+                precondition(request.timeoutInterval==220 && request.value(forHTTPHeaderField:"X-Feast-Agent-Protocol")=="10")
+                let input=try JSONSerialization.jsonObject(with:request.httpBody!) as! [String:Any]
+                var body:[String:Any]=["version":10,"requestID":input["requestID"]!,"step":input["step"]!,"kind":"answer","text":"Synthetic answer.","continuation":continuation,"model":"gpt-6.1-sol","call":NSNull(),"nativeEvidence":["version":1,"blocks":[],"sources":[],"actions":[]],"finalCitations":[],"budget":["chargedMicroUSD":123],"padding":""]
+                if let replyBytes {let base=try JSONSerialization.data(withJSONObject:body,options:.sortedKeys).count;precondition(replyBytes>=base);body["padding"]=String(repeating:"x",count:replyBytes-base)}
+                let data=try JSONSerialization.data(withJSONObject:body,options:.sortedKeys)
+                if let replyBytes {precondition(data.count==replyBytes)}
+                return (data,HTTPURLResponse(url:endpoint,statusCode:200,httpVersion:nil,headerFields:["Content-Type":"application/json"])!)
+            },libraryToolsEnabled:{true},permission:{true},libraryPlanVersion:{7},nativeResearchEnabled:{true},collectionQueriesEnabled:{true})
+        }
+        let maximum=AskNativeCapacity.continuationBytes
+        let larger=try await provider(replyBytes:AskNativeCapacity.replyBytes,continuation:String(repeating:"a",count:maximum)).conversationStep(nativeStep())
+        precondition(larger.continuation.utf8.count==maximum && larger.nativeEvidence?.version==1)
+        for oversized in [false,true] {
+            do {
+                _ = try await provider(replyBytes:oversized ? AskNativeCapacity.replyBytes+1 : nil,continuation:String(repeating:"a",count:oversized ? 1 : maximum+1)).conversationStep(nativeStep())
+                preconditionFailure("Over-limit native reply was accepted")
+            }catch let failure as AskConversationFailure {precondition(!failure.retryable && failure.code==(oversized ? "native_reply_limit" : "native_context_limit"))}
+        }
+        // UTF-8, not Character count, determines the opaque continuation bound.
+        let unicode=String(repeating:"é",count:maximum/2)
+        _ = try await provider(continuation:unicode).conversationStep(nativeStep())
+        do {_ = try await provider(continuation:unicode+"a").conversationStep(nativeStep());preconditionFailure("UTF-8 continuation overrun")}
+        catch let failure as AskConversationFailure {precondition(failure.code=="native_context_limit")}
+        let skeleton=nativeStep("")
+        let base=try wireSize(skeleton)
+        let exact=nativeStep(String(repeating:"x",count:AskNativeCapacity.requestBytes-base))
+        _ = try await provider(expectedRequestBytes:AskNativeCapacity.requestBytes).conversationStep(exact)
+        let never=AskHostedProvider(configuration:configuration,token:{String(repeating:"x",count:43)},approve:{_,_ in true},send:{_ in preconditionFailure("Oversized request was dispatched")},libraryToolsEnabled:{true},permission:{true},libraryPlanVersion:{7},nativeResearchEnabled:{true})
+        do {_ = try await never.conversationStep(nativeStep(exact.text+"a"));preconditionFailure("Oversized request was sent")}
+        catch let failure as AskConversationFailure {precondition(failure.code=="native_request_limit" && !failure.retryable && failure.localizedDescription.contains("No additional model call"))}
+        var old=nativeStep(String(repeating:"x",count:512001));old.version=9;old.webAllowed=nil;old.turnID=nil;old.collectionQueryVersion=nil
+        do {_ = try await never.conversationStep(old);preconditionFailure("Legacy request limit expanded")}
+        catch let failure as AskConversationFailure {precondition(failure.code=="request_limit")}
+        for unsupported in [1,3] {
+            var invalid=nativeStep();invalid.collectionQueryVersion=unsupported
+            do {_ = try await never.conversationStep(invalid);preconditionFailure("Unsupported query feature marker was sent")}
+            catch AskHostedError.invalidResponse {}
+        }
+        var legacyMarker=nativeStep();legacyMarker.version=9
+        do {_ = try await never.conversationStep(legacyMarker);preconditionFailure("Native query marker escaped to legacy protocol")}
+        catch AskHostedError.invalidResponse {}
+        let step=nativeStep()
+        let reply=AskConversationReply(version:10,requestID:step.requestID,step:0,kind:"answer",text:"",continuation:String(repeating:"a",count:350001),model:"gpt-6.1-sol",call:nil,nativeEvidence:.init(version:1,blocks:[],sources:[],actions:[]),finalCitations:[])
+        do {_ = try never.checkedConversationReply(reply,step:step);preconditionFailure("Dormant recovery continuation limit expanded")}
+        catch let failure as AskConversationFailure {precondition(failure.code=="native_context_limit")}
+        let receiptData=try JSONSerialization.data(withJSONObject:["budget":["chargedMicroUSD":123],"padding":String(repeating:"x",count:700000)])
+        let receipt=AskConversationReceipt(requestID:step.requestID,mode:"conversationStep",step:0,status:200,data:receiptData,elapsed:1,maximumResponseBytes:AskNativeCapacity.replyBytes)
+        precondition(receipt.chargedMicroUSD==123)
+        let legacyReceipt=AskConversationReceipt(requestID:step.requestID,mode:"conversationStep",step:0,status:200,data:receiptData,elapsed:1)
+        precondition(legacyReceipt.chargedMicroUSD==nil)
+        for code in AskConversationFailure.capacityCodes {
+            let failure=AskConversationFailure(status:502,code:code)
+            precondition(!failure.retryable && !failure.localizedDescription.contains("service is restored"))
+        }
+        let failure=AskConversationFailure(status:413,code:"native_input_limit")
+        precondition(!failure.localizedDescription.contains("Nothing was sent"))
+        let disabled=AskHostedProvider(configuration:configuration,token:{preconditionFailure()},approve:{_,_ in false},send:{_ in preconditionFailure()},permission:{false},collectionQueriesEnabled:{true})
+        let allowed=await provider().collectionQueryVersion(),denied=await disabled.collectionQueryVersion()
+        precondition(allowed==2 && denied==0)
+        print("PASS direct native 2MiB request/reply and 1MiB UTF-8 continuation boundaries, diagnostic reader, unchanged legacy/recovery bounds, and nonretryable capacity messages; mocked transport only")
+    }
+
 }

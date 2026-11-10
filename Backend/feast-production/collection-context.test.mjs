@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {validConversationPayload,validConversationResult,conversationTools,checkedConversationCall,conversationContinuation} from './conversation.mjs';
+import {validConversationPayload,validConversationResult,conversationTools,checkedConversationCall,conversationContinuation,conversationInstructions} from './conversation.mjs';
 import {validAgentPayload} from './agent-tools.mjs';
 import {nativeContinuation,nativeBody,encodeNativeFrame,checkedNativeItem} from './native-research.mjs';
 const id='a43c2763-734c-48fa-b40a-693d9b711cdc',snapshot='a'.repeat(64);
@@ -30,4 +30,31 @@ test('rich malformed IDs reject without throwing and incomplete index cannot imp
  const p=payload();p.context.index[0]={...row,id:7};assert.equal(validConversationPayload(p),false);
  p.context.index=[row];p.context.totalCount=2;delete p.context.indexComplete;assert.equal(validConversationPayload(p),false);p.context.indexComplete=false;assert(validConversationPayload(p));
  const r=result();r.records=[r.records[0],{...r.records[0],id:id.toUpperCase()}];r.totalCount=2;r.returnedCount=2;assert.equal(validConversationResult(r,true),false);
+});
+
+test('collection query v2 projection/presence schema is negotiated, typed, place-only and read-only',()=>{
+ const presence={field:'instagram',presence:'missing'};
+ for(const [rich,v2] of [[false,false],[true,false],[false,true]]){
+  assert.equal(conversationTools(rich,v2).find(t=>t.name==='query_collection').parameters.properties.query.properties.fieldPresence,undefined);
+  assert.throws(()=>checkedConversationCall(call({fieldPresence:presence}),payload().text,rich,v2),/conversation_query_shape/);
+ }
+ const properties=conversationTools(true,true).find(t=>t.name==='query_collection').parameters.properties.query.properties;
+ assert.deepEqual(properties.fieldPresence.properties.field.enum,['instagram','website']);
+ for(const field of ['instagram','website'])for(const presence of ['missing','present'])for(const operation of ['list','details','compare','count','group','answer']){
+  assert(checkedConversationCall(call({operation,groupBy:operation==='group'?'city':null,fieldPresence:{field,presence}}),payload().text,true,true));
+ }
+ for(const fieldPresence of [{field:'address',presence:'missing'},{field:'note',presence:'missing'},{field:'instagram',presence:'invalid'},{field:'instagram',presence:'missing',write:true},{field:'instagram'},'instagram'])assert.throws(()=>checkedConversationCall(call({fieldPresence}),payload().text,true,true),/conversation_query_shape/);
+ for(const entity of ['city','neighborhood']){const c=call({fieldPresence:presence});const args=JSON.parse(c.arguments);args.entity=entity;c.arguments=JSON.stringify(args);assert.throws(()=>checkedConversationCall(c,payload().text,true,true),/conversation_query_presence/)}
+ assert.throws(()=>checkedConversationCall(call({operation:'catalog',fieldPresence:presence}),payload().text,true,true),/conversation_query_presence/);
+ assert.equal(JSON.parse(checkedConversationCall(call(),payload().text,true,true).arguments).query.fieldPresence,null);
+ assert.equal(conversationTools(true,true).find(t=>t.name==='propose_changes').parameters.properties.targetIDs.maxItems,200);
+ const instructions=conversationInstructions({nativeResearch:true,rich:true,queryV2:true});
+ for(const wording of [/omitted field is unrequested or unavailable/,/malformed but nonempty saved URL is present/,/read-only predicate/,/before counting or pagination/,/fields=\[\] preserves established defaults/,/fields=\[name\] requests identity-only rows/])assert.match(instructions,wording);
+ assert.doesNotMatch(conversationInstructions({rich:true}),/fieldPresence/);
+});
+test('projected rich rows preserve requested null versus omitted optional fields and reject invented stored fields',()=>{
+ const r=result();r.records=[{...row,kind:'place',instagram:null}];
+ assert(validConversationResult(r,true));assert(Object.hasOwn(r.records[0],'instagram'));assert.equal(Object.hasOwn(r.records[0],'note'),false);
+ r.records=[{...row,kind:'place',instagram:'not a valid URL'}];assert(validConversationResult(r,true));
+ for(const field of ['address','fieldPresence','missingFields']){r.records=[{...row,kind:'place',[field]:null}];assert.equal(validConversationResult(r,true),false)}
 });

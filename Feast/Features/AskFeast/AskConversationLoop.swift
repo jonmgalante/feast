@@ -221,6 +221,8 @@ struct AskConversationLoop:Sendable {
     var retainFindings:(@Sendable (AskAgentReply.Call,[AskRetainedResearch])async throws->AskAgentExecution)?=nil
     var recoverySnapshot:(@Sendable ()async throws->Data)?=nil
     var revalidateRecoveryAccess:@Sendable ([UUID])async throws->Void = {_ in}
+    var collectionQueryVersion:Int=0
+    var nativeResearch:Bool?=nil
     func answer(_ request:AskRequest,context:AskSemanticContext,cities:[AskAgentCity],findings:[AskAgentFinding])async throws->AskResponse {
         let fullCollection=context.collectionAccess=="permitted_details_v1"
         let root=(AskProviderAttemptScope.lease?.attempt ?? request.performanceID ?? UUID()).uuidString,task=try request.agentTask?.checked().projection(fullCollection:fullCollection)
@@ -234,7 +236,12 @@ struct AskConversationLoop:Sendable {
         state.available=availableCandidates
         if fullCollection,let prior=request.collectionContinuation {for candidate in prior.candidates where state.available[candidate.id]==nil {state.available[candidate.id]=candidate}}
         state.publicResearch=request.publicResearch
-        let native=recovery != nil ? true : await planner.nativeResearchAvailable()
+        let native:Bool
+        if recovery != nil {native=true}
+        else if let nativeResearch {native=nativeResearch}
+        else {native=await planner.nativeResearchAvailable()}
+        // Query support is frozen for this attempt. This is not a capacity profile.
+        let queryVersion = native && recovery == nil && fullCollection ? collectionQueryVersion : 0
         if let recovery,let checkpoint=try await recovery.store.checkpoint(recovery.turn) {
             if checkpoint.phase == .executingTool {throw AskRecoveryError.localStepUncertain}
             if checkpoint.loopInitialized {state=checkpoint.state}
@@ -264,7 +271,10 @@ struct AskConversationLoop:Sendable {
             var response=state.latest ?? AskResponse(summary:"Public research was kept for your next message.",candidates:[],listedCandidateIDs:[],usesLocalCatalog:true)
             response.publicResearch=Array(state.publicResearch.suffix(4))
             response.operationRecords=state.operationRecords.isEmpty ? nil : state.operationRecords
-            response.paragraphs.append(.init(id:"conversation-interrupted",spans:[.text("Earlier results were kept. "+AskHostedError.message(for:error))],sourceIDs:[]))
+            let explanation="This answer is unfinished. "+AskHostedError.message(for:error)+" Earlier results are retained below, not a completed answer."
+            response.summary="This answer is unfinished."
+            response.paragraphs.removeAll {$0.id=="conversation-interrupted"}
+            response.paragraphs.insert(.init(id:"conversation-interrupted",spans:[.text(explanation)],sourceIDs:[]),at:0)
             if !state.durableActions.isEmpty {response.collectionActions=state.durableActions}
             response.agentTask = .init(action:state.attemptedChange || !state.durableActions.isEmpty ? "change" : "query",fields:state.taskFields,orderedIDs:state.selectionIsOrdered ? state.ordered : [],sourcePolicy:"public_if_missing",privateSelection:state.privateScope || state.privateHistory,outcomes:state.durableOutcomes.isEmpty ? nil : state.durableOutcomes,selectionIDs:state.selectionIsOrdered ? nil : state.ordered,referencesIncomplete:state.referencesIncomplete)
             response.publicConversationText=state.privateHistory || state.privateScope ? nil : "Unfinished task. "+(state.selectionIsOrdered ? "Saved result IDs: "+state.ordered.joined(separator:",")+". " : "The aggregate selection remains on device. ")+String(response.summary.prefix(1000))
@@ -279,7 +289,7 @@ struct AskConversationLoop:Sendable {
             let reply:AskConversationReply
             do {
                 var payload=AskConversationStep(requestID:root,step:step,text:request.text,context:context,cities:cities,task:task,findings:findings,history:Array(request.dialogue.suffix(12)),continuation:state.continuation,result:state.result,historyCount:request.dialogue.count)
-                if native {payload.version=10;payload.webAllowed = (fullCollection || !state.currentPrivateTool) && !state.localOnlyTool;payload.turnID=(request.performanceID ?? UUID(uuidString:root)!).uuidString}
+                if native {payload.version=10;payload.webAllowed = (fullCollection || !state.currentPrivateTool) && !state.localOnlyTool;payload.turnID=(request.performanceID ?? UUID(uuidString:root)!).uuidString;payload.collectionQueryVersion=queryVersion==2 ? 2 : nil}
                 reply=try await planner.conversationStep(payload)
             }
             catch {
@@ -403,7 +413,8 @@ struct AskConversationLoop:Sendable {
                     var checkpoint=state.latest ?? AskResponse(summary:"Completed research retained.",candidates:[],listedCandidateIDs:[],usesLocalCatalog:true)
                     checkpoint.publicResearch=Array(state.publicResearch.suffix(4))
                     checkpoint.agentTask = .init(action:"query",fields:state.taskFields,orderedIDs:state.selectionIsOrdered ? state.ordered : [],sourcePolicy:"public_if_missing",privateSelection:state.privateScope || state.privateHistory,selectionIDs:state.selectionIsOrdered ? nil : state.ordered,referencesIncomplete:state.referencesIncomplete)
-                    try await AskProviderAttempts.shared.keepReadContext(checkpoint,lease:lease)
+                    do {try await AskProviderAttempts.shared.keepReadContext(checkpoint,lease:lease)}
+                    catch {if let retained=interrupted(error) {return retained};throw error}
                 }
                 try await saveBoundary(nextStep:step+1,phase:.ready)
                 continue

@@ -43,14 +43,18 @@ struct AskAgentProvider:AskFeastProvider {
 
         if let hosted=remote as? AskHostedProvider,await hosted.permission(),let turn=request.performanceID {
             let lease=try await hosted.prepareProviderAttempt(turn:turn,retrying:request.providerRetry)
-            var resumed=request
-            if request.providerRetry,let context=await AskProviderAttempts.shared.readContext(for:lease) {
-                resumed.publicResearch=context.publicResearch ?? resumed.publicResearch
-                resumed.verifiedFindings=context.verifiedPublicFindings ?? resumed.verifiedFindings
-                resumed.agentTask=context.agentTask ?? resumed.agentTask
-                resumed.mapChoices=context.mapChoices ?? resumed.mapChoices
-            }
-            return try await AskProviderAttemptScope.$lease.withValue(lease){try await runAnswer(resumed,tools:tools)}
+            do {
+                var resumed=request
+                if request.providerRetry,let context=try await AskProviderAttempts.shared.readContext(for:lease) {
+                    resumed.publicResearch=context.publicResearch ?? resumed.publicResearch
+                    resumed.verifiedFindings=context.verifiedPublicFindings ?? resumed.verifiedFindings
+                    resumed.agentTask=context.agentTask ?? resumed.agentTask
+                    resumed.mapChoices=context.mapChoices ?? resumed.mapChoices
+                }
+                let response=try await AskProviderAttemptScope.$lease.withValue(lease){try await runAnswer(resumed,tools:tools)}
+                await AskProviderAttempts.shared.finish(lease)
+                return response
+            }catch {await AskProviderAttempts.shared.finish(lease);throw error}
         }
         return try await runAnswer(request,tools:tools)
     }
@@ -80,13 +84,23 @@ struct AskAgentProvider:AskFeastProvider {
               let planner=remote as? any AskAgentPlanning,await planner.agentAvailable(),let researcher=remote as? any AskBusinessResearching else {return try await localOrConsent(request,tools:tools)}
         let fullCollection:Bool
         if let hosted=remote as? AskHostedProvider {let version=await hosted.libraryPlanVersion();let allowed=await hosted.permission();fullCollection = version>=7 && allowed}else{fullCollection=false}
+        // Freeze optional read-query support before building both the executor
+        // and its model loop. Recovery keeps its existing query contract.
+        var queryVersion=0,nativeAvailable=false,useRecovery=false
+        if let conversational=remote as? any AskConversationPlanning {
+            nativeAvailable=await conversational.nativeResearchAvailable()
+            if nativeAvailable,recoveryStore != nil,request.performanceID != nil,request.conversationID != nil,AskProviderAttemptScope.lease != nil,let hosted=remote as? AskHostedProvider {
+                useRecovery=await hosted.recoveryEnabled()
+            }
+            if !useRecovery,fullCollection,nativeAvailable {queryVersion=await conversational.collectionQueryVersion()==2 ? 2 : 0}
+        }
         let contextStarted=DispatchTime.now().uptimeNanoseconds
         var reading=request.collectionReadVersion()
         let current=try await adapter.readView(),snapshot=current.snapshot
 
         var context=try AskSemanticContext.make(reading,catalog:snapshot,fullCollection:fullCollection)
         if !fullCollection {reading.collectionContinuation=nil}
-        let executor=await AskAgentExecutor(adapter:adapter,engine:engine,request:reading,researcher:researcher,searchMaps:{query in try await searchMaps(query)},resolveMaps:resolveMaps,fullCollectionContext:fullCollection)
+        let executor=await AskAgentExecutor(adapter:adapter,engine:engine,request:reading,researcher:researcher,searchMaps:{query in try await searchMaps(query)},resolveMaps:resolveMaps,fullCollectionContext:fullCollection,supportsCollectionQueryV2:queryVersion==2)
         if fullCollection {
             let permitted=try await executor.permittedRecordIDs()
             if Set(reading.collectionDialogueIDs).isSubset(of:permitted) {reading.dialogue=reading.collectionDialogue.isEmpty ? reading.dialogue : reading.collectionDialogue}
@@ -124,9 +138,9 @@ struct AskAgentProvider:AskFeastProvider {
                 let permitted=try await executor.permittedRecordIDs()
                 let deleted=try await engine.recoveryDeletedRecordIDs(forTurn:request.performanceID ?? UUID(),includingActionIDs:Set(actionIDs))
                 guard recoveryContextIDs.isSubset(of:permitted.union(deleted)) else{throw AskHostedError.selectionUnavailable}
-            })
+            },collectionQueryVersion:queryVersion,nativeResearch:nativeAvailable)
             // Decide once, before the first request. No fallback after durable acceptance.
-            if let recoveryStore,let hosted=remote as? AskHostedProvider,await hosted.recoveryEnabled(),await hosted.nativeResearchAvailable(),let turn=reading.performanceID,let chat=reading.conversationID,let lease=AskProviderAttemptScope.lease {
+            if useRecovery,let recoveryStore,let hosted=remote as? AskHostedProvider,let turn=reading.performanceID,let chat=reading.conversationID,let lease=AskProviderAttemptScope.lease {
                 var checkpoint=AskTurnCheckpoint(turnID:turn,chatID:chat,attemptID:lease.attempt,endpoint:hosted.configuration.endpoint.absoluteString,request:reading,createdAt:Date())
                 try Task.checkCancellation()
                 checkpoint.userRequest=request

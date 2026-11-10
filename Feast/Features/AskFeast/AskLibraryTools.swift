@@ -16,7 +16,7 @@ struct AskSemanticContext: Codable, Equatable, Sendable {
     static func recentQuestions(_ turns:[AskTurn]) -> [AskRecentUserQuestion] {
         turns.filter {$0.status == .complete && $0.readContextMode == .collection && !$0.request.fromOCR && $0.request.attachment == nil && ($0.response?.collectionActions ?? []).isEmpty && $0.response?.agentTask?.fields.contains(where:{["note","tags","status"].contains($0)}) != true}.suffix(2).map { turn in
             let filter=turn.response?.libraryContext?.filters
-            let excluded = turn.response?.libraryContext?.excludesExternalReferences == true || filter?.status != nil || filter?.neighborhood != nil || filter?.placeType != nil || (filter?.operation != .lookup && ["status","neighborhood","type","address"].contains {filter?.fields.contains($0) == true}) || ["status","neighborhood","type"].contains(filter?.groupBy ?? "")
+            let excluded = turn.response?.libraryContext?.excludesExternalReferences == true || filter?.fieldPresence != nil || filter?.status != nil || filter?.neighborhood != nil || filter?.placeType != nil || (filter?.operation != .lookup && ["status","neighborhood","type","address"].contains {filter?.fields.contains($0) == true}) || ["status","neighborhood","type"].contains(filter?.groupBy ?? "")
             // Never serialize assistant prose, source excerpts, OCR, or private-derived membership.
             let ids=excluded ? [] : Array((turn.response?.libraryContext?.ids ?? []).prefix(6))
             return .init(question:turn.request.text,recordIDs:ids)
@@ -42,6 +42,20 @@ struct AskSemanticContext: Codable, Equatable, Sendable {
     }
 }
 
+/// Stored presence is not URL validity or public availability. Only a fresh,
+/// permission-checked rich read can evaluate this predicate.
+struct AskStoredFieldPresence: Codable, Equatable, Sendable {
+    enum Field: String, Codable, Sendable { case instagram, website }
+    enum Presence: String, Codable, Sendable { case missing, present }
+    let field: Field
+    let presence: Presence
+    func matches(_ place:AskPersonalPlace)->Bool {
+        let raw=field == .instagram ? place.instagramURL : place.websiteURL
+        let missing=raw?.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty ?? true
+        return presence == .missing ? missing : !missing
+    }
+}
+
 /// One model-selected read operation. No SQL, URLs, record IDs, write actions or private catalog input.
 struct AskLibraryPlan: Codable, Equatable, Sendable {
     enum Operation: String, Codable, Sendable { case catalog, list, details, compare, count, group, answer, lookup, updateField, unsupported }
@@ -63,6 +77,7 @@ struct AskLibraryPlan: Codable, Equatable, Sendable {
     var searchText:String? = nil
     var tag:String? = nil
     var snapshot:String? = nil
+    var fieldPresence:AskStoredFieldPresence? = nil
     func validated() throws -> Self {
         guard [city,cuisine,name,neighborhood,searchText,tag].allSatisfy({ $0 == nil || (!$0!.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0!.count <= 200) }),
               status == nil || ["Want to try","Just opened","Been","Love","Regulars","untried"].contains(status!),
@@ -72,6 +87,7 @@ struct AskLibraryPlan: Codable, Equatable, Sendable {
               fields.allSatisfy({ (operation == .lookup ? AskBusinessRequest.allowedFields : ["city","neighborhood","address","cuisine","status","type","name","website","instagram","note","tags"]).contains($0) }),
               (groupBy == nil ? operation != .group : ["city","neighborhood","cuisine","status","type"].contains(groupBy!)),
               names == nil || ((1...200).contains(names!.count) && Set(names!).count == names!.count && names!.allSatisfy({!$0.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty && $0.count <= 200}) && name == nil) else { throw AskError.invalidEvidence }
+        guard fieldPresence == nil || [.list,.details,.compare,.count,.group,.answer].contains(operation) else {throw AskError.invalidEvidence}
         if operation == .updateField {guard fields == ["instagram"],status == nil,placeType == nil,neighborhood == nil,cuisine == nil,names == nil,positions.count <= 1 else {throw AskError.invalidEvidence}}
         if operation == .lookup {guard !fields.isEmpty,status == nil,placeType == nil,neighborhood == nil,cuisine == nil,names == nil,positions.count<=1 else {throw AskError.invalidEvidence}}
         guard offset == nil || offset! >= 0,limit == nil || (1...200).contains(limit!),snapshot == nil || (snapshot!.count==64 && snapshot!.allSatisfy(\.isHexDigit)) else {throw AskError.invalidEvidence}
@@ -141,8 +157,9 @@ struct AskLibraryToolResult: Sendable {
     var excludesExternalReferences=false
 }
 enum AskLibraryReadTools {
-    static func execute(_ supplied: AskLibraryPlan, snapshot: AskLibrarySnapshot, context: AskLibraryContext?,requireUniqueDetails:Bool=true,allowLargeResults:Bool=false) throws -> AskLibraryToolResult {
+    static func execute(_ supplied: AskLibraryPlan, snapshot: AskLibrarySnapshot, context: AskLibraryContext?,requireUniqueDetails:Bool=true,allowLargeResults:Bool=false,allowStoredFieldPresence:Bool=false) throws -> AskLibraryToolResult {
         var plan = try supplied.validated()
+        guard plan.fieldPresence == nil || allowStoredFieldPresence else {throw AskError.invalidEvidence}
         let snapshot=snapshot.sanitized(),all = snapshot.places
         if let context {
             let selection = context.selectionIDs ?? context.ids
@@ -150,7 +167,7 @@ enum AskLibraryReadTools {
         }
         func result(_ status: AskLibraryToolResult.Status, _ records: [AskPersonalPlace]) -> AskLibraryToolResult {
             var value=AskLibraryToolResult(status: status, records: records, appliedFilters: plan, totalCount: records.count, complete: snapshot.complete(in:plan.city), cities: snapshot.cities)
-            value.excludesExternalReferences = plan.status != nil || plan.neighborhood != nil || plan.placeType != nil || (plan.operation != .lookup && plan.fields.contains { ["status","neighborhood","type","address"].contains($0) }) || ["status","neighborhood","type"].contains(plan.groupBy ?? "") || (plan.scope == .previous && context?.excludesExternalReferences == true)
+            value.excludesExternalReferences = plan.fieldPresence != nil || plan.status != nil || plan.neighborhood != nil || plan.placeType != nil || (plan.operation != .lookup && plan.fields.contains { ["status","neighborhood","type","address"].contains($0) }) || ["status","neighborhood","type"].contains(plan.groupBy ?? "") || (plan.scope == .previous && context?.excludesExternalReferences == true)
             return value
         }
         guard plan.operation != .unsupported else { return result(.unsupported,[]) }
@@ -214,6 +231,9 @@ enum AskLibraryReadTools {
             guard plan.positions.allSatisfy({$0 <= shown.count}) else { return result(.stale,[]) }
             records=plan.positions.map {shown[$0-1]}
         }
+        // An ordinal names the displayed row, not its position in a newly
+        // filtered subset. Intersect presence only after resolving that identity.
+        if let presence=plan.fieldPresence {records=records.filter(presence.matches)}
         if !snapshot.complete(in:plan.city) { return result(.partial,records) }
         if !allowLargeResults,![.count,.group].contains(plan.operation),records.count > 200 {return result(.limited,records)}
         if requireUniqueDetails && plan.operation == .details && records.count > 1 { return result(.ambiguous, records) }
@@ -293,8 +313,8 @@ enum AskLibraryReadTools {
                     case "address": return "Street address isn’t recorded"
                     case "cuisine": return record.cuisines.isEmpty ? "Cuisine isn’t recorded" : record.cuisines.joined(separator:", ")
                     case "type": return record.type ?? "Category isn’t recorded"
-                    case "website": return record.websiteURL.flatMap {InstagramWebsiteClient.websiteURL($0)} == nil ? "Website isn’t saved" : "Website saved"
-                    case "instagram": return record.instagramURL.flatMap {InstagramWebsiteParser.profileURL($0)} == nil ? "Instagram isn’t saved" : "Instagram saved"
+                    case "website": return record.websiteURL?.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty != false ? "Website isn’t saved" : record.websiteURL.flatMap {InstagramWebsiteClient.websiteURL($0)} == nil ? "Saved website value isn’t a valid URL" : "Website saved"
+                    case "instagram": return record.instagramURL?.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty != false ? "Instagram isn’t saved" : record.instagramURL.flatMap {InstagramWebsiteParser.profileURL($0)} == nil ? "Saved Instagram value isn’t a valid profile URL" : "Instagram saved"
                     case "note": return record.note.flatMap {$0.isEmpty ? nil : $0}
                     case "tags": return record.tags.flatMap {$0.isEmpty ? nil : $0.joined(separator:", ")}
                     case "status": return record.status.map { "Marked " + $0 } ?? "Status isn’t recorded"

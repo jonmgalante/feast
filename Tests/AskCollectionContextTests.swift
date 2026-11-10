@@ -33,6 +33,27 @@ private actor CollectionContextConversation:AskConversationPlanning {
     func authorizeConversationChange(_ proposal:AskChangeProposal,question:String,history:[String],targets:[AskAgentRecord])async throws->AskHumanAuthorization {preconditionFailure("No writes")}
     func steps()->[AskConversationStep] {seen}
 }
+private actor CollectionQueryHTTPFixture {
+    let call:AskAgentReply.Call,expectedIDs:[String]
+    private var count=0
+    init(call:AskAgentReply.Call,expectedIDs:[String]) {self.call=call;self.expectedIDs=expectedIDs}
+    func send(_ request:URLRequest)throws->(Data,HTTPURLResponse) {
+        let payload=try JSONSerialization.jsonObject(with:request.httpBody!) as! [String:Any]
+        precondition(request.url?.path=="/v1/answer" && payload["mode"] as? String=="conversationStep")
+        precondition(payload["version"] as? Int==10 && payload["collectionQueryVersion"] as? Int==2)
+        let step=payload["step"] as! Int
+        precondition(step==count && step<2);count+=1
+        if step==1 {
+            let output=(payload["result"] as! [String:Any])["output"] as! [String:Any]
+            let records=output["records"] as! [[String:Any]]
+            precondition(output["totalCount"] as? Int==41 && output["complete"] as? Bool==true && records.compactMap {$0["id"] as? String}==expectedIDs)
+            precondition(records.allSatisfy {$0["instagram"] is NSNull && $0["note"]==nil && $0["status"]==nil})
+        }
+        let reply:[String:Any] = ["version":10,"requestID":payload["requestID"]!,"step":step,"kind":step==0 ? "tool" : "answer","text":"","continuation":"synthetic-direct-query","model":"gpt-6.1-sol","call":step==0 ? ["name":call.name,"callID":call.callID,"arguments":call.arguments] : NSNull(),"nativeEvidence":["version":1,"blocks":[],"sources":[],"actions":[]],"finalCitations":[]]
+        return (try JSONSerialization.data(withJSONObject:reply),HTTPURLResponse(url:request.url!,statusCode:200,httpVersion:nil,headerFields:["Content-Type":"application/json"])!)
+    }
+    func calls()->Int {count}
+}
 @MainActor enum AskCollectionContextTests {
     static func run(model:NSManagedObjectModel,temporaryDirectory:URL)async throws {
         let olderKeys=["AskFeast.onlinePermission.cloudflare-openai.catalog-public-dialogue-selected-images.v4",
@@ -155,6 +176,205 @@ private actor CollectionContextConversation:AskConversationPlanning {
         precondition(AskConversationProjection.messages([turn]).allSatisfy {!$0.text.contains("Collection page: snapshot")})
         precondition(archive.save(.init(turns:[AskArchivedTurn(turn)])))
         let loaded=archive.load();precondition(loaded.turns.first?.response.collectionPage==answer.collectionPage && loaded.turns.first?.response.candidates.count==260)
+        try await queryV2(model:model,temporaryDirectory:temporaryDirectory)
         print("PASS rich collection: fresh consent, permission scope, notes/tags/status, >200 retrieval, byte budget, snapshots, ordinal250, count with oversized note, complete paged display and history; synthetic only")
     }
+    private static func queryV2(model:NSManagedObjectModel,temporaryDirectory:URL)async throws {
+        let coordinator=NSPersistentStoreCoordinator(managedObjectModel:model)
+        _ = try coordinator.addPersistentStore(ofType:NSSQLiteStoreType,configurationName:nil,at:temporaryDirectory.appendingPathComponent("query-v2.sqlite"))
+        let context=NSManagedObjectContext(concurrencyType:.mainQueueConcurrencyType);context.persistentStoreCoordinator=coordinator
+        let repo=FeastRepository(context:context),nyc=try repo.createFeastList(named:"NYC"),large=try repo.createFeastList(named:"Large City"),hidden=try repo.createFeastList(named:"Hidden City")
+        _ = try repo.createListSection(named:"Saved Neighborhood",in:nyc)
+        var nycPlaces:[SavedPlace]=[],largePlaces:[SavedPlace]=[]
+        for i in 0..<157 {
+            nycPlaces.append(try repo.createSavedPlace(from:.init(applePlaceID:"query-nyc-\(i)",displayNameSnapshot:String(format:"NYC Place %03d",i),status:.love,placeType:.restaurant,cuisines:["Italian"],tags:["Collaborator tag"],note:"Collaborator note not requested",websiteURL:"https://example.org/\(i)",instagramURL:i<41 ? nil : "https://www.instagram.com/synthetic_\(i)/",feastList:nyc,listSection:nil)))
+        }
+        for i in 0..<245 {
+            largePlaces.append(try repo.createSavedPlace(from:.init(applePlaceID:"query-large-\(i)",displayNameSnapshot:String(format:"Large Place %03d",i),status:.wantToTry,placeType:.cafe,cuisines:["Coffee"],tags:["Shared"],note:String(repeating:"Unrequested stored detail ",count:250),websiteURL:"https://example.org/"+String(repeating:"x",count:1700),instagramURL:nil,feastList:large,listSection:nil)))
+        }
+        _ = try repo.createSavedPlace(from:.init(applePlaceID:"query-hidden",displayNameSnapshot:"Withheld place",status:.love,placeType:.bar,cuisines:[],tags:[],note:"WITHHELD_NOTE",websiteURL:nil,instagramURL:nil,feastList:hidden,listSection:nil))
+        // Exercise literal persisted values, not an import or URL-normalization path.
+        for i in 20..<30 {nycPlaces[i].instagramURL=""}
+        for i in 30..<41 {nycPlaces[i].instagramURL=" \n\t "}
+        nycPlaces[41].instagramURL="not a valid profile URL"
+        nycPlaces[0].websiteURL=nil;nycPlaces[1].websiteURL="  ";nycPlaces[2].websiteURL="invalid website value"
+        try context.save()
+        var visible=Set([nyc.id!,large.id!])
+        let adapter=AskSavedCollection(context:context,visibleCities:{visible})
+        let engine=AskCollectionChangeEngine(adapter:adapter,journalURL:temporaryDirectory.appendingPathComponent("query-v2-actions.json"))
+        let request=AskRequest(mode:.collection,text:"Which NYC places are missing Instagram?",fromOCR:false,performanceID:UUID())
+        func executor(_ v2:Bool=true,_ rich:Bool=true)->AskAgentExecutor {
+            .init(adapter:adapter,engine:engine,request:request,researcher:CollectionContextResearch(),searchMaps:{_ in preconditionFailure("Read-only test must not use Maps")},fullCollectionContext:rich,supportsCollectionQueryV2:v2)
+        }
+        func query(_ operation:String="list",city:String?="NYC",field:String?="instagram",presence:String="missing",fields:[String]=[],scope:String="library",positions:[Int]=[],offset:Int?=nil,limit:Int?=nil,snapshot:String?=nil,entity:String="place",search:String?=nil,groupBy:String?=nil)->AskAgentReply.Call {
+            var q:[String:Any] = ["operation":operation,"scope":scope,"positions":positions,"fields":fields]
+            if let city {q["city"]=city};if let field {q["fieldPresence"]=["field":field,"presence":presence]}
+            if let offset {q["offset"]=offset};if let limit {q["limit"]=limit};if let snapshot {q["snapshot"]=snapshot};if let search {q["searchText"]=search};if let groupBy {q["groupBy"]=groupBy}
+            return .init(name:"query_collection",callID:UUID().uuidString,arguments:String(data:try! JSONSerialization.data(withJSONObject:["entity":entity,"query":q]),encoding:.utf8)!)
+        }
+        func rowJSON(_ value:AskAgentRecord)throws->[String:Any] {try JSONSerialization.jsonObject(with:JSONEncoder().encode(value)) as! [String:Any]}
+        func storedState()throws->[String:[String:String]] {
+            // KVC may bridge UUID/String values to Foundation objects after a
+            // refault. Their descriptions can contain object addresses or change
+            // quoting; compare exact typed data instead, including date bits.
+            var rows:[String:[String:String]]=[:]
+            for place in try repo.fetchSavedPlaces() {
+                var values:[String:String]=[:]
+                for key in place.entity.attributesByName.keys {
+                    let raw=place.value(forKey:key),value:String
+                    if let date=raw as? Date {value="date:"+String(date.timeIntervalSinceReferenceDate.bitPattern)}
+                    else if let id=raw as? UUID {value="uuid:"+id.uuidString}
+                    else if let text=raw as? String {value="text:"+text}
+                    else if let bytes=raw as? Data {value="data:"+bytes.base64EncodedString()}
+                    else if raw==nil {value="nil"}
+                    else {preconditionFailure("Unhandled saved attribute type: "+key)}
+                    values[key]=value
+                }
+                for (key,object) in [("city",place.feastList as NSManagedObject?),("section",place.listSection as NSManagedObject?)] {
+                    values["relationship:"+key]=object.map {$0.objectID.uriRepresentation().absoluteString+":"+(($0.value(forKey:"id") as? UUID)?.uuidString ?? "nil")} ?? "nil"
+                }
+                rows[place.objectID.uriRepresentation().absoluteString]=values
+            }
+            return rows
+        }
+        let before=try storedState()
+        let intent=AskAgentInterpretation(goal:"query",sourcePolicy:"stored_only",fields:["instagram"],selectionIDs:[],permissions:[])
+        let reader=executor(),expected=nycPlaces.prefix(41).map {$0.id!.uuidString}
+        let count=try await reader.execute(query("count"),intent:intent)
+        precondition(count.output.totalCount==41 && count.output.complete && count.output.records.isEmpty && count.orderedIDs==expected && !count.selectionIsOrdered)
+        precondition(count.presentation?.kind=="count" && count.presentation?.returnedFields==[] && count.response?.candidates.isEmpty==true)
+        let noOrdinal=try await reader.execute(query("details",city:nil,field:nil,scope:"previous",positions:[2]),intent:intent)
+        precondition(noOrdinal.output.status=="stale" && noOrdinal.output.records.isEmpty)
+        let list=try await reader.execute(query(fields:["instagram"],scope:"previous"),intent:intent)
+        precondition(list.output.totalCount==41 && list.output.complete && list.output.records.map(\.id)==expected && list.response?.candidates.map(\.id)==expected && list.selectionIsOrdered)
+        precondition(list.presentation?.kind=="rows" && list.presentation?.returnedFields==["instagram"] && list.presentation?.renderedLocally==true)
+        for record in list.output.records {
+            let row=try rowJSON(record)
+            precondition(Set(row.keys)==Set(["id","name","city","cuisines","kind","instagram"]) && row["instagram"] is NSNull)
+            let bytes=try JSONEncoder().encode(record),restored=try JSONDecoder().decode(AskAgentRecord.self,from:bytes)
+            let restoredRow=try rowJSON(restored)
+            precondition(restored==record && restoredRow["instagram"] is NSNull)
+        }
+        let recent=AskSemanticContext.recentQuestions([.init(id:UUID(),request:request,response:list.response,status:.complete)])
+        precondition(recent.count==1 && recent[0].question==request.text && recent[0].recordIDs.isEmpty)
+        var followupRequest=AskRequest(mode:.collection,text:"The second one",fromOCR:false,performanceID:UUID());followupRequest.libraryContext=list.response?.libraryContext
+        let followup=AskAgentExecutor(adapter:adapter,engine:engine,request:followupRequest,researcher:CollectionContextResearch(),searchMaps:{_ in []},fullCollectionContext:true,supportsCollectionQueryV2:true)
+        let acrossTurns=try await followup.execute(query("details",city:nil,field:nil,fields:["instagram"],scope:"previous",positions:[2]),intent:intent)
+        precondition(acrossTurns.output.records.map(\.id)==[expected[1]])
+        let second=try await reader.execute(query("details",city:nil,field:nil,fields:["instagram"],scope:"previous",positions:[2]),intent:intent)
+        precondition(second.output.records.map(\.id)==[expected[1]] && second.response?.candidates.map(\.id)==[expected[1]])
+        let present=try await reader.execute(query(presence:"present",fields:["instagram"]),intent:intent)
+        precondition(present.output.totalCount==116 && present.output.records.first?.id==nycPlaces[41].id!.uuidString && present.output.records.first?.instagram=="not a valid profile URL")
+        let invalidText=present.response!.paragraphs.flatMap(\.spans).compactMap {if case .text(let value)=$0{return value};return nil}.joined()
+        precondition(invalidText.contains("isn’t a valid profile URL"))
+        let websites=try await reader.execute(query("count",field:"website"),intent:intent)
+        precondition(websites.output.totalCount==2 && websites.orderedIDs==Array(nycPlaces.prefix(2)).map {$0.id!.uuidString})
+        let projected=try await reader.execute(query(field:nil,fields:["name"]),intent:intent)
+        precondition(projected.output.totalCount==157 && projected.output.records.count==157)
+        let ordinalDoesNotMatch=try await reader.execute(query("details",scope:"previous",positions:[42]),intent:intent)
+        precondition(ordinalDoesNotMatch.output.status=="empty" && ordinalDoesNotMatch.output.records.isEmpty)
+        let projectedRow=try rowJSON(projected.output.records[0])
+        precondition(Set(projectedRow.keys)==Set(["id","name","city","cuisines","kind"]))
+        let unavailableField=try await reader.execute(query(field:nil,fields:["address"]),intent:intent)
+        let unavailableRow=try rowJSON(unavailableField.output.records[0])
+        precondition(unavailableRow["address"]==nil)
+        precondition(unavailableField.presentation?.returnedFields==[])
+        let requested=try await reader.execute(query("details",field:nil,fields:["note","tags","status","neighborhood","type","website","instagram"],limit:1),intent:intent)
+        let requestedRow=try rowJSON(requested.output.records[0])
+        precondition(requestedRow["note"] as? String=="Collaborator note not requested" && requestedRow["tags"] as? [String]==["Collaborator Tag"] && requestedRow["neighborhood"] is NSNull && requestedRow["website"] is NSNull && requestedRow["instagram"] is NSNull)
+        let defaultList=try await reader.execute(query(field:nil,limit:1),intent:intent)
+        let defaultListRow=try rowJSON(defaultList.output.records[0])
+        precondition(defaultListRow["status"] as? String=="Love" && defaultListRow["website"] is NSNull && defaultListRow["instagram"] is NSNull && defaultListRow["note"]==nil && defaultListRow["tags"]==nil)
+        for operation in ["details","compare","answer"] {
+            let defaults=try await reader.execute(query(operation,field:nil,limit:1),intent:intent)
+            let row=try rowJSON(defaults.output.records[0])
+            precondition(row["note"] as? String=="Collaborator note not requested" && row["tags"] as? [String]==["Collaborator Tag"] && row["status"] as? String=="Love" && row["instagram"] is NSNull)
+            let narrow=try await reader.execute(query(operation,field:nil,fields:["name"],limit:1),intent:intent)
+            let narrowRow=try rowJSON(narrow.output.records[0])
+            precondition(Set(narrowRow.keys)==Set(["id","name","city","cuisines","kind"]))
+        }
+        let neighborhoodDefaults=try await reader.execute(query(field:nil,entity:"neighborhood"),intent:intent)
+        let neighborhoodRow=try rowJSON(neighborhoodDefaults.output.records[0])
+        precondition(neighborhoodRow["neighborhood"] as? String=="Saved Neighborhood")
+        let neighborhoodNarrow=try await reader.execute(query(field:nil,fields:["name"],entity:"neighborhood"),intent:intent)
+        let neighborhoodNarrowRow=try rowJSON(neighborhoodNarrow.output.records[0])
+        precondition(neighborhoodNarrowRow["neighborhood"]==nil)
+        let groups=try await reader.execute(query("group",groupBy:"status"),intent:intent)
+        precondition(groups.output.totalCount==41 && groups.output.records.isEmpty && groups.output.summary?.contains("Love: 41")==true && groups.presentation?.kind=="groups")
+        for rejected in [query(field:"address"),query(field:"note"),query(presence:"invalid"),query(entity:"city"),query(entity:"neighborhood"),query("catalog")] {
+            do {_ = try await reader.execute(rejected,intent:intent);preconditionFailure("Unsupported presence predicate accepted")}catch {}
+        }
+        for legacy in [executor(false,true),executor(false,false),executor(true,false)] {
+            do {_ = try await legacy.execute(query("count"),intent:intent);preconditionFailure("Presence predicate accepted without rich v2 permission")}catch {}
+        }
+        let localPlan=try JSONDecoder().decode(AskLibraryPlan.self,from:JSONSerialization.data(withJSONObject:["operation":"count","scope":"library","positions":[],"fields":[],"fieldPresence":["field":"instagram","presence":"missing"]]))
+        do {_ = try AskLibraryReadTools.execute(localPlan,snapshot:adapter.librarySnapshot(),context:nil);preconditionFailure("Legacy read tools accepted presence") }catch {}
+        let freshPlaces=try adapter.librarySnapshot().places
+        let displayed=[nycPlaces[41].id!.uuidString,nycPlaces[0].id!.uuidString,nycPlaces[1].id!.uuidString]
+        let displayedContext=AskLibraryContext(ids:displayed,filters:localPlan)
+        var ordinalPlan=localPlan;ordinalPlan.scope = .previous;ordinalPlan.positions=[2]
+        let exactOrdinal=try AskLibraryReadTools.execute(ordinalPlan,snapshot:.init(places:freshPlaces,totalCount:freshPlaces.count),context:displayedContext,allowStoredFieldPresence:true)
+        precondition(exactOrdinal.records.map(\.id)==[displayed[1]])
+        ordinalPlan.positions=[1]
+        let absentOrdinal=try AskLibraryReadTools.execute(ordinalPlan,snapshot:.init(places:freshPlaces,totalCount:freshPlaces.count),context:displayedContext,allowStoredFieldPresence:true)
+        precondition(absentOrdinal.status == .success && absentOrdinal.records.isEmpty)
+        let pager=executor()
+        let first=try await pager.execute(query(city:"Large City",fields:["name"]),intent:intent)
+        precondition(first.output.totalCount==245 && first.output.records.count==200 && first.output.nextOffset==200 && !first.output.complete)
+        let firstBytes=try JSONEncoder().encode(first.output)
+        precondition(firstBytes.count<58_000)
+        let next=try await pager.execute(query(city:"Large City",fields:["name"],offset:200,snapshot:first.output.snapshot),intent:intent)
+        precondition(next.output.records.count==45 && next.output.nextOffset==nil && next.selectionIsOrdered)
+        let ordinal=try await pager.execute(query("details",city:nil,field:nil,fields:["name"],scope:"previous",positions:[240]),intent:intent)
+        precondition(ordinal.output.records.map(\.id)==[largePlaces[239].id!.uuidString])
+        // Same projected rows do not make an unrelated query the same snapshot.
+        let unrelated=try await pager.execute(query(city:"Large City",fields:["name"],offset:200,snapshot:first.output.snapshot,search:"Large Place"),intent:intent)
+        precondition(unrelated.output.status=="stale")
+        let changedProjection=try await pager.execute(query(city:"Large City",fields:["instagram"],offset:200,snapshot:first.output.snapshot),intent:intent)
+        precondition(changedProjection.output.status=="stale")
+        // A byte-budgeted page still preserves exact membership and explicit nextOffset.
+        let bytePage=try await pager.execute(query(city:"Large City",fields:["website"]),intent:intent)
+        let pageBytes=try JSONEncoder().encode(bytePage.output)
+        precondition(bytePage.output.totalCount==245 && bytePage.output.records.count>0 && bytePage.output.records.count<200 && bytePage.output.nextOffset==bytePage.output.records.count && pageBytes.count<=60_000)
+        let allVisible=try await reader.execute(query("count",city:nil),intent:intent)
+        precondition(allVisible.output.totalCount==286 && allVisible.output.complete)
+        // The installed recovery store is not the route. A server-disabled
+        // recovery feature must still negotiate and execute direct native v2.
+        let wire=CollectionQueryHTTPFixture(call:query(fields:["name","instagram"]),expectedIDs:expected)
+        let endpoint=URL(string:"https://query-route-fixture.workers.dev/v1/answer")!
+        let hosted=AskHostedProvider(configuration:.init(environment:.production,endpoint:endpoint,scope:.savedMetadata,productionHost:endpoint.host!,ownerValidation:true),token:{String(repeating:"x",count:43)},approve:{_,_ in true},send:{try await wire.send($0)},libraryToolsEnabled:{true},permission:{true},libraryPlanVersion:{7},nativeResearchEnabled:{true},collectionQueriesEnabled:{true},recoveryEnabled:{false})
+        let dormantRecovery=AskTurnRecoveryStore(directory:temporaryDirectory.appendingPathComponent("query-v2-dormant-recovery"))
+        let provider=AskAgentProvider(remote:hosted,fallback:hosted,adapter:adapter,engine:engine,searchMaps:{_ in preconditionFailure("Read-only direct query used Maps")},recoveryStore:dormantRecovery)
+        var routeRequest=AskRequest(mode:.collection,text:request.text,fromOCR:false,performanceID:UUID());routeRequest.conversationID=UUID()
+        let direct=try await provider.answer(routeRequest,tools:AskReadTools(request:routeRequest,index:adapter.index()))
+        let dispatched=await wire.calls(),checkpoint=try dormantRecovery.checkpoint(routeRequest.performanceID!)
+        precondition(dispatched==2 && direct.candidates.map(\.id)==expected && checkpoint==nil)
+        let after=try storedState()
+        precondition(after==before,"Read-only query changed a saved attribute or relationship")
+        precondition(!context.hasChanges && !FileManager.default.fileExists(atPath:temporaryDirectory.appendingPathComponent("query-v2-actions.json").path))
+        // Presence stays missing, but the relevant raw value changes off-projection.
+        largePlaces[0].instagramURL=" ";try context.save()
+        let rawStale=try await pager.execute(query(city:"Large City",fields:["name"],offset:200,snapshot:first.output.snapshot),intent:intent)
+        precondition(rawStale.output.status=="stale")
+        let fresh=try await pager.execute(query(city:"Large City",fields:["name"]),intent:intent)
+        largePlaces[244].instagramURL="invalid but stored";try context.save()
+        let membershipStale=try await pager.execute(query(city:"Large City",fields:["name"],offset:200,snapshot:fresh.output.snapshot),intent:intent)
+        precondition(membershipStale.output.status=="stale")
+        let updatedCount=try await pager.execute(query("count",city:"Large City"),intent:intent)
+        precondition(updatedCount.output.totalCount==244)
+        // A malformed/unavailable persisted row is not classified as missing.
+        nycPlaces[50].instagramURL=String(repeating:"x",count:2001);try context.save()
+        let incomplete=try await reader.execute(query("count"),intent:intent)
+        precondition(incomplete.output.status=="partial" && !incomplete.output.complete && incomplete.output.records.isEmpty && incomplete.output.summary==nil)
+        let unaffected=try await reader.execute(query("count",city:"Large City"),intent:intent)
+        precondition(unaffected.output.totalCount==244 && unaffected.output.complete)
+        visible=[large.id!]
+        let revoked=try await reader.execute(query("count"),intent:intent)
+        precondition(revoked.output.totalCount==0 && revoked.output.records.isEmpty)
+        visible=[]
+        let withheld=try await reader.execute(query("count",city:nil),intent:intent)
+        precondition(withheld.output.totalCount==0 && withheld.output.records.isEmpty)
+        print("PASS query v2: synthetic 157 NYC / 41 missing Instagram, exact list and second ordinal, null/omitted/unavailable, invalid-present URLs, 245-match paging, raw/query snapshot binding, permission scope, no writes")
+    }
+
 }

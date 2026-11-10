@@ -27,10 +27,10 @@ export function phoneGrants(env){
   return grants;
  }catch{return null}
 }
-export async function accessJSON(request,limit){
+export async function accessJSON(request,limit,limitError='invalid_access'){
  if(request.headers.get('Content-Type')?.split(';')[0]!=='application/json')throw Error('invalid_access');
  const reader=request.body?.getReader();if(!reader)throw Error('invalid_access');let size=0;const chunks=[];
- for(;;){const part=await reader.read();if(part.done)break;size+=part.value.length;if(size>limit){await reader.cancel();throw Error('invalid_access')}chunks.push(part.value)}
+ for(;;){const part=await reader.read();if(part.done)break;size+=part.value.length;if(size>limit){await reader.cancel();throw Error(limitError)}chunks.push(part.value)}
  const bytes=new Uint8Array(size);let offset=0;for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.length}
  return JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));
 }

@@ -96,6 +96,7 @@ struct AskHostedProvider: AskFeastProvider {
     var brokerAnswers = AskBrokerAnswers()
     var prepareCapabilities:@Sendable ()async->Void = {}
     var nativeResearchEnabled:@Sendable ()async->Bool = {false}
+    var collectionQueriesEnabled:@Sendable ()async->Bool = {false}
     var recoveryEnabled:@Sendable ()async->Bool = {false}
     var recoveryCleanupToken:(@Sendable ()async throws->String)?=nil
 

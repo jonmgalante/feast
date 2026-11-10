@@ -57,9 +57,10 @@ export function checkedAnswer(answer,payload) {
   if(length>3000)throw Error('invalid_answer_length');
   return {version:1,...answer,candidateIDs:[...selected],paragraphs};
 }
-export async function boundedResponse(response){
+export async function boundedResponse(response,maxBytes=65536){
+ if(!Number.isSafeInteger(maxBytes)||maxBytes<1)throw Error('upstream_limit');
  const reader=response.body?.getReader();if(!reader)throw Error('upstream');let bytes=0;const chunks=[];
- while(true){const r=await reader.read();if(r.done)break;bytes+=r.value.length;if(bytes>65536){await reader.cancel();throw Error('upstream_limit')}chunks.push(r.value)}
+ while(true){const r=await reader.read();if(r.done)break;bytes+=r.value.length;if(bytes>maxBytes){await reader.cancel();throw Error('upstream_limit')}chunks.push(r.value)}
  const data=new Uint8Array(bytes);let offset=0;for(const c of chunks){data.set(c,offset);offset+=c.length}return JSON.parse(new TextDecoder().decode(data));
 }
 export async function callOpenAI(payload,env,send=fetch){

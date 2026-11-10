@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import Darwin
 
 enum AskMode: String, Codable, CaseIterable, Identifiable, Sendable {
     case collection = "My collection", discovery = "Web discovery", importText = "Import"
@@ -554,6 +555,8 @@ struct AskTurn: Identifiable, Equatable {
     private var recoveryStore:AskTurnRecoveryStore? {(provider as? AskAgentProvider)?.recoveryStore}
     private var pendingActivityAt:Date?
     private var previousActivityBeforeRequest:Date?
+    private let providerAttempts:AskProviderAttempts
+    private var retryArchiveTickets:[UUID:AskProviderAttempts.ArchiveTicket]=[:]
     var activityNow:()->Date = Date.init
     var fieldStatus:((AskFieldActionState)throws->AskFieldActionState)?
     var fieldExecutor: ((AskFieldActionState,AskFieldActionMode) throws -> AskFieldActionState)?
@@ -565,7 +568,7 @@ struct AskTurn: Identifiable, Equatable {
     var collectionClear:((UUID)throws->Void)?
     private var provider: any AskFeastProvider
     private var index: AskLocalIndex
-    init(index: AskLocalIndex, provider: any AskFeastProvider) { self.index = index; self.provider = provider }
+    init(index: AskLocalIndex, provider: any AskFeastProvider, providerAttempts:AskProviderAttempts = .shared) { self.index = index; self.provider = provider; self.providerAttempts=providerAttempts }
 #if FEAST_TESTS
     convenience init(index: AskLocalIndex) { self.init(index: index, provider: MockAskFeastProvider()) }
 #endif
@@ -678,6 +681,7 @@ struct AskTurn: Identifiable, Equatable {
         start(id: id, request: request)
     }
     private func start(id: UUID, request original: AskRequest) {
+        retryArchiveTickets.removeValue(forKey:id)
         var request=original
         if recoveryStore != nil {request.performanceID=id;if request.conversationID==nil {request.conversationID=activeChatID}}
         let startedAt = DispatchTime.now().uptimeNanoseconds
@@ -694,7 +698,7 @@ struct AskTurn: Identifiable, Equatable {
         catch { trace.finish(.failed);trace.elapsed(.taskExit,since:startedAt);Task {await AskPerformanceRecorder.shared.recordPipeline(trace.snapshot())};setStatus(id, .failed(error.localizedDescription)); self.error = error.localizedDescription; isLoading = false; activeID = nil; refreshActiveRecoveryTask(); return }
         trace.elapsed(.preparation,since:startedAt)
         if recoveryStore != nil {recoveryRequests[id]=request}
-        let work = Task { [weak self, provider] in
+        let work = Task { [weak self, provider, providerAttempts] in
             var reconcileAfterExit=false
             defer {
                 self?.finishRecoveryTask(id)
@@ -703,6 +707,7 @@ struct AskTurn: Identifiable, Equatable {
             defer {if trace.snapshot().outcome == .running {trace.finish(Task.isCancelled ? .cancelled : .failed)};trace.elapsed(.taskExit,since:startedAt);Task {await AskPerformanceRecorder.shared.recordPipeline(trace.snapshot())}}
             do {
                 let result = try await AskPipelineScope.$trace.withValue(trace) {try await provider.answer(request, tools: tools)}
+                let retryTicket=try? await providerAttempts.archiveTicket(turn:id)
                 try Task.checkCancellation()
                 if let self,let recoveryStore=self.recoveryStore {
                     while !recoveryStore.active {try await Task.sleep(nanoseconds:100_000_000);try Task.checkCancellation()}
@@ -725,6 +730,7 @@ struct AskTurn: Identifiable, Equatable {
                     trace.finish(.completed);return
                 }
                 guard generation == token || recoveryRequests[id] != nil,let position=turns.firstIndex(where:{$0.id==id}) else{return}
+                if let retryTicket {retryArchiveTickets[id]=retryTicket}
                 turns[position].response = checked
                 if checked.requestsFieldSave == true {
                     for action in checked.fieldActions ?? [] { self.applyFieldAction(turn:id,findingID:action.finding.id,mode:.save,allowLoading:true) }
@@ -760,6 +766,7 @@ struct AskTurn: Identifiable, Equatable {
                 scheduleHistory()
             } catch is CancellationError { }
             catch {
+                let retryTicket=try? await providerAttempts.archiveTicket(turn:id)
                 guard let self,!Task.isCancelled else{return}
                 if let recoveryStore,let saved=try? recoveryStore.checkpoint(id) {
                     // A foreground event may precede the suspended transport's
@@ -784,7 +791,8 @@ struct AskTurn: Identifiable, Equatable {
                     _ = archiveRecovered(.init(id:id,request:request,response:nil,sources:[],status:.failed(error.localizedDescription)),chat:origin);return
                 }
                 guard generation == token else{return}
-                canRetry[id] = (error as? AskConversationFailure)?.retryable ?? (error as? AskHostedError)?.retryable ?? true
+                if let retryTicket {retryArchiveTickets[id]=retryTicket}
+                canRetry[id] = (error as? AskConversationFailure)?.retryable ?? (error as? AskHostedError)?.retryable ?? (error as? AskRetryError)?.retryable ?? true
                 let message = AskHostedError.message(for: error)
                 setStatus(id, .failed(message)); self.error = message
                 markConversationActivity()
@@ -901,9 +909,16 @@ struct AskTurn: Identifiable, Equatable {
         Task { await AskPerformanceRecorder.shared.record(.render, milliseconds: duration, traceID: id) }
     }
     func clearConversation() {
+        let removed=turns.map(\.id)
         cancel(); historyTask?.cancel(); historyGeneration = UUID()
         do {try stopRecoveryChat(activeChatID);try collectionClear?(activeChatID)}catch {self.error=error.localizedDescription;return}
-        resetScreen(.init()); flushHistory()
+        if history != nil {
+            var next=currentChatSnapshot()
+            guard let i=next.firstIndex(where:{$0.id==activeChatID}) else{return}
+            next[i].conversation = .init()
+            guard commitChats(next,active:activeChatID) else{return}
+        }
+        deleteRetryContexts(removed);resetScreen(.init())
     }
     private func actionReceiptResponse(_ actions:[AskCollectionAction])->AskResponse {
         let text="Changes recorded before this request stopped."
@@ -939,7 +954,39 @@ struct AskTurn: Identifiable, Equatable {
         if let history, !history.saveLibrary(.init(activeID:active,chats:proposed,migration:historyMigration)) {
             error = "Chat history couldn’t be saved. Nothing was deleted.";return false
         }
-        chats = proposed;activeChatID = active;return true
+        chats = proposed;activeChatID = active
+        // Read back the committed archive before releasing any redundant checkpoint.
+        // No history store (or failed/unreadable save) is not a durable archive commit.
+        if !retryArchiveTickets.isEmpty,let history,let verified=try? durableRetryArchive(history) {
+            for turn in verified.chats.flatMap({$0.conversation.turns}) {
+                guard let ticket=retryArchiveTickets[turn.id],
+                      proposed.contains(where:{$0.conversation.turns.contains(where:{$0.id==turn.id && $0.response==turn.response})}) else{continue}
+                Task { [weak self,providerAttempts] in
+                    if (try? await providerAttempts.archiveCommitted(ticket,response:turn.response))==true,
+                       self?.retryArchiveTickets[turn.id]==ticket {self?.retryArchiveTickets.removeValue(forKey:turn.id)}
+                }
+            }
+        }
+        return true
+    }
+    private func durableRetryArchive(_ history:AskConversationStore)throws->AskChatLibrary {
+        // Readback alone could observe cached, nondurable bytes. Checkpoint deletion
+        // must never become durable before the archive that replaces its payload.
+        let handle=try FileHandle(forWritingTo:history.url);defer{try? handle.close()};try handle.synchronize()
+        let folder=history.url.deletingLastPathComponent()
+        for path in [folder,folder.deletingLastPathComponent()] {
+            let fd=Darwin.open(path.path,O_RDONLY);guard fd>=0 else{throw AskRetryError.storage};defer{Darwin.close(fd)}
+            guard fsync(fd)==0 else{throw AskRetryError.storage}
+        }
+        return try history.loadLibrary()
+    }
+    private func deleteRetryContexts(_ turns:[UUID]) {
+        providerAttempts.markDeleted(turns)
+        for id in turns {retryArchiveTickets.removeValue(forKey:id)}
+        Task { [weak self,providerAttempts] in
+            do {try await providerAttempts.delete(turns)}
+            catch {self?.error="The chat was deleted, but some local retry context couldn’t be cleared. Its attempts remain blocked."}
+        }
     }
     @discardableResult func newChat() -> Bool {
         suspend(); guard flushCurrentChat() else { return false }
@@ -960,13 +1007,15 @@ struct AskTurn: Identifiable, Equatable {
         return commitChats(next,active:activeChatID)
     }
     @discardableResult func deleteChat(_ id:UUID) -> Bool {
-        guard chats.contains(where:{$0.id == id}) else { return false }
+        guard let removedChat=chats.first(where:{$0.id == id}) else { return false }
+        let removed=Array(Set(removedChat.conversation.turns.map(\.id)+(id==activeChatID ? turns.map(\.id) : [])))
         suspend()
         do {try stopRecoveryChat(id);try collectionClear?(id)}catch {self.error=error.localizedDescription;return false}
         var next = currentChatSnapshot().filter {$0.id != id}
         if next.isEmpty { next = AskChatLibrary.empty().chats }
         let active = id == activeChatID ? next[0].id : activeChatID
         guard commitChats(next,active:active) else { return false }
+        deleteRetryContexts(removed)
         historyGeneration = UUID();resetScreen(next.first {$0.id == active}!.conversation)
         if let migration = historyMigration,migration.chatID == id,let history {
             if history.removeMigrationCopy(migration) {
