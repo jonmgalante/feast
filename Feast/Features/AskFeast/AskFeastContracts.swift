@@ -167,7 +167,7 @@ struct AskRequest: Codable, Equatable, Sendable {
     func validated() throws -> Self {
         guard (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || attachment != nil), text.count <= 4_000, (previousQuestion?.count ?? 0) <= 2_000, referencedIDs.count <= 6, Set(referencedIDs).count == referencedIDs.count, referencedWebPlaces.count <= 3 else { throw AskError.inputLimit }
         if let context = libraryContext {
-            guard context.ids.count <= AskCollectionPage.maximumRenderedRecords, Set(context.ids).count == context.ids.count else { throw AskError.inputLimit }
+            guard context.validDisplayOrder,context.ids.count <= AskCollectionPage.maximumRenderedRecords, Set(context.ids).count == context.ids.count else { throw AskError.inputLimit }
             _ = try context.filters.validated()
         }
         if let attachment { _ = try attachment.validated() }
@@ -246,6 +246,34 @@ struct AskResponse: Codable, Equatable, Sendable {
     /// prose mentions or native query members. They never grant edit authority.
     var supplementalFindingIDs:Set<String> {
         Set((verifiedPublicFindings ?? []).map(\.recordID)).subtracting(Set(libraryContext?.ids ?? []))
+    }
+    /// Shared admission/archive bounds: additional display evidence never consumes
+    /// native query membership, and cannot enlarge that membership by declaration.
+    var archiveAdditionalIDs:Set<String>? {
+        let mentions=answerMentionIDs ?? [],mentionSet=Set(mentions),candidateIDs=Set(candidates.map(\.id))
+        let supplemental=supplementalFindingIDs
+        let referenced=Set(paragraphs.flatMap(\.spans).compactMap {span->String? in if case .place(let id)=span{return id};return nil})
+        guard candidateIDs.count==candidates.count,mentions.count<=Self.maximumAnswerMentions,
+              mentionSet.count==mentions.count,mentionSet.isSubset(of:candidateIDs),mentionSet.isSubset(of:referenced),
+              mentionSet.isDisjoint(with:Set(libraryContext?.ids ?? [])),mentions.isEmpty || usesLocalCatalog,
+              supplemental.count<=24,supplemental.isSubset(of:candidateIDs),
+              libraryContext == nil || supplemental.isEmpty || usesLocalCatalog else{return nil}
+        let extra=mentionSet.union(supplemental)
+        if let context=libraryContext {
+            guard context.validDisplayOrder,Set(context.ids).count==context.ids.count,
+                  context.ids==candidates.map(\.id).filter({!extra.contains($0)}) else{return nil}
+        }
+        return libraryContext == nil ? [] : extra
+    }
+    var maximumArchiveSources:Int {
+        usesLocalCatalog ? (collectionPage != nil ? AskCollectionPage.maximumRenderedRecords : 200)+(archiveAdditionalIDs?.count ?? 0) : 60
+    }
+    var hasArchiveCompatibleBounds:Bool {
+        guard let extra=archiveAdditionalIDs else{return false}
+        let nativeLimit=collectionPage != nil ? AskCollectionPage.maximumRenderedRecords : usesLocalCatalog ? 200 : 6
+        let usedSources=Set(candidates.flatMap(\.sourceIDs)+paragraphs.flatMap(\.sourceIDs))
+        return summary.count<=3000 && candidates.count-extra.count<=nativeLimit &&
+            paragraphs.count<=(usesLocalCatalog ? 4001 : 8) && usedSources.count<=maximumArchiveSources
     }
     var layout:AskResponseLayout {
         if let fieldActions,!fieldActions.isEmpty {return fieldActions.allSatisfy {$0.outcome == .ready || $0.outcome == .alreadySaved} ? .lookup : .action}
@@ -427,7 +455,7 @@ struct AskReadTools: Sendable {
                   candidate.facts.allSatisfy({ candidate.sourceIDs.contains($0.sourceID) }) else { throw rejected(.candidateEvidence) }
         }
         if let context = response.libraryContext {
-            guard context.ids.count <= (response.collectionPage != nil ? AskCollectionPage.maximumRenderedRecords : 200), Set(context.ids).count == context.ids.count, context.ids == response.candidates.map(\.id).filter({!extraIDs.contains($0)}) else { throw rejected(.queryMembership) }
+            guard context.validDisplayOrder,context.ids.count <= (response.collectionPage != nil ? AskCollectionPage.maximumRenderedRecords : 200), Set(context.ids).count == context.ids.count, context.ids == response.candidates.map(\.id).filter({!extraIDs.contains($0)}) else { throw rejected(.queryMembership) }
             if let selection=context.selectionIDs {
                 guard response.usesLocalCatalog,[AskLibraryPlan.Operation.count,.group].contains(context.filters.operation),Set(selection).count == selection.count,Set(selection).isSubset(of:Set(index.personalCatalog.map(\.id))) else { throw rejected(.aggregateMembership) }
             }
@@ -486,6 +514,9 @@ struct AskReadTools: Sendable {
             }
         }
         guard characters <= (response.collectionPage != nil ? 720_000 : localListing ? 60_000 : 3_000) else { throw rejected(.answerLength) }
+        // Retain the precise existing evidence/membership rejection reason, then
+        // ensure every accepted response also meets the shared archive envelope.
+        guard response.hasArchiveCompatibleBounds else {throw rejected(.responseBounds)}
         return response
     }
     private var localEvidence: AskEvidence {
@@ -542,11 +573,13 @@ struct AskTurn: Identifiable, Equatable {
     var response: AskResponse?
     var sources: [AskSource] = []
     var status: AskTurnStatus = .loading
+    var isArchiveEligible:Bool {status != .loading && request.attachment == nil}
     var readContextMode:AskMode {response?.usesLocalCatalog == true && response?.libraryContext != nil ? .collection : request.mode}
 }
 
 @MainActor final class AskSession: ObservableObject {
-    @Published var input = "" { didSet { if input.isEmpty { fromOCR = false }; scheduleHistory() } }
+    @Published var input = "" { didSet { fallbackDraftTurnID=nil; if input.isEmpty { fromOCR = false }; scheduleHistory() } }
+    private var fallbackDraftTurnID:UUID?
     @Published var mode: AskMode = .collection { didSet { if mode != oldValue { fromOCR = false } } }
     @Published var sourceOverride: AskMode? = nil
     @Published var fromOCR = false
@@ -595,6 +628,19 @@ struct AskTurn: Identifiable, Equatable {
 #endif
     var response: AskResponse? { turns.last(where: { $0.response != nil })?.response }
     var providerLabel: String { provider.label }
+    /// Hide only the identical error already attached to the latest turn, not
+    /// unrelated current storage/admission errors after a historical failure.
+    var composerError:String? {
+        guard let error else{return nil}
+        return turns.last?.status == .failed(error) ? nil : error
+    }
+    private func admitNewTurn()->Bool {
+        guard history == nil || turns.filter(\.isArchiveEligible).count < AskConversationSnapshot.maximumTurns else {
+            error="This chat is full. Start a new chat to continue; its saved messages are unchanged."
+            return false
+        }
+        return true
+    }
     /// Activation changes transport only; keep the same chat, draft, findings and action journal.
     func replaceProviderWhenIdle(_ next:any AskFeastProvider)->Bool {
         guard !isLoading,recoveryTasks.isEmpty else{return false};provider=next;return true
@@ -612,7 +658,7 @@ struct AskTurn: Identifiable, Equatable {
     }
     /// A correction appends a new answer while preserving the user's unsent draft.
     func answerAgain(_ id: UUID, using mode: AskMode) {
-        guard !isLoading, let original = turns.first(where: { $0.id == id }) else { return }
+        guard !isLoading, let original = turns.first(where: { $0.id == id }),admitNewTurn() else { return }
         let request = AskRequest(mode: mode, text: original.request.text, fromOCR: mode == .importText && original.request.fromOCR)
         do { _ = try request.validated() } catch { self.error = error.localizedDescription; return }
         let turnID = UUID()
@@ -628,9 +674,7 @@ struct AskTurn: Identifiable, Equatable {
     }
     func run(selectedChoices:[AskMapChoice]?=nil) {
         guard !isLoading else { return }
-        guard history == nil || turns.filter({ $0.status == .complete && $0.request.attachment == nil }).count < 100 else {
-            error = "This chat is full. Start a new chat to continue; its saved messages are unchanged.";return
-        }
+        guard admitNewTurn() else{return}
         let completed = turns.last { $0.status == .complete && $0.readContextMode == mode }
         let namedPublicReference = completed?.response.map { ($0.referenceWebPlaces ?? $0.webPlaces).contains { $0.name.caseInsensitiveCompare(input.trimmingCharacters(in: .whitespacesAndNewlines)) == .orderedSame } } == true
         let followUp = AskQueryPlan.isFollowUp(input) || namedPublicReference
@@ -769,6 +813,7 @@ struct AskTurn: Identifiable, Equatable {
                     if !result.contains(where: { $0.id == id }), let source = currentTools.source(id) { result.append(source) }
                 }
                 turns[position].status = .complete; isLoading = false; activeID = nil
+                if fallbackDraftTurnID==id {input=""}
                 finishRecoveryTask(id)
                 markConversationActivity()
                 acceptedAt[id] = DispatchTime.now().uptimeNanoseconds
@@ -956,7 +1001,7 @@ struct AskTurn: Identifiable, Equatable {
     }
     private func resetScreen(_ value:AskConversationSnapshot) {
         if recoveryStore != nil {activeID=nil;isLoading=false;task=nil}
-        turns = value.turns.map { $0.turn }; acceptedAt = [:]; input = value.draft
+        turns = value.turns.map { $0.turn }; acceptedAt = [:]; input = value.draft;fallbackDraftTurnID=value.fallbackDraftTurnID
         if let collectionStatus {for i in turns.indices {guard var response=turns[i].response,var actions=response.collectionActions else{continue};for j in actions.indices {if let current=try? collectionStatus(actions[j].id) {actions[j]=current}else {actions[j].state = .unavailable;actions[j].undoable=false}};response.collectionActions=actions;response.refreshCollectionReviewStatus();turns[i].response=response}}
         if let fieldStatus {for i in turns.indices {guard var response=turns[i].response,let actions=response.fieldActions else{continue};response.fieldActions=actions.map {currentFieldAction($0)};turns[i].response=response}}
         if let recovered=try? collectionRecovery?(activeChatID) {
@@ -980,7 +1025,7 @@ struct AskTurn: Identifiable, Equatable {
     }
     private func commitChats(_ proposed:[AskChatArchive], active:UUID) -> Bool {
         guard historyReadable else { error = AskHistoryError.unreadable.localizedDescription; return false }
-        guard (1...50).contains(proposed.count),proposed.allSatisfy({$0.conversation.turns.count <= 100}) else { error = AskHistoryError.limit.localizedDescription;return false }
+        guard (1...50).contains(proposed.count),proposed.allSatisfy({$0.conversation.turns.count <= AskConversationSnapshot.maximumTurns}) else { error = AskHistoryError.limit.localizedDescription;return false }
         if let history, !history.saveLibrary(.init(activeID:active,chats:proposed,migration:historyMigration)) {
             error = "Chat history couldn’t be saved. Nothing was deleted.";return false
         }
@@ -1066,9 +1111,10 @@ struct AskTurn: Identifiable, Equatable {
         if attachment != nil { mode = .collection;run() } else { runAutomatically() }
     }
     private func snapshot() -> AskConversationSnapshot {
-        let completed = turns.filter { $0.status != .loading && $0.request.attachment == nil }.map(AskArchivedTurn.init)
+        let completed = turns.filter(\.isArchiveEligible).map(AskArchivedTurn.init)
         let interrupted = turns.last(where: { $0.status == .loading && (try? recoveryStore?.checkpoint($0.id)) == nil })
-        return .init(version: 1, draft: String((input.isEmpty ? interrupted?.request.text ?? "" : input).prefix(4000)), turns: completed)
+        let fallback=input.isEmpty ? interrupted?.id : fallbackDraftTurnID
+        return .init(version: 1, draft: String((input.isEmpty ? interrupted?.request.text ?? "" : input).prefix(4000)), turns: completed,fallbackDraftTurnID:fallback)
     }
     private func scheduleHistory(trace:AskPipelineTrace? = nil) {
         guard history != nil else { return }
@@ -1155,6 +1201,9 @@ struct AskTurn: Identifiable, Equatable {
         var next=currentChatSnapshot()
         next[position].conversation.turns.removeAll {$0.id==turn.id}
         next[position].conversation.turns.append(.init(turn))
+        if turn.status == .complete,next[position].conversation.fallbackDraftTurnID==turn.id {
+            next[position].conversation.draft="";next[position].conversation.fallbackDraftTurnID=nil
+        }
         next[position].lastActivityAt=activityNow();next[position].updatedAt=activityNow()
         if next[position].title=="New chat" {next[position].title=String(turn.request.text.prefix(80))}
         return commitChats(next,active:activeChatID)

@@ -190,7 +190,7 @@ struct AskSavedCollectionPanel: View {
                 }.accessibilityLabel(session.isLoading ? "Stop" : "Send message")
                     .disabled(readingPhoto || (!session.isLoading && session.input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && session.attachment == nil))
             }
-            if let error = session.error, !session.turns.contains(where: { if case .failed = $0.status { return true }; return false }) { Text(error).font(FeastTheme.Typography.caption) }
+            if let error = session.composerError { Text(error).font(FeastTheme.Typography.caption) }
             if let inputError { Text(inputError).font(FeastTheme.Typography.caption) }
         }
         .padding(FeastTheme.Spacing.medium)
@@ -202,7 +202,7 @@ struct AskSavedCollectionPanel: View {
         do {
             try state.refreshSavedCollection()
             guard session.attachment == nil || state.screenshotSendingAvailable else { inputError = "Screenshot sending is currently unavailable."; return }
-            guard state.collectionCount > 0 || session.attachment != nil || AskQueryPlan.route(session.input) != .personal else { inputError = "No saved places are available here yet."; return }
+            // Empty is a valid collection for model-led chat and creation.
             inputError = nil; focused = false; session.sourceOverride = nil; session.fromOCR = false
             if session.attachment != nil { session.mode = .collection; session.run() } else { session.runAutomatically() }
         } catch { inputError = "Saved places could not be read. Nothing was sent." }

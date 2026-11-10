@@ -264,6 +264,7 @@ final class FailingContext: NSManagedObjectContext, @unchecked Sendable {
         try await AskAgentLoopTests.run()
         try await AskConversationLoopTests.run()
         try await AskRetryStorageTests.run(directory:URL(fileURLWithPath:CommandLine.arguments[2]))
+        try await AskLifecycleAdmissionTests.run(model:model,directory:URL(fileURLWithPath:CommandLine.arguments[2]))
         try await AskConversationPersistenceTests.run(model:model,directory:URL(fileURLWithPath:CommandLine.arguments[2]))
         try AskCollectionChangeTests.run(model:model,temporaryDirectory:URL(fileURLWithPath:CommandLine.arguments[2]))
         try await AskFieldActionTests.run(model:model,temporaryDirectory:URL(fileURLWithPath:CommandLine.arguments[2]))

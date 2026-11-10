@@ -15,6 +15,7 @@ private struct FieldPlanner:AskLibraryIntentPlanning {
 }
 @MainActor enum AskFieldActionTests {
     static func run(model:NSManagedObjectModel,temporaryDirectory:URL) async throws {
+        try await staleFindingProviderPaths(model:model,directory:temporaryDirectory)
         let coordinator=NSPersistentStoreCoordinator(managedObjectModel:model)
         let url=temporaryDirectory.appendingPathComponent("field-actions.sqlite")
         let store=try coordinator.addPersistentStore(ofType:NSSQLiteStoreType,configurationName:nil,at:url)
@@ -107,5 +108,105 @@ private struct FieldPlanner:AskLibraryIntentPlanning {
         let persisted=try fresh.fetch(SavedPlace.fetchRequest()).first;precondition(persisted?.instagramURL==profile)
         try coordinator.remove(reopened)
         print("PASS Instagram field persists after SQLite close/reopen without changing saved-place schema")
+    }
+}
+
+private actor AskIdentityAuditTransport {
+    let recordID:String,field:String,repeats:Bool,combined:Bool
+    let beforeApproval:@MainActor @Sendable ()throws->Void
+    var initialFindings = -1,authorizationFindings = -1
+    var resultStatuses:[String]=[]
+    init(id:String,field:String,repeats:Bool=false,combined:Bool=false,beforeApproval:@escaping @MainActor @Sendable ()throws->Void){recordID=id;self.field=field;self.repeats=repeats;self.combined=combined;self.beforeApproval=beforeApproval}
+    func send(_ request:URLRequest)async throws->(Data,HTTPURLResponse) {
+        let body=try JSONSerialization.jsonObject(with:request.httpBody!) as! [String:Any],mode=body["mode"] as! String
+        var reply:[String:Any]=["version":9,"requestID":body["requestID"]!]
+        if mode=="conversationStep" {
+            let step=body["step"] as! Int
+            if step==0 {initialFindings=(body["findings"] as? [Any])?.count ?? -1}
+            if let result=body["result"] as? [String:Any],let output=result["output"] as? [String:Any],let status=output["status"] as? String {resultStatuses.append(status)}
+            let proposing=step==0 || (repeats && step==1)
+            let fields=combined ? ["website","instagram"] : [field]
+            let changes=fields.map {field->[String:Any] in ["field":field,"value":NSNull(),"values":NSNull(),"findingID":NSNull(),"source":"verified_finding"]}
+            let proposal:[String:Any]=["entity":"place","operation":"update","targetIDs":[recordID],"cityID":NSNull(),"sectionID":NSNull(),"mapMatchID":NSNull(),"changes":changes,"instructionQuote":"Save the researched link"]
+            reply["step"]=step;reply["kind"]=proposing ? "tool" : "answer";reply["text"]=proposing ? "" : "Finished reviewing the link.";reply["continuation"]="synthetic";reply["model"]="gpt-6.1-sol"
+            reply["call"]=proposing ? ["name":"propose_changes","callID":"save-found-link","arguments":String(data:try JSONSerialization.data(withJSONObject:proposal),encoding:.utf8)!] as Any : NSNull()
+        } else if mode=="authorizeChange" {
+            let proposal=body["proposal"] as! [String:Any]
+            authorizationFindings=(proposal["findingContext"] as? [Any])?.count ?? 0
+            try await beforeApproval()
+            reply["decision"]=["approved":true,"replaceExisting":false,"deleteContents":false,"reason":"explicit_instruction","targetSelector":["scope":"previous","positions":[1]]]
+        } else {throw NSError(domain:"UnexpectedSyntheticMode",code:1)}
+        return (try JSONSerialization.data(withJSONObject:reply),HTTPURLResponse(url:request.url!,statusCode:200,httpVersion:nil,headerFields:["Content-Type":"application/json"])!)
+    }
+    func counts()->(Int,Int){(initialFindings,authorizationFindings)}
+    func statuses()->[String]{resultStatuses}
+}
+@MainActor private extension AskFieldActionTests {
+    static func staleFindingProviderPaths(model:NSManagedObjectModel,directory:URL)async throws {
+        for field in ["website","instagram"] {for phase in ["before","duringApproval","parentDuringApproval","freshReplay"] {
+            let coordinator=NSPersistentStoreCoordinator(managedObjectModel:model)
+            let store=try coordinator.addPersistentStore(ofType:NSSQLiteStoreType,configurationName:nil,at:directory.appendingPathComponent("identity-provider-\(field)-\(phase).sqlite"))
+            let context=NSManagedObjectContext(concurrencyType:.mainQueueConcurrencyType);context.persistentStoreCoordinator=coordinator
+            let repository=FeastRepository(context:context),city=try repository.createFeastList(named:"Fixture City")
+            let place=try repository.createSavedPlace(from:.init(applePlaceID:"old-business",displayNameSnapshot:"Same Name",status:.love,placeType:.cafe,cuisines:[],tags:[],note:"Preserved",websiteURL:nil,instagramURL:nil,feastList:city,listSection:nil))
+            let adapter=AskSavedCollection(context:context,canMutate:{_,_,_ in true},canRecoverStore:{$0==store.identifier},visibleCities:{[city.id!]})
+            let record=try adapter.personalPlaces().first!,value=field=="website" ? "https://old.example.org/" : "https://www.instagram.com/old_fixture/"
+            let finding=AskVerifiedFinding(id:UUID(),recordID:record.id,identity:.init(record),field:field,value:value,evidenceURL:"https://old.example.org/",verification:"cited_search",originatingTurn:UUID(),externallyReusable:true)
+            if phase=="before" {place.applePlaceID="new-business";try context.save()}
+            let transport=AskIdentityAuditTransport(id:record.id,field:field,repeats:phase=="freshReplay",beforeApproval:{
+                if phase=="duringApproval" {place.applePlaceID="new-business";try context.save()}
+                if phase=="parentDuringApproval" {city.name="Changed City";try context.save()}
+            })
+            let hosted=AskHostedProvider(configuration:.init(environment:.production,endpoint:URL(string:"https://feast-owner-validation.jonmgalante.workers.dev/v1/answer")!,scope:.savedMetadata,productionHost:"feast-owner-validation.jonmgalante.workers.dev",ownerValidation:true),token:{String(repeating:"x",count:43)},approve:{_,_ in true},send:{try await transport.send($0)},libraryToolsEnabled:{true},permission:{true},libraryPlanVersion:{7})
+            let engine=AskCollectionChangeEngine(adapter:adapter,journalURL:directory.appendingPathComponent("identity-provider-\(field)-\(phase).json"))
+            let provider=AskAgentProvider(remote:hosted,fallback:hosted,adapter:adapter,engine:engine,searchMaps:{_ in preconditionFailure("No real Maps requests")})
+            let request=AskRequest(mode:.collection,text:"Save the researched link",fromOCR:false,verifiedFindings:[finding],performanceID:UUID(),agentTask:.init(action:"research",fields:[field],orderedIDs:[record.id],sourcePolicy:"public_if_missing"))
+            _ = try? await provider.answer(request,tools:AskReadTools(request:request,index:adapter.index()))
+            let counts=await transport.counts()
+            precondition(counts.0==(phase=="before" ? 0 : 1),"model evidence must be freshly filtered")
+            if phase=="before" {precondition(counts.1<=0,"stale evidence reached authorization")}
+            else {precondition(counts.1==1,"race fixture did not reach authorization")}
+            if phase=="freshReplay" {
+                let statuses=await transport.statuses(),receipts=try engine.receipts(forTurn:request.performanceID!)
+                precondition(statuses==["applied","applied"] && receipts.count==1,"Same-executor repeated researched link must return its one original receipt")
+                precondition((field=="website" ? place.websiteURL : place.instagramURL)==value && place.note=="Preserved")
+                _ = try engine.performExplicitAction(receipts[0].id,undo:true)
+                precondition(place.websiteURL==nil && place.instagramURL==nil)
+            } else {
+            precondition(place.websiteURL==nil && place.instagramURL==nil && place.note=="Preserved","stale identity persisted a researched \(field) at \(phase)")
+            }
+        }}
+        let coordinator=NSPersistentStoreCoordinator(managedObjectModel:model)
+        let store=try coordinator.addPersistentStore(ofType:NSSQLiteStoreType,configurationName:nil,at:directory.appendingPathComponent("identity-provider-combined.sqlite"))
+        let context=NSManagedObjectContext(concurrencyType:.mainQueueConcurrencyType);context.persistentStoreCoordinator=coordinator
+        let repository=FeastRepository(context:context),city=try repository.createFeastList(named:"Combined City")
+        let place=try repository.createSavedPlace(from:.init(applePlaceID:"combined-business",displayNameSnapshot:"Combined",status:.love,placeType:.cafe,cuisines:[],tags:[],note:"Preserved",websiteURL:nil,instagramURL:nil,feastList:city,listSection:nil))
+        let adapter=AskSavedCollection(context:context,canMutate:{_,_,_ in true},canRecoverStore:{$0==store.identifier},visibleCities:{[city.id!]})
+        let record=try adapter.personalPlaces().first!,site="https://combined.example.org/",profile="https://www.instagram.com/combined_fixture/"
+        let findings=[("website",site),("instagram",profile)].map {field,value in AskVerifiedFinding(id:UUID(),recordID:record.id,identity:.init(record),field:field,value:value,evidenceURL:site,verification:"cited_search",originatingTurn:UUID(),externallyReusable:true)}
+        let transport=AskIdentityAuditTransport(id:record.id,field:"website",repeats:true,combined:true,beforeApproval:{})
+        let hosted=AskHostedProvider(configuration:.init(environment:.production,endpoint:URL(string:"https://feast-owner-validation.jonmgalante.workers.dev/v1/answer")!,scope:.savedMetadata,productionHost:"feast-owner-validation.jonmgalante.workers.dev",ownerValidation:true),token:{String(repeating:"x",count:43)},approve:{_,_ in true},send:{try await transport.send($0)},libraryToolsEnabled:{true},permission:{true},libraryPlanVersion:{7})
+        let engine=AskCollectionChangeEngine(adapter:adapter,journalURL:directory.appendingPathComponent("identity-provider-combined.json"))
+        let provider=AskAgentProvider(remote:hosted,fallback:hosted,adapter:adapter,engine:engine,searchMaps:{_ in preconditionFailure("No real Maps requests")})
+        let request=AskRequest(mode:.collection,text:"Save the researched link",fromOCR:false,verifiedFindings:findings,performanceID:UUID(),agentTask:.init(action:"research",fields:["website","instagram"],orderedIDs:[record.id],sourcePolicy:"public_if_missing"))
+        _ = try await provider.answer(request,tools:AskReadTools(request:request,index:adapter.index()))
+        let statuses=await transport.statuses(),receipts=try engine.receipts(forTurn:request.performanceID!)
+        precondition(statuses==["applied","applied"] && receipts.count==1 && place.websiteURL==site && place.instagramURL==profile,"Combined researched link replay must reuse one receipt")
+        _ = try engine.performExplicitAction(receipts[0].id,undo:true)
+        precondition(place.websiteURL==nil && place.instagramURL==nil && place.note=="Preserved")
+        let restoredRequest=AskRequest(mode:.collection,text:"Save the researched link",fromOCR:false,verifiedFindings:findings,performanceID:UUID(),agentTask:.init(action:"research",fields:["website","instagram"],orderedIDs:[record.id],sourcePolicy:"public_if_missing"))
+        let direct=AskAgentExecutor(adapter:adapter,engine:engine,request:restoredRequest,researcher:hosted,searchMaps:{_ in []},fullCollectionContext:true)
+        let combinedProposal=AskChangeProposal(entity:"place",operation:"update",targetIDs:[record.id],cityID:nil,sectionID:nil,mapMatchID:nil,changes:["website","instagram"].map {.init(field:$0,value:nil,values:nil,findingID:nil,source:"verified_finding")},instructionQuote:"Save the researched link")
+        let call=AskAgentReply.Call(name:"propose_changes",callID:"combined-restored",arguments:String(data:try JSONEncoder().encode(combinedProposal),encoding:.utf8)!)
+        let first=try await direct.executeConversation(call,planner:hosted)
+        let checkpoint=try direct.recoverySnapshot()
+        let resumed=AskAgentExecutor(adapter:adapter,engine:engine,request:restoredRequest,researcher:hosted,searchMaps:{_ in []},fullCollectionContext:true)
+        try resumed.restoreRecoverySnapshot(checkpoint)
+        let repeated=try await resumed.executeConversation(call,planner:hosted)
+        let restoredReceipts=try engine.receipts(forTurn:restoredRequest.performanceID!)
+        precondition(first.output.status=="applied" && repeated.output.status=="applied" && restoredReceipts.count==1 && place.websiteURL==site && place.instagramURL==profile,"Restored executor combined-link replay must reuse one receipt")
+        _ = try engine.performExplicitAction(restoredReceipts[0].id,undo:true)
+        precondition(place.websiteURL==nil && place.instagramURL==nil && place.note=="Preserved")
+        print("PASS full hosted-provider path rejects stale website/Instagram before authorization and identity changes during authorization, including parent rename; same-executor repeated researched writes reuse one undoable receipt")
     }
 }

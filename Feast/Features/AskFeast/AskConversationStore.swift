@@ -20,9 +20,13 @@ struct AskArchivedTurn: Codable {
     var turn: AskTurn { .init(id: id, request: .init(mode: mode, text: question, fromOCR: false, previousQuestion: context,performanceID:id), response: response, sources: sources, status: failure.map { .failed($0) } ?? (stopped==true ? .stopped : .complete)) }
 }
 struct AskConversationSnapshot: Codable {
+    static let maximumTurns=100
     var version = 1
     var draft = ""
     var turns: [AskArchivedTurn] = []
+    /// Present only for an interrupted request's synthesized composer fallback.
+    /// Old archives have no provenance and are never cleared by a guess.
+    var fallbackDraftTurnID:UUID? = nil
 }
 struct AskChatArchive: Codable, Identifiable {
     let id: UUID
@@ -75,9 +79,9 @@ enum AskHistoryError: LocalizedError {
         return .init(url:folder.appendingPathComponent("chats-v2.json"),legacyURL:folder.appendingPathComponent("conversation-v1.json"))
     }
     private static func valid(_ value:AskConversationSnapshot) -> Bool {
-        value.version == 1 && value.draft.count <= 4000 && value.turns.count <= 100 &&
+        value.version == 1 && value.draft.count <= 4000 && value.turns.count <= AskConversationSnapshot.maximumTurns &&
         Set(value.turns.map(\.id)).count == value.turns.count &&
-        value.turns.allSatisfy { $0.question.count <= 4000 && ($0.context?.count ?? 0) <= 2000 && $0.response.summary.count <= 3000 && $0.response.candidates.count <= ($0.response.collectionPage != nil ? AskCollectionPage.maximumRenderedRecords : $0.response.usesLocalCatalog ? 200 : 6) && $0.response.paragraphs.count <= ($0.response.collectionPage != nil ? 4001 : $0.response.usesLocalCatalog ? 201 : 6) && $0.sources.count <= ($0.response.collectionPage != nil ? AskCollectionPage.maximumRenderedRecords : $0.response.usesLocalCatalog ? 200 : 60) && ($0.response.publicResearch ?? []).allSatisfy {research in research.result.nativeEvidence.map {(try? $0.checked()) != nil} ?? true} }
+        value.turns.allSatisfy { $0.question.count <= 4000 && ($0.context?.count ?? 0) <= 2000 && $0.response.hasArchiveCompatibleBounds && $0.sources.count <= $0.response.maximumArchiveSources && ($0.response.publicResearch ?? []).allSatisfy {research in research.result.nativeEvidence.map {(try? $0.checked()) != nil} ?? true} }
     }
     func loadLibrary() throws -> AskChatLibrary {
         let source:URL

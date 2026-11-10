@@ -56,6 +56,7 @@ private actor CollectionQueryHTTPFixture {
 }
 @MainActor enum AskCollectionContextTests {
     static func run(model:NSManagedObjectModel,temporaryDirectory:URL)async throws {
+        try await auditQueryContracts(model:model,temporaryDirectory:temporaryDirectory)
         let olderKeys=["AskFeast.onlinePermission.cloudflare-openai.catalog-public-dialogue-selected-images.v4",
                        "AskFeast.onlinePermission.cloudflare-openai.permitted-collection-dialogue-selected-images.v5"]
         let defaults=UserDefaults.standard,keys=olderKeys+[AskPrivacy.onlineKey]
@@ -375,6 +376,168 @@ private actor CollectionQueryHTTPFixture {
         let withheld=try await reader.execute(query("count",city:nil),intent:intent)
         precondition(withheld.output.totalCount==0 && withheld.output.records.isEmpty)
         print("PASS query v2: synthetic 157 NYC / 41 missing Instagram, exact list and second ordinal, null/omitted/unavailable, invalid-present URLs, 245-match paging, raw/query snapshot binding, permission scope, no writes")
+    }
+
+    private static func auditQueryContracts(model:NSManagedObjectModel,temporaryDirectory:URL)async throws {
+        let coordinator=NSPersistentStoreCoordinator(managedObjectModel:model)
+        let store=try coordinator.addPersistentStore(ofType:NSSQLiteStoreType,configurationName:nil,at:temporaryDirectory.appendingPathComponent("audit-query-contracts.sqlite"))
+        let context=NSManagedObjectContext(concurrencyType:.mainQueueConcurrencyType);context.persistentStoreCoordinator=coordinator
+        let repo=FeastRepository(context:context),zurich=try repo.createFeastList(named:"Zurich"),amsterdam=try repo.createFeastList(named:"Amsterdam")
+        let north=try repo.createListSection(named:"North",in:zurich),south=try repo.createListSection(named:"South",in:zurich)
+        let a=try repo.createSavedPlace(from:.init(applePlaceID:"audit-a",displayNameSnapshot:"A",status:.been,placeType:.cafe,cuisines:["Alpha","Zulu"],tags:[],note:nil,websiteURL:"https://example.org/needle-website",instagramURL:"https://www.instagram.com/needleprofile/",feastList:zurich,listSection:north))
+        let b=try repo.createSavedPlace(from:.init(applePlaceID:"audit-b",displayNameSnapshot:"B",status:.love,placeType:.cafe,cuisines:["Alpha"],tags:[],note:nil,websiteURL:nil,instagramURL:nil,feastList:amsterdam,listSection:nil))
+        let c=try repo.createSavedPlace(from:.init(applePlaceID:"audit-c",displayNameSnapshot:"C",status:.love,placeType:.cafe,cuisines:["Zulu"],tags:[],note:nil,websiteURL:nil,instagramURL:nil,feastList:zurich,listSection:south))
+        let adapter=AskSavedCollection(context:context,canMutate:{_,_,_ in true},canRecoverStore:{$0==store.identifier},visibleCities:{[zurich.id!,amsterdam.id!]})
+        let engine=AskCollectionChangeEngine(adapter:adapter,journalURL:temporaryDirectory.appendingPathComponent("audit-query-actions.json"))
+        let request=AskRequest(mode:.collection,text:"List saved places grouped by city",fromOCR:false,performanceID:UUID())
+        let intent=AskAgentInterpretation(goal:"query",sourcePolicy:"public_if_missing",fields:[],selectionIDs:[],permissions:[])
+        func reader(_ request:AskRequest,full:Bool=true)->AskAgentExecutor {AskAgentExecutor(adapter:adapter,engine:engine,request:request,researcher:CollectionContextResearch(),searchMaps:{_ in []},fullCollectionContext:full,supportsCollectionQueryV2:full)}
+        func call(entity:String="place",operation:String="list",scope:String="library",positions:[Int]=[],groupBy:String?=nil,city:String?=nil,neighborhood:String?=nil,status:String?=nil,search:String?=nil,limit:Int?=nil,offset:Int?=nil,snapshot:String?=nil)->AskAgentReply.Call {
+            var q:[String:Any] = ["operation":operation,"scope":scope,"positions":positions,"fields":["name"]]
+            for (key,value) in [("groupBy",groupBy),("city",city),("neighborhood",neighborhood),("status",status),("searchText",search),("snapshot",snapshot)] {if let value {q[key]=value}}
+            if let limit {q["limit"]=limit};if let offset {q["offset"]=offset}
+            return .init(name:"query_collection",callID:UUID().uuidString,arguments:String(data:try! JSONSerialization.data(withJSONObject:["entity":entity,"query":q]),encoding:.utf8)!)
+        }
+        var failures:[String]=[]
+        func check(_ value:Bool,_ message:String) {if !value {failures.append(message);print("FAIL audit query: "+message)}}
+        let groupedReader=reader(request),grouped=try await groupedReader.execute(call(groupBy:"city"),intent:intent)
+        let displayed=grouped.response!.paragraphs.flatMap(\.spans).compactMap {if case .place(let id)=$0{return id};return nil}
+        check(displayed==[b.id!.uuidString,a.id!.uuidString,c.id!.uuidString],"city grouping display fixture")
+        let first=try await groupedReader.execute(call(operation:"details",scope:"previous",positions:[1]),intent:intent)
+        check(first.output.records.map(\.id)==[b.id!.uuidString],"grouped first must resolve displayed B, not name-sorted A")
+        let fallbackReader=reader(request,full:false)
+        _ = try await fallbackReader.execute(call(groupBy:"cuisine"),intent:intent)
+        let fallbackThird=try await fallbackReader.execute(call(operation:"details",scope:"previous",positions:[3]),intent:intent)
+        check(fallbackThird.orderedIDs==[a.id!.uuidString],"legacy capability path must use the same third cuisine occurrence")
+        do {_ = try await fallbackReader.execute(call(operation:"details",scope:"previous",positions:[1,1]),intent:intent);check(false,"legacy duplicate ordinal input must reject before normalization")}catch {}
+        let filterReader=reader(request)
+        _ = try await filterReader.execute(call(),intent:intent)
+        let filtered=try await filterReader.execute(call(operation:"details",scope:"previous",positions:[2],status:"Love"),intent:intent)
+        check(filtered.output.records.map(\.id)==[b.id!.uuidString],"ordinal must resolve B before status filter, not shift to C")
+        for filter in [String?.none,"Zurich"] {
+            let citiesReader=reader(request)
+            _ = try await citiesReader.execute(call(entity:"city"),intent:intent)
+            let reversed=try await citiesReader.execute(call(entity:"city",operation:"details",scope:"previous",positions:[2,1],city:filter),intent:intent)
+            check(reversed.output.records.map(\.name)==(filter==nil ? ["Zurich","Amsterdam"] : ["Zurich"]),"city positional order must survive predicates without resorting")
+        }
+        let empty=try await reader(request).execute(call(entity:"neighborhood",neighborhood:"Absent"),intent:intent)
+        check(empty.output.records.isEmpty && empty.output.complete,"unknown neighborhood filter must not return North and South")
+        let neighborhood=try await reader(request).execute(call(entity:"neighborhood",city:"Zurich",neighborhood:"North"),intent:intent)
+        check(neighborhood.output.records.map(\.id)==[north.id!.uuidString] && neighborhood.output.complete,"neighborhood filter must select only North")
+        do {_ = try await reader(request).execute(call(entity:"city",neighborhood:"North"),intent:intent);check(false,"unsupported city/neighborhood filter must reject")}catch {}
+        do {_ = try await reader(request).execute(call(entity:"neighborhood",groupBy:"city"),intent:intent);check(false,"unsupported non-place grouping must reject rather than claim completeness")}catch {}
+        for search in ["needle-website","NEEDLEPROFILE"] {
+            let found=try await reader(request).execute(call(search:search),intent:intent)
+            check(found.output.records.map(\.id)==[a.id!.uuidString],"stored link substring must match "+search)
+            check(found.output.records.allSatisfy {$0.website==nil && $0.instagram==nil},"matching link must not expand name-only projection")
+        }
+        // A search-relevant raw link changing within the same match must stale a page,
+        // even when that field was not projected and membership did not change.
+        b.websiteURL="invalid needle-website b";try context.save()
+        let linkPager=reader(request),page=try await linkPager.execute(call(search:"needle-website",limit:1),intent:intent)
+        a.websiteURL="https://example.org/needle-website-new";try context.save()
+        let stale=try await linkPager.execute(call(search:"needle-website",limit:1,offset:1,snapshot:page.output.snapshot),intent:intent)
+        check(stale.output.status=="stale","unprojected raw link change must invalidate search fingerprint")
+        // Preserve repeated cuisine occurrences through answer acceptance and archive.
+        let cuisineReader=reader(request),cuisineCall=call(groupBy:"cuisine")
+        let planner=CollectionContextConversation([cuisineCall],onePage:true)
+        let catalog=try AskSemanticContext.make(request,catalog:adapter.librarySnapshot(),fullCollection:true)
+        let answer=try await AskConversationLoop(planner:planner,availableCandidates:[:],execute:{try await cuisineReader.execute($0,intent:intent)}).answer(request,context:catalog,cities:[],findings:[])
+        let expected=[a.id!.uuidString,b.id!.uuidString,a.id!.uuidString,c.id!.uuidString]
+        check(answer.agentTask?.displayOrder==expected,"overlapping cuisine occurrences must be retained, not deduplicated")
+        _ = try AskReadTools(request:request,index:adapter.readView().index).checked(answer)
+        let archive=AskConversationStore(url:temporaryDirectory.appendingPathComponent("audit-query-history.json"))
+        check(archive.save(.init(turns:[AskArchivedTurn(.init(id:UUID(),request:request,response:answer,status:.complete))])),"grouped answer must archive")
+        let restored=archive.load().turns[0].response
+        var followup=AskRequest(mode:.collection,text:"Mark the third one Regulars",fromOCR:false,performanceID:UUID())
+        followup.agentTask=restored.agentTask;followup.libraryContext=restored.libraryContext
+        let reloaded=reader(followup)
+        let third=try await reloaded.execute(call(operation:"details",scope:"previous",positions:[3]),intent:intent)
+        check(third.output.records.map(\.id)==[a.id!.uuidString],"third displayed cuisine occurrence after reload is A, not C")
+        // Decode the old grouped archive wire shape, where only name-sorted
+        // membership existed. Never silently guess an ordinal across an upgrade.
+        var legacyWire=try JSONSerialization.jsonObject(with:JSONEncoder().encode(AskConversationSnapshot(turns:[AskArchivedTurn(.init(id:UUID(),request:request,response:answer,status:.complete))]))) as! [String:Any]
+        var oldTurns=legacyWire["turns"] as! [[String:Any]],oldResponse=oldTurns[0]["response"] as! [String:Any]
+        var oldContext=oldResponse["libraryContext"] as! [String:Any],oldTask=oldResponse["agentTask"] as! [String:Any]
+        oldContext.removeValue(forKey:"displayOrder");oldTask.removeValue(forKey:"displayOrder");oldTask["orderedIDs"]=[a.id!.uuidString,b.id!.uuidString,c.id!.uuidString]
+        oldResponse["libraryContext"]=oldContext;oldResponse["agentTask"]=oldTask;oldTurns[0]["response"]=oldResponse;legacyWire["turns"]=oldTurns
+        let legacy=try JSONDecoder().decode(AskConversationSnapshot.self,from:JSONSerialization.data(withJSONObject:legacyWire)).turns[0].response
+        var legacyRequest=followup;legacyRequest.agentTask=legacy.agentTask;legacyRequest.libraryContext=legacy.libraryContext
+        let legacyReader=reader(legacyRequest)
+        let legacyOrdinal=try await legacyReader.execute(call(operation:"details",scope:"previous",positions:[3]),intent:intent)
+        check(legacyOrdinal.output.status=="stale" && legacyOrdinal.output.records.isEmpty,"legacy grouped archive must not invent displayed ordinal order")
+        let legacyPermission=AskAgentPermission(entity:"place",operations:["update"],fields:["status"],targetIDs:[],instructionQuote:legacyRequest.text,selector:.init(city:nil,name:nil,neighborhood:nil,cuisine:nil,status:nil,placeType:nil,scope:"previous",positions:[3]),changes:[.init(field:"status",source:"user",value:"Regulars",values:nil)])
+        do {try legacyReader.prepare(.init(goal:"change",sourcePolicy:"local_only",fields:["status"],selectionIDs:[],permissions:[legacyPermission]));check(false,"legacy grouped positional mutation must require a fresh list")}catch {}
+        check(a.status=="Been" && b.status=="Love" && c.status=="Love","legacy archive ambiguity must never mutate a record")
+        let narrowedReader=reader(followup)
+        let narrow=call(operation:"details",scope:"previous")
+        var narrowObject=try JSONSerialization.jsonObject(with:Data(narrow.arguments.utf8)) as! [String:Any]
+        narrowObject["selectionIDs"]=[b.id!.uuidString]
+        let narrowed=try await narrowedReader.execute(.init(name:narrow.name,callID:narrow.callID,arguments:String(data:try JSONSerialization.data(withJSONObject:narrowObject),encoding:.utf8)!),intent:intent)
+        check(narrowed.output.records.map(\.id)==[b.id!.uuidString],"explicit narrowed read after grouped occurrences must remain supported")
+        let mismatchReader=reader(followup)
+        narrowObject["query"] = ["operation":"details","scope":"previous","positions":[3],"fields":["name"]]
+        let intersected=try await mismatchReader.execute(.init(name:narrow.name,callID:narrow.callID,arguments:String(data:try JSONSerialization.data(withJSONObject:narrowObject),encoding:.utf8)!),intent:intent)
+        check(intersected.output.records.isEmpty,"explicit IDs must not renumber original display ordinals")
+        let mutationReader=reader(followup)
+        let permission=AskAgentPermission(entity:"place",operations:["update"],fields:["status"],targetIDs:[],instructionQuote:followup.text,selector:.init(city:nil,name:nil,neighborhood:nil,cuisine:nil,status:nil,placeType:nil,scope:"previous",positions:[3]),changes:[.init(field:"status",source:"user",value:"Regulars",values:nil)])
+        let changing=AskAgentInterpretation(goal:"change",sourcePolicy:"local_only",fields:["status"],selectionIDs:[],permissions:[permission])
+        try mutationReader.prepare(changing)
+        let proposal=AskChangeProposal(entity:"place",operation:"update",targetIDs:[a.id!.uuidString],cityID:nil,sectionID:nil,mapMatchID:nil,changes:[.init(field:"status",value:"Regulars",values:nil,findingID:nil)],instructionQuote:followup.text)
+        let applied=try await mutationReader.execute(.init(name:"propose_changes",callID:"grouped-write",arguments:String(data:try JSONEncoder().encode(proposal),encoding:.utf8)!),intent:changing)
+        check(applied.response?.collectionActions?.first?.state == .applied && a.status=="Regulars" && b.status=="Love" && c.status=="Love","ordinal mutation must change only A after grouped archive reload")
+        // A synthesized explicit subset owns its own order. Native query
+        // membership remains larger, but must not leak back into positional edits.
+        let subsetReader=reader(request),subsetCall=call(operation:"answer",groupBy:"cuisine")
+        let subsetPlanner=CollectionContextConversation([subsetCall],onePage:true,replacementText:"1. [[place:\(b.id!.uuidString)]]")
+        let subset=try await AskConversationLoop(planner:subsetPlanner,availableCandidates:[:],execute:{try await subsetReader.execute($0,intent:intent)}).answer(request,context:catalog,cities:[],findings:[])
+        check(subset.agentTask?.orderedIDs==[b.id!.uuidString] && subset.agentTask?.displayOrder==nil && subset.libraryContext?.ids.count==3,"synthesized subset fixture must separate displayed selection from full query")
+        var subsetRequest=AskRequest(mode:.collection,text:"Mark the first Been",fromOCR:false,performanceID:UUID())
+        subsetRequest.agentTask=subset.agentTask;subsetRequest.libraryContext=subset.libraryContext
+        let subsetOrdinal=try await reader(subsetRequest).execute(call(operation:"details",scope:"previous",positions:[1]),intent:intent)
+        check(subsetOrdinal.output.records.map(\.id)==[b.id!.uuidString],"synthesized subset ordinal must not fall back to native grouped A")
+        let subsetWriter=reader(subsetRequest)
+        let subsetPermission=AskAgentPermission(entity:"place",operations:["update"],fields:["status"],targetIDs:[],instructionQuote:subsetRequest.text,selector:.init(city:nil,name:nil,neighborhood:nil,cuisine:nil,status:nil,placeType:nil,scope:"previous",positions:[1]),changes:[.init(field:"status",source:"user",value:"Been",values:nil)])
+        let subsetChange=AskAgentInterpretation(goal:"change",sourcePolicy:"local_only",fields:["status"],selectionIDs:[],permissions:[subsetPermission])
+        try subsetWriter.prepare(subsetChange)
+        let subsetProposal=AskChangeProposal(entity:"place",operation:"update",targetIDs:[b.id!.uuidString],cityID:nil,sectionID:nil,mapMatchID:nil,changes:[.init(field:"status",value:"Been",values:nil,findingID:nil)],instructionQuote:subsetRequest.text)
+        _ = try await subsetWriter.execute(.init(name:"propose_changes",callID:"subset-write",arguments:String(data:try JSONEncoder().encode(subsetProposal),encoding:.utf8)!),intent:subsetChange)
+        check(a.status=="Regulars" && b.status=="Been" && c.status=="Love","synthesized subset positional write must only change B")
+        // New grouped provenance remains explicit even when the occurrence
+        // sequence happens to equal the unique membership, including synthesis.
+        for replacement in [String?.none,"1. [[place:\(a.id!.uuidString)]]\n2. [[place:\(c.id!.uuidString)]]"] {
+            let singleReader=reader(request),singleCall=call(groupBy:"city",city:"Zurich",limit:1)
+            let singlePlanner=CollectionContextConversation([singleCall,singleCall],replacementText:replacement)
+            let singleAnswer=try await AskConversationLoop(planner:singlePlanner,availableCandidates:[:],execute:{try await singleReader.execute($0,intent:intent)}).answer(request,context:catalog,cities:[],findings:[])
+            check(singleAnswer.libraryContext?.displayOrder==[a.id!.uuidString,c.id!.uuidString],"new grouped pages/replacement must retain occurrence provenance when order equals IDs")
+            var singleFollowup=request;singleFollowup.agentTask=singleAnswer.agentTask;singleFollowup.libraryContext=singleAnswer.libraryContext
+            let singleOrdinal=try await reader(singleFollowup).execute(call(operation:"details",scope:"previous",positions:[2]),intent:intent)
+            check(singleOrdinal.output.records.map(\.id)==[c.id!.uuidString],"new grouped result must not be mistaken for a legacy archive")
+        }
+        // The real conversation merger must not deduplicate repeated native
+        // rows inside an earlier page when appending another page.
+        b.cuisines=["Alpha","Zulu"];try context.save()
+        let pageLoopReader=reader(request),pageCall=call(groupBy:"cuisine",limit:2)
+        let pagePlanner=CollectionContextConversation([pageCall,pageCall])
+        let pageAnswer=try await AskConversationLoop(planner:pagePlanner,availableCandidates:[:],execute:{try await pageLoopReader.execute($0,intent:intent)}).answer(request,context:catalog,cities:[],findings:[])
+        let pageOccurrences=pageAnswer.paragraphs.flatMap(\.spans).compactMap {if case .place(let id)=$0{return id};return nil}
+        let expectedPages=[a.id!.uuidString,b.id!.uuidString,a.id!.uuidString,b.id!.uuidString,c.id!.uuidString]
+        check(pageOccurrences==expectedPages && pageAnswer.agentTask?.displayOrder==expectedPages && pageAnswer.libraryContext?.displayOrder==expectedPages,"conversation page merge must preserve every overlapping native row and exact ordinal metadata")
+        _ = try AskReadTools(request:request,index:adapter.readView().index).checked(pageAnswer)
+        b.cuisines=["Alpha"];try context.save()
+        // Page-local grouping is the order actually rendered. Across three pages,
+        // A occurs twice before B; restart must not recompute a global name order.
+        let pager=reader(request)
+        let one=try await pager.execute(call(groupBy:"cuisine",limit:1),intent:intent)
+        let checkpoint=try pager.recoverySnapshot(),continued=reader(request)
+        try continued.restoreRecoverySnapshot(checkpoint)
+        _ = try await continued.execute(call(groupBy:"cuisine",limit:1,offset:1,snapshot:one.output.snapshot),intent:intent)
+        let three=try await continued.execute(call(groupBy:"cuisine",limit:1,offset:2,snapshot:one.output.snapshot),intent:intent)
+        check(three.displayOrder==[a.id!.uuidString,a.id!.uuidString,b.id!.uuidString,c.id!.uuidString],"paged occurrence order must survive restart")
+        let pagedThird=try await continued.execute(call(operation:"details",scope:"previous",positions:[3]),intent:intent)
+        check(pagedThird.output.records.map(\.id)==[b.id!.uuidString],"third actually displayed paged occurrence must be B")
+        precondition(failures.isEmpty,failures.joined(separator:"; "))
+        print("PASS audit query contracts: grouped and filtered ordinal identity, neighborhood predicates, stored-link search with projection and snapshot integrity")
     }
 
 }

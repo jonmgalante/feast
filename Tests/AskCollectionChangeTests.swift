@@ -2,6 +2,7 @@ import CoreData
 import Foundation
 @MainActor enum AskCollectionChangeTests {
     static func run(model:NSManagedObjectModel,temporaryDirectory:URL)throws {
+        try auditSafety(model:model,temporaryDirectory:temporaryDirectory)
         let coordinator=NSPersistentStoreCoordinator(managedObjectModel:model)
         let store=try coordinator.addPersistentStore(ofType:NSSQLiteStoreType,configurationName:nil,at:temporaryDirectory.appendingPathComponent("collection-changes.sqlite"))
         let context=NSManagedObjectContext(concurrencyType:.mainQueueConcurrencyType);context.persistentStoreCoordinator=coordinator
@@ -135,5 +136,231 @@ import Foundation
         print("PASS retained-context deletion proof requires this turn's committed unchanged journal result; prepared/other-turn/undone records never qualify")
         print("PASS stable mutation identity survives restart, paid-tool scope mismatch is refused, note append occurs once, creation intent reconciles once, and Undo cannot recreate it")
         print("PASS generalized isolated field change, durable restore, repeated apply/Undo, stale edit refusal, permission refusal and confirmed recoverable deletion preserve IDs and unrelated metadata")
+    }
+}
+
+@MainActor private final class AskMutationAuditFixture {
+    let context:NSManagedObjectContext,repository:FeastRepository,store:NSPersistentStore,engine:AskCollectionChangeEngine
+    init(model:NSManagedObjectModel,directory:URL,name:String)throws {
+        let coordinator=NSPersistentStoreCoordinator(managedObjectModel:model)
+        store=try coordinator.addPersistentStore(ofType:NSSQLiteStoreType,configurationName:nil,at:directory.appendingPathComponent("mutation-audit-\(name).sqlite"))
+        context=NSManagedObjectContext(concurrencyType:.mainQueueConcurrencyType);context.persistentStoreCoordinator=coordinator
+        repository=FeastRepository(context:context)
+        // Install permission closures after initialization through a separate fixture policy.
+        let policy=AskMutationAuditPolicy();self.policy=policy
+        let repository=self.repository,store=self.store
+        let adapter=AskSavedCollection(context:context,canMutate:{_,id,_ in id.map {!policy.denied.contains($0)} ?? true},canRecoverStore:{$0==store.identifier},visibleCities:{Set(try repository.fetchFeastLists().compactMap(\.id)).subtracting(policy.hidden)})
+        self.adapter=adapter;engine=AskCollectionChangeEngine(adapter:adapter,journalURL:directory.appendingPathComponent("mutation-audit-\(name).json"))
+    }
+    let policy:AskMutationAuditPolicy,adapter:AskSavedCollection
+    func place(_ city:FeastList,name:String="Fixture",apple:String=UUID().uuidString,note:String?=nil,tags:[String]=[],cuisines:[String]=[])throws->SavedPlace {
+        try repository.createSavedPlace(from:.init(applePlaceID:apple,displayNameSnapshot:name,status:.love,placeType:.restaurant,cuisines:cuisines,tags:tags,note:note,websiteURL:nil,instagramURL:nil,feastList:city,listSection:nil))
+    }
+    func grant(_ p:AskChangeProposal)->AskChangeGrant {.init(question:p.instructionQuote,entity:p.entity,operations:[p.operation],fields:Set(p.changes.map(\.field)),targetIDs:Set(p.targetIDs),allowsCreation:p.operation=="create",cityIDs:Set(p.cityID.map {[$0]} ?? []),sectionIDs:Set(p.sectionID.map {[$0]} ?? []),mapMatchIDs:Set(p.mapMatchID.map {[$0]} ?? []),boundProposal:p)}
+    func commit(_ p:AskChangeProposal,findings:[AskVerifiedFinding]=[])throws->AskCollectionAction {
+        let g=grant(p),ready=try engine.prepare(p,question:p.instructionQuote,authorization:g,findings:findings)
+        return try engine.apply(ready.id,authorization:g,confirmed:true)
+    }
+}
+@MainActor private final class AskMutationAuditPolicy {var denied=Set<NSManagedObjectID>(),hidden=Set<UUID>()}
+@MainActor private extension AskCollectionChangeTests {
+    static func auditSafety(model:NSManagedObjectModel,temporaryDirectory:URL)throws {
+        var failures:[String]=[]
+        func check(_ value:Bool,_ label:String){if !value {failures.append(label);print("FAIL mutation audit: \(label)")}}
+        func proposal(_ place:SavedPlace,_ field:String,_ value:String?=nil,_ values:[String]?=nil,operation:String="update")->AskChangeProposal {
+            .init(entity:"place",operation:operation,targetIDs:[place.id!.uuidString],cityID:nil,sectionID:nil,mapMatchID:nil,changes:[.init(field:field,value:value,values:values,findingID:nil,source:"user")],instructionQuote:"Apply this fixture change")
+        }
+        let f=try AskMutationAuditFixture(model:model,directory:temporaryDirectory,name:"bounds"),city=try f.repository.createFeastList(named:"Bounds")
+        let note=try f.place(city,note:String(repeating:"a",count:3950)),tags=try f.place(city,tags:(1...30).map {"Tag \($0)"}),cuisines=try f.place(city,cuisines:(1...20).map {"Cuisine \($0)"}),unicode=try f.place(city)
+        let invalid=[proposal(note,"note",String(repeating:"b",count:100),operation:"append"),proposal(tags,"tags",nil,["Extra"],operation:"append"),proposal(cuisines,"cuisines",nil,["Extra"],operation:"append"),proposal(unicode,"name",String(repeating:"😀",count:101))]
+        for (i,p) in invalid.enumerated() {var rejected=false;do {_ = try f.commit(p)}catch {rejected=true};check(rejected,"final read bounds \(i)")}
+        check(note.note==String(repeating:"a",count:3950) && tags.tags.count==30 && cuisines.cuisines.count==20 && unicode.displayName=="Fixture","invalid writes are atomic")
+        // The normalized stored value, not the raw append count, is authoritative.
+        _ = try f.commit(proposal(tags,"tags",nil,[" Tag 1 "],operation:"append"))
+        check(tags.tags.count==30,"normalized duplicate tag remains admissible")
+        _ = try f.commit(proposal(unicode,"name",String(repeating:"😀",count:100)))
+        check(unicode.displayName.utf16.count==200,"UTF-16 boundary remains admissible")
+        let first=try f.place(city,note:"Short original"),last=try f.place(city,note:String(repeating:"a",count:3950))
+        let batch=AskChangeProposal(entity:"place",operation:"append",targetIDs:[first.id!.uuidString,last.id!.uuidString],cityID:nil,sectionID:nil,mapMatchID:nil,changes:[.init(field:"note",value:String(repeating:"b",count:100),values:nil,findingID:nil,source:"user")],instructionQuote:"Append to these fixture notes")
+        var batchRejected=false;do {_ = try f.commit(batch)}catch {batchRejected=true}
+        check(batchRejected && first.note=="Short original" && last.note==String(repeating:"a",count:3950),"invalid final member rolls back the whole atomic action")
+        for mode in ["hidden","denied","duplicate"] {
+            let u=try AskMutationAuditFixture(model:model,directory:temporaryDirectory,name:"undo-\(mode)")
+            let source=try u.repository.createFeastList(named:"Source"),destination=try u.repository.createFeastList(named:"Destination"),place=try u.place(source,apple:"same-apple")
+            let move=AskChangeProposal(entity:"place",operation:"move",targetIDs:[place.id!.uuidString],cityID:destination.id!.uuidString,sectionID:nil,mapMatchID:nil,changes:[],instructionQuote:"Move fixture")
+            let action=try u.commit(move)
+            if mode=="hidden" {u.policy.hidden=[source.id!]}
+            if mode=="denied" {u.policy.denied=[source.objectID]}
+            if mode=="duplicate" {_ = try u.place(source,apple:"same-apple")}
+            var rejected=false;do {_ = try u.engine.performExplicitAction(action.id,undo:true)}catch {rejected=true}
+            check(rejected && place.feastList?.id==destination.id,"Undo rejects \(mode) restored parent atomically")
+            if mode != "duplicate" {u.policy.hidden=[];u.policy.denied=[];_ = try u.engine.performExplicitAction(action.id,undo:true);check(place.feastList?.id==source.id,"Undo still works after restoring \(mode) access")}
+        }
+        for mode in ["sectionPermission","sectionRelationship","crossStore"] {
+            let u=try AskMutationAuditFixture(model:model,directory:temporaryDirectory,name:mode)
+            let source=try u.repository.createFeastList(named:"Source"),destination=try u.repository.createFeastList(named:"Destination"),section=try u.repository.createListSection(named:"Original Neighborhood",in:source),place=try u.place(source,apple:"store-fixture")
+            place.listSection=mode=="crossStore" ? nil : section;try u.context.save()
+            let move=AskChangeProposal(entity:"place",operation:"move",targetIDs:[place.id!.uuidString],cityID:destination.id!.uuidString,sectionID:nil,mapMatchID:nil,changes:[],instructionQuote:"Move fixture")
+            let action=try u.commit(move)
+            if mode=="sectionPermission" {u.policy.denied=[section.objectID]}
+            if mode=="sectionRelationship" {section.feastList=destination;try u.context.save()}
+            if mode=="crossStore" {
+                let oldID=source.id!,coordinator=u.context.persistentStoreCoordinator!
+                try u.repository.delete(source)
+                let other=try coordinator.addPersistentStore(ofType:NSSQLiteStoreType,configurationName:nil,at:temporaryDirectory.appendingPathComponent("mutation-audit-other-store.sqlite"))
+                let replacement=FeastList(context:u.context);u.context.assign(replacement,to:other);replacement.id=oldID;replacement.name="Source";try u.context.save()
+            }
+            var rejected=false;do {_ = try u.engine.performExplicitAction(action.id,undo:true)}catch {rejected=true}
+            check(rejected && place.feastList?.id==destination.id && place.listSection==nil,"Undo rejects \(mode) atomically")
+        }
+        let s=try AskMutationAuditFixture(model:model,directory:temporaryDirectory,name:"stale"),sc=try s.repository.createFeastList(named:"Identity"),sp=try s.place(sc,apple:"old")
+        let old=try s.adapter.personalPlaces().first!
+        for field in ["website","instagram"] {
+            let url=field=="website" ? "https://old.example.org/" : "https://www.instagram.com/old_fixture/"
+            let finding=AskVerifiedFinding(id:UUID(),recordID:sp.id!.uuidString,identity:.init(old),field:field,value:url,evidenceURL:"https://old.example.org/",verification:"cited_search",originatingTurn:UUID())
+            sp.applePlaceID="new";try s.context.save()
+            let p=AskChangeProposal(entity:"place",operation:"update",targetIDs:[sp.id!.uuidString],cityID:nil,sectionID:nil,mapMatchID:nil,changes:[.init(field:field,value:url,values:nil,findingID:finding.id.uuidString)],instructionQuote:"Save the researched link")
+            var rejected=false;do {_ = try s.commit(p,findings:[finding])}catch {rejected=true}
+            check(rejected && (field=="website" ? sp.websiteURL : sp.instagramURL)==nil,"stale \(field) identity rejected")
+            sp.applePlaceID="old";try s.context.save()
+        }
+        // A parent rename need not update the place snapshot. Identity binding
+        // must survive restart and be rechecked independently at commit.
+        let race=try AskMutationAuditFixture(model:model,directory:temporaryDirectory,name:"commit-identity"),rc=try race.repository.createFeastList(named:"Original City"),rp=try race.place(rc)
+        let current=try race.adapter.personalPlaces().first!,site="https://fresh.example.org/"
+        let finding=AskVerifiedFinding(id:UUID(),recordID:rp.id!.uuidString,identity:.init(current),field:"website",value:site,evidenceURL:site,verification:"cited_search",originatingTurn:UUID())
+        let change=AskChangeProposal(entity:"place",operation:"update",targetIDs:[rp.id!.uuidString],cityID:nil,sectionID:nil,mapMatchID:nil,changes:[.init(field:"website",value:site,values:nil,findingID:finding.id.uuidString)],instructionQuote:"Save this researched website")
+        let ready=try race.engine.prepare(change,question:change.instructionQuote,authorization:race.grant(change),findings:[finding])
+        rc.name="Changed City";try race.context.save()
+        let reloaded=AskCollectionChangeEngine(adapter:race.adapter,journalURL:race.engine.journalURL)
+        var raceRejected=false;do {_ = try reloaded.apply(ready.id,authorization:race.grant(change))}catch {raceRejected=true}
+        check(raceRejected && rp.websiteURL==nil,"parent identity change after preparation rejected across restart")
+        rc.name="Original City";try race.context.save()
+        let success=try reloaded.apply(ready.id,authorization:race.grant(change))
+        let revision=rp.updatedAt
+        _ = try reloaded.apply(ready.id,authorization:race.grant(change))
+        check(success.state == .applied && rp.websiteURL==site && rp.updatedAt==revision,"fresh finding save and repeated receipt remain valid")
+        _ = try reloaded.performExplicitAction(ready.id,undo:true)
+        check(rp.websiteURL==nil,"fresh finding save remains undoable")
+        // Lossless restores preserve legacy values outside current Ask write
+        // limits. Editing an unrelated field must not rewrite or reject them.
+        let legacy=try AskMutationAuditFixture(model:model,directory:temporaryDirectory,name:"legacy-preserved"),lc=try legacy.repository.createFeastList(named:"Legacy")
+        let lp=try legacy.place(lc,note:String(repeating:"n",count:4100),tags:(1...31).map {"Legacy \($0)"},cuisines:(1...21).map {"Legacy cuisine \($0)"})
+        let legacyNote=lp.note,legacyTags=lp.tagsStorage,legacyCuisines=lp.cuisinesStorage
+        var legacyEdited=false
+        do {let a=try legacy.commit(proposal(lp,"status",PlaceStatus.been.rawValue));legacyEdited=lp.placeStatus == .been;_ = try legacy.engine.performExplicitAction(a.id,undo:true)}catch {}
+        check(legacyEdited && lp.placeStatus == .love && lp.note==legacyNote && lp.tagsStorage==legacyTags && lp.cuisinesStorage==legacyCuisines,"unrelated legacy oversize fields survive edit and Undo byte-for-byte")
+        // Metadata-only Undo does not introduce an existing nested relationship
+        // or duplicate Apple identity and must leave either legacy state intact.
+        let parent=try legacy.repository.createListSection(named:"Parent",in:lc),child=ListSection(context:legacy.context)
+        child.id=UUID();child.name="Preserved nested child";child.feastList=lc;child.parent=parent
+        let original=try legacy.place(lc,apple:"legacy-duplicate"),duplicate=SavedPlace(context:legacy.context)
+        duplicate.id=UUID();duplicate.applePlaceID=original.applePlaceID;duplicate.displayNameSnapshot="Preserved duplicate";duplicate.feastList=lc;duplicate.placeStatus = .love;duplicate.placeTypeValue = .restaurant
+        original.listSection=child;try legacy.context.save()
+        var legacyUndone=false
+        do {let a=try legacy.commit(proposal(original,"note","A metadata change"));_ = try legacy.engine.performExplicitAction(a.id,undo:true);legacyUndone=true}catch {}
+        check(legacyUndone && original.note==nil && original.listSection===child && child.parent===parent && duplicate.applePlaceID==original.applePlaceID,"metadata Undo preserves unchanged nested and duplicate legacy structure")
+        for entity in ["city","neighborhood"] {
+            let names=try AskMutationAuditFixture(model:model,directory:temporaryDirectory,name:"undo-name-\(entity)")
+            let a=try names.repository.createFeastList(named:entity=="city" ? "Original" : "Container")
+            let target:NSManagedObject
+            if entity=="city" {target=a}else{target=try names.repository.createListSection(named:"Original",in:a)}
+            let rename=AskChangeProposal(entity:entity,operation:"update",targetIDs:[(target.value(forKey:"id") as! UUID).uuidString],cityID:nil,sectionID:nil,mapMatchID:nil,changes:[.init(field:"name",value:"Renamed",values:nil,findingID:nil)],instructionQuote:"Rename fixture")
+            let action=try names.commit(rename)
+            if entity=="city" {_ = try names.repository.createFeastList(named:"Original")}
+            else {_ = try names.repository.createListSection(named:"Original",in:a)}
+            var rejected=false;do {_ = try names.engine.performExplicitAction(action.id,undo:true)}catch {rejected=true}
+            check(rejected && target.value(forKey:"name") as? String == "Renamed","Undo cannot introduce duplicate \(entity) name")
+        }
+        let oldFormat=try AskMutationAuditFixture(model:model,directory:temporaryDirectory,name:"old-format"),oc=try oldFormat.repository.createFeastList(named:"Old Format"),op=try oldFormat.place(oc)
+        let oldRecord=try oldFormat.adapter.personalPlaces().first!,oldSite="https://old-format.example.org/"
+        let oldFinding=AskVerifiedFinding(id:UUID(),recordID:op.id!.uuidString,identity:.init(oldRecord),field:"website",value:oldSite,evidenceURL:oldSite,verification:"cited_search",originatingTurn:UUID())
+        let oldProposal=AskChangeProposal(entity:"place",operation:"update",targetIDs:[op.id!.uuidString],cityID:nil,sectionID:nil,mapMatchID:nil,changes:[.init(field:"website",value:oldSite,values:nil,findingID:oldFinding.id.uuidString)],instructionQuote:"Save old-format website")
+        let oldReady=try oldFormat.engine.prepare(oldProposal,question:oldProposal.instructionQuote,authorization:oldFormat.grant(oldProposal),findings:[oldFinding])
+        func removeIdentityBindings()throws {
+            var archive=try JSONSerialization.jsonObject(with:Data(contentsOf:oldFormat.engine.journalURL)) as! [String:Any]
+            var entries=archive["entries"] as! [[String:Any]]
+            for i in entries.indices {entries[i].removeValue(forKey:"findingIdentities")}
+            archive["entries"]=entries;try JSONSerialization.data(withJSONObject:archive).write(to:oldFormat.engine.journalURL,options:.atomic)
+        }
+        try removeIdentityBindings()
+        let oldPrepared=AskCollectionChangeEngine(adapter:oldFormat.adapter,journalURL:oldFormat.engine.journalURL)
+        var unboundRejected=false;do {_ = try oldPrepared.apply(oldReady.id,authorization:oldFormat.grant(oldProposal))}catch {unboundRejected=true}
+        check(unboundRejected && op.websiteURL==nil,"old unbound researched preview safely refuses")
+        _ = try oldFormat.engine.apply(oldReady.id,authorization:oldFormat.grant(oldProposal))
+        try removeIdentityBindings()
+        let oldCommitted=AskCollectionChangeEngine(adapter:oldFormat.adapter,journalURL:oldFormat.engine.journalURL)
+        _ = try oldCommitted.apply(oldReady.id,authorization:oldFormat.grant(oldProposal))
+        _ = try oldCommitted.performExplicitAction(oldReady.id,undo:true)
+        check(op.websiteURL==nil,"old committed researched receipt and Undo remain compatible")
+        let ordinary=proposal(op,"name","Ordinary restored preview"),ordinaryReady=try oldCommitted.prepare(ordinary,question:ordinary.instructionQuote,authorization:oldFormat.grant(ordinary),findings:[])
+        try removeIdentityBindings()
+        let oldOrdinary=AskCollectionChangeEngine(adapter:oldFormat.adapter,journalURL:oldFormat.engine.journalURL)
+        _ = try oldOrdinary.apply(ordinaryReady.id,authorization:oldFormat.grant(ordinary))
+        check(op.displayName=="Ordinary restored preview","old ordinary prepared preview remains compatible")
+        // A whole deleted flat graph can contain losslessly restored duplicate
+        // names/Maps IDs. Only original peers recreated together are exempt.
+        let cascade=try AskMutationAuditFixture(model:model,directory:temporaryDirectory,name:"duplicate-cascade"),cc=try cascade.repository.createFeastList(named:"Cascade")
+        let cs=try cascade.repository.createListSection(named:"Same",in:cc),ct=ListSection(context:cascade.context)
+        ct.id=UUID();ct.name="Same";ct.feastList=cc
+        let cp=try cascade.place(cc,apple:"cascade-duplicate"),cq=SavedPlace(context:cascade.context)
+        cq.id=UUID();cq.displayNameSnapshot="Original peer";cq.applePlaceID=cp.applePlaceID;cq.feastList=cc;cq.listSection=ct;cq.note="Keep peer note";cq.placeStatus = .love;cq.placeTypeValue = .restaurant
+        cp.listSection=cs;try cascade.context.save()
+        let cityUUID=cc.id!,sectionUUIDs=Set([cs.id!,ct.id!]),placeUUIDs=Set([cp.id!,cq.id!])
+        let deleteCity=AskChangeProposal(entity:"city",operation:"delete",targetIDs:[cityUUID.uuidString],cityID:nil,sectionID:nil,mapMatchID:nil,changes:[],instructionQuote:"Delete fixture city")
+        var cascadeRestored=false
+        do {
+            let action=try cascade.commit(deleteCity)
+            // Simulate exit after the atomic store save but before the journal's
+            // final receipt update. The pre-save graph must reconcile exactly.
+            var journal=try JSONSerialization.jsonObject(with:Data(contentsOf:cascade.engine.journalURL)) as! [String:Any]
+            var entries=journal["entries"] as! [[String:Any]]
+            let i=entries.firstIndex {($0["id"] as? String)==action.id.uuidString}!
+            check((entries[i]["after"] as? [Any])?.isEmpty==true,"cascade intent records no deleted children as survivors")
+            entries[i]["phase"]="intent"
+            var receipt=entries[i]["action"] as! [String:Any];receipt["state"]="needsConfirmation";receipt["undoable"]=false;entries[i]["action"]=receipt
+            journal["entries"]=entries;try JSONSerialization.data(withJSONObject:journal).write(to:cascade.engine.journalURL,options:.atomic)
+            let afterCrash=AskCollectionChangeEngine(adapter:cascade.adapter,journalURL:cascade.engine.journalURL)
+            _ = try afterCrash.performExplicitAction(action.id,undo:true);cascadeRestored=true
+        }catch {}
+        let restoredCities=try cascade.repository.fetchFeastLists(),restoredPlaces=try cascade.repository.fetchSavedPlaces()
+        let restoredCity=restoredCities.first {$0.id==cityUUID}
+        check(cascadeRestored && Set(restoredCity?.sortedSections.compactMap(\.id) ?? [])==sectionUUIDs && Set(restoredPlaces.compactMap(\.id))==placeUUIDs && restoredPlaces.allSatisfy {$0.applePlaceID=="cascade-duplicate"},"whole-city Undo restores exact original duplicate graph")
+        for kind in ["survivingDuplicateSection","nestedPlace","nestedLeafSection"] {
+            let f=try AskMutationAuditFixture(model:model,directory:temporaryDirectory,name:kind),city=try f.repository.createFeastList(named:"Restore fixture")
+            let section=try f.repository.createListSection(named:"Original",in:city),other=ListSection(context:f.context)
+            other.id=UUID();other.name=kind=="survivingDuplicateSection" ? "Original" : "Nested child";other.feastList=city
+            if kind != "survivingDuplicateSection" {other.parent=section}
+            let place=try f.place(city);place.listSection=other;try f.context.save()
+            let sectionID=other.id!,placeID=place.id!,parentID=section.id!
+            let entity=kind=="nestedPlace" ? "place" : "neighborhood",target=kind=="nestedPlace" ? placeID : sectionID
+            let deletion=AskChangeProposal(entity:entity,operation:"delete",targetIDs:[target.uuidString],cityID:nil,sectionID:nil,mapMatchID:nil,changes:[],instructionQuote:"Delete fixture")
+            var undone=false;do {let action=try f.commit(deletion);_ = try f.engine.performExplicitAction(action.id,undo:true);undone=true}catch {}
+            let currentPlaces=try f.repository.fetchSavedPlaces(),query=ListSection.fetchRequest(),sections=try f.context.fetch(query)
+            let restoredPlace=currentPlaces.first {$0.id==placeID},restoredSection=sections.first {$0.id==sectionID}
+            check(undone && restoredPlace?.listSection?.id==sectionID && (kind=="survivingDuplicateSection" || restoredSection?.parent?.id==parentID),"Undo preserves original \(kind) relationships")
+        }
+        // A new external Maps collider is never covered by the original graph.
+        let conflict=try AskMutationAuditFixture(model:model,directory:temporaryDirectory,name:"deleted-external-collider"),xc=try conflict.repository.createFeastList(named:"External"),xp=try conflict.place(xc,apple:"same-external")
+        let originalID=xp.id!
+        let deletePlace=AskChangeProposal(entity:"place",operation:"delete",targetIDs:[originalID.uuidString],cityID:nil,sectionID:nil,mapMatchID:nil,changes:[],instructionQuote:"Delete original")
+        let deletedAction=try conflict.commit(deletePlace)
+        let external=try conflict.place(xc,apple:"same-external")
+        var externalRejected=false;do {_ = try conflict.engine.performExplicitAction(deletedAction.id,undo:true)}catch {externalRejected=true}
+        let remaining=try conflict.repository.fetchSavedPlaces()
+        check(externalRejected && remaining.count==1 && remaining.first?.id==external.id,"deleted-row Undo rejects new external Maps collider atomically")
+        let ancestry=try AskMutationAuditFixture(model:model,directory:temporaryDirectory,name:"restored-ancestor-city"),ac=try ancestry.repository.createFeastList(named:"Original ancestor city"),otherCity=try ancestry.repository.createFeastList(named:"Changed ancestor city")
+        let ancestor=try ancestry.repository.createListSection(named:"Original parent",in:ac),childSection=ListSection(context:ancestry.context)
+        childSection.id=UUID();childSection.name="Original child";childSection.feastList=ac;childSection.parent=ancestor
+        let nested=try ancestry.place(ac,apple:"ancestor-fixture");nested.listSection=childSection;try ancestry.context.save()
+        let nestedID=nested.id!
+        let removeNested=AskChangeProposal(entity:"place",operation:"delete",targetIDs:[nestedID.uuidString],cityID:nil,sectionID:nil,mapMatchID:nil,changes:[],instructionQuote:"Delete nested fixture")
+        let removedNested=try ancestry.commit(removeNested)
+        ancestor.feastList=otherCity;try ancestry.context.save()
+        var ancestorRejected=false;do {_ = try ancestry.engine.performExplicitAction(removedNested.id,undo:true)}catch {ancestorRejected=true}
+        let finalPlaces=try ancestry.repository.fetchSavedPlaces()
+        check(ancestorRejected && !finalPlaces.contains {$0.id==nestedID} && childSection.feastList===ac && childSection.parent===ancestor && ancestor.feastList===otherCity,"Undo refuses changed cross-city ancestor without recreating place or changing parent graph")
+        if !failures.isEmpty {throw NSError(domain:"AskMutationAudit",code:1,userInfo:[NSLocalizedDescriptionKey:failures.joined(separator:"; ")])}
+        print("PASS mutation audit: final normalized UTF-16 bounds, stale website/Instagram identity, and Undo destination ACL/visibility/uniqueness")
     }
 }

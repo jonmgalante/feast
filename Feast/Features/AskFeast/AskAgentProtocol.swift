@@ -11,6 +11,7 @@ struct AskAgentTask:Codable,Equatable,Sendable {
     var outcomes:[AskAgentOutcome]? = nil
     var selectionIDs:[String]? = nil // Full aggregate membership, on device only; never an ordinal list.
     var referencesIncomplete:Bool? = nil // Local-only: an unresolved/ambiguous displayed reference must not silently shift positions.
+    var displayOrder:[String]? = nil // Local row occurrences, not query membership or external authority.
     var externalProjection:Self {
         let privateScope=privateSelection ?? (sourcePolicy=="local_only")
         return .init(action:action,fields:fields.filter {!["note","tags","status"].contains($0)},orderedIDs:privateScope ? [] : orderedIDs,sourcePolicy:sourcePolicy,privateSelection:privateScope,outcomes:privateScope ? nil : outcomes)
@@ -22,6 +23,7 @@ struct AskAgentTask:Codable,Equatable,Sendable {
     func checked()throws->Self {
         guard ["query","research","change"].contains(action),["stored_only","public_if_missing","local_only"].contains(sourcePolicy),fields.count<=11,orderedIDs.count<=AskCollectionPage.maximumRenderedRecords,Set(orderedIDs).count==orderedIDs.count,orderedIDs.allSatisfy({UUID(uuidString:$0) != nil}) else {throw AskError.invalidEvidence}
         if let selectionIDs {guard orderedIDs.isEmpty,Set(selectionIDs).count==selectionIDs.count,selectionIDs.allSatisfy({UUID(uuidString:$0) != nil}) else{throw AskError.invalidEvidence}}
+        if let displayOrder {guard selectionIDs==nil,displayOrder.count<=orderedIDs.count*20,Set(displayOrder)==Set(orderedIDs) else{throw AskError.invalidEvidence}}
         return self
     }
 }

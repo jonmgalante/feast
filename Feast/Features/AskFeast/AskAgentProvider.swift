@@ -100,6 +100,12 @@ struct AskAgentProvider:AskFeastProvider {
 
         var context=try AskSemanticContext.make(reading,catalog:snapshot,fullCollection:fullCollection)
         if !fullCollection {reading.collectionContinuation=nil}
+        // The executor is an authorization boundary too: never give it the
+        // stale findings that were removed only from the model projection.
+        let identities=Dictionary(uniqueKeysWithValues:snapshot.places.map {($0.id,AskFindingIdentity($0))})
+        reading.verifiedFindings=try reading.verifiedFindings.filter {
+            identities[$0.recordID]==$0.identity && (fullCollection || $0.externallyReusable==true || (reading.agentTask?.privateSelection != true && reading.libraryContext?.excludesExternalReferences != true))
+        }.map {try $0.validated()}
         let executor=await AskAgentExecutor(adapter:adapter,engine:engine,request:reading,researcher:researcher,searchMaps:{query in try await searchMaps(query)},resolveMaps:resolveMaps,fullCollectionContext:fullCollection,supportsCollectionQueryV2:queryVersion==2)
         if fullCollection {
             let permitted=try await executor.permittedRecordIDs()
@@ -114,10 +120,8 @@ struct AskAgentProvider:AskFeastProvider {
             cities.append(city);cityBytes+=size
         }
         if cities.count != allCities.count {context.indexComplete=false}
-        let identities=Dictionary(uniqueKeysWithValues:snapshot.places.map {($0.id,AskFindingIdentity($0))})
-        let approvedFindings=reading.verifiedFindings.filter {fullCollection || $0.externallyReusable==true || (reading.agentTask?.privateSelection != true && reading.libraryContext?.excludesExternalReferences != true)}
-        let findings=try approvedFindings.filter {identities[$0.recordID]==$0.identity}.map {finding->AskAgentFinding in
-            _ = try finding.validated();return .init(id:finding.id.uuidString,recordID:finding.recordID,field:finding.field,value:finding.value,sourceURL:finding.evidenceURL)
+        let findings=reading.verifiedFindings.map {finding in
+            AskAgentFinding(id:finding.id.uuidString,recordID:finding.recordID,field:finding.field,value:finding.value,sourceURL:finding.evidenceURL)
         }
         AskPipelineScope.record(.context,since:contextStarted)
         if let conversational=remote as? any AskConversationPlanning,await conversational.conversationAvailable() {

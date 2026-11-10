@@ -65,6 +65,8 @@ private struct AskChangeEntry:Codable {
     // to its pre-commit journal entry before any write can happen.
     var recoveryOperationID:String? = nil
     var recoveryProposalDigest:String? = nil
+    // Fresh identity at authorization, rechecked in the isolated commit context.
+    var findingIdentities:[String:AskFindingIdentity]? = nil
 }
 private struct AskChangeArchive:Codable {var version=1;var entries:[AskChangeEntry]=[]}
 struct AskRecoveredActionTurn:Sendable {let id:UUID,question:String,actions:[AskCollectionAction]}
@@ -192,6 +194,15 @@ enum AskChangeError:LocalizedError {
             guard let current=try adapter.personalPlaces().first(where:{$0.id==id}),AskFindingIdentity(current)==matching.identity else {throw AskChangeError.conflict}
             normalized.changes=proposal.changes.map {$0.field=="instagram" ? .init(field:$0.field,value:matching.value,values:nil,findingID:matching.id.uuidString) : $0}
         }
+        var findingIdentities:[String:AskFindingIdentity]=[:]
+        for change in normalized.changes where ["website","instagram"].contains(change.field) && (change.findingID != nil || change.source=="verified_finding") {
+            guard normalized.targetIDs.count==1,let id=normalized.targetIDs.first,
+                  let finding=findings.last(where:{$0.recordID==id && $0.field==change.field && (change.findingID==nil || $0.id.uuidString==change.findingID) && ($0.value==change.value)}),
+                  let place=targets.first as? SavedPlace else {throw AskChangeError.invalid}
+            _ = try finding.validated()
+            guard finding.identity==Self.findingIdentity(place) else {throw AskChangeError.conflict}
+            findingIdentities[id]=finding.identity
+        }
         for change in normalized.changes where change.field=="instagram" {
             guard let value=change.value,let profile=InstagramWebsiteParser.profileURL(value),let handle=URL(string:profile)?.lastPathComponent else {continue}
             let escaped=NSRegularExpression.escapedPattern(for:handle)
@@ -217,7 +228,7 @@ enum AskChangeError:LocalizedError {
         action.originatingTurn=turnID
         if !names.isEmpty {action.title=proposal.operation.capitalized+" "+names}
         action.detail=[names,values,proposal.operation=="delete" ? "Includes \(before.filter {$0.entity=="SavedPlace"}.count) saved places. You can undo this change." : ""].filter {!$0.isEmpty}.joined(separator:"\n")
-        archive.entries.append(.init(id:id,proposal:normalized,action:action,before:before,after:[],phase:"prepared",chatID:chatID,question:question,recoveryOperationID:recoveryOperationID,recoveryProposalDigest:recoveryDigest));try persist();return action
+        archive.entries.append(.init(id:id,proposal:normalized,action:action,before:before,after:[],phase:"prepared",chatID:chatID,question:question,recoveryOperationID:recoveryOperationID,recoveryProposalDigest:recoveryDigest,findingIdentities:findingIdentities.isEmpty ? nil : findingIdentities));try persist();return action
     }
     private func same(_ a:[AskChangeSnapshot],_ b:[AskChangeSnapshot])->Bool {a.count==b.count && zip(a,b).allSatisfy {$0.logicallyEquals($1)}}
     func apply(_ id:UUID,authorization:AskChangeGrant,confirmed:Bool=false,maps:[String:ApplePlaceMatch]=[:])throws->AskCollectionAction {
@@ -237,6 +248,14 @@ enum AskChangeError:LocalizedError {
             if entry.proposal.operation=="delete" {try rejectNestedDeletion(object);guard let store=object.objectID.persistentStore?.identifier,adapter.canRecoverStore(store) else {throw AskChangeError.recoveryUnavailable}}
         }
         if entry.proposal.operation=="create",!adapter.canMutate(entry.proposal.entity,nil,"create") {throw AskChangeError.permission}
+        if entry.proposal.changes.contains(where:{["website","instagram"].contains($0.field) && ($0.findingID != nil || $0.source=="verified_finding")}) {
+            // Old unbound previews may be reviewed again, never silently upgraded
+            // into authority to save research to a different business.
+            guard let identities=entry.findingIdentities,targets.allSatisfy({object in
+                guard let place=object as? SavedPlace,let id=place.id?.uuidString else{return false}
+                return identities[id]==Self.findingIdentity(place)
+            }) else {throw AskChangeError.conflict}
+        }
         let affectedBefore=affected(targets,deleting:entry.proposal.operation=="delete")
         let repository=adapter.repository(context)
         var intentReady=false
@@ -245,6 +264,11 @@ enum AskChangeError:LocalizedError {
         do {
             try repository.transaction {repo in
                 let returned=try execute(entry.proposal,targets:targets,context:context,repository:repo,maps:maps)
+                // Core Data defers cascade deletion and inverse nullification.
+                // Materialize them before journaling the intended final graph or
+                // collecting merge IDs; the repository save still happens only
+                // after that durable intent has been recorded.
+                context.processPendingChanges()
                 try context.obtainPermanentIDs(for:Array(context.insertedObjects))
                 var seen=Set<NSManagedObjectID>();afterObjects=(affectedBefore+returned).filter {!$0.isDeleted && seen.insert($0.objectID).inserted}
                 let changed=context.updatedObjects.union(context.deletedObjects)
@@ -383,13 +407,24 @@ enum AskChangeError:LocalizedError {
         let context=try adapter.makeSaveContext()
         guard same(try current(entry,context),entry.after) else {throw AskChangeError.conflict}
         var objects:[String:NSManagedObject]=[:],updated:[NSManagedObject]=[],inserted:[NSManagedObject]=[],deleted:[NSManagedObject]=[],undoSurvivors:[NSManagedObject]=[]
-        let repository=adapter.repository(context)
+        let repository=adapter.repository(context),visible=try adapter.visibleCities()
+        let beforeByKey=Dictionary(uniqueKeysWithValues:entry.before.map {($0.entity+":"+$0.id,$0)})
+        let afterKeys=Set(entry.after.map {$0.entity+":"+$0.id})
+        func isOriginalRestoredMapsPeer(_ other:SavedPlace,of image:AskChangeSnapshot)->Bool {
+            guard other.isInserted,let id=other.id?.uuidString,
+                  !afterKeys.contains(image.entity+":"+image.id),!afterKeys.contains("SavedPlace:"+id),
+                  let peer=beforeByKey["SavedPlace:"+id] else{return false}
+            // Restore exact legacy Maps duplicates from the same deleted graph,
+            // never a surviving/new collider or an existing moved object's conflict.
+            return peer.links["feastList"]==image.links["feastList"] && peer.strings["applePlaceID"]==image.strings["applePlaceID"]
+        }
         try repository.transaction {_ in
             for image in entry.after {
                 let fetch=NSFetchRequest<NSManagedObject>(entityName:image.entity);fetch.predicate=NSPredicate(format:"id == %@",UUID(uuidString:image.id)! as NSUUID)
                 guard let object=try context.fetch(fetch).first else {throw AskChangeError.conflict}
                 let kind=image.entity=="FeastList" ? "city" : image.entity=="ListSection" ? "neighborhood" : "place"
-                guard adapter.canMutate(kind,object.objectID,"update") else {throw AskChangeError.permission}
+                let cityID=(object as? FeastList)?.id ?? (object.value(forKey:"feastList") as? FeastList)?.id
+                guard let cityID,visible.contains(cityID),adapter.canMutate(kind,object.objectID,"update") else {throw AskChangeError.permission}
                 if !entry.before.contains(where:{$0.id==image.id&&$0.entity==image.entity}) {
                     guard adapter.canMutate(kind,object.objectID,"delete"),let store=object.objectID.persistentStore?.identifier,adapter.canRecoverStore(store) else {throw AskChangeError.permission}
                     if let city=object as? FeastList {try repository.delete(city)}
@@ -424,6 +459,7 @@ enum AskChangeError:LocalizedError {
                     switch attribute.attributeType {case .stringAttributeType:object.setValue(image.strings[name],forKey:name);case .dateAttributeType:object.setValue(name=="updatedAt" ? Date() : image.dates[name],forKey:name);default:throw AskChangeError.journal}
                 }
             }
+            try context.obtainPermanentIDs(for:Array(context.insertedObjects))
             for image in entry.before {
                 let object=objects[image.entity+":"+image.id]!
                 guard Set(image.links.keys).isSubset(of:["feastList","listSection","parent"]) else {throw AskChangeError.journal}
@@ -433,7 +469,40 @@ enum AskChangeError:LocalizedError {
                     let linked:NSManagedObject
                     if let known=objects[destination+":"+linkedID] {linked=known}
                     else {let fetch=NSFetchRequest<NSManagedObject>(entityName:destination);fetch.predicate=NSPredicate(format:"id == %@",uuid as NSUUID);fetch.fetchLimit=2;let values=try context.fetch(fetch);guard values.count==1 else {throw AskChangeError.conflict};linked=values[0]}
+                    guard object.objectID.persistentStore===linked.objectID.persistentStore else {throw AskChangeError.recoveryUnavailable}
+                    if !linked.isInserted {
+                        let kind=linked is FeastList ? "city" : "neighborhood"
+                        let cityID=(linked as? FeastList)?.id ?? (linked as? ListSection)?.feastList?.id
+                        guard let cityID,visible.contains(cityID),adapter.canMutate(kind,linked.objectID,"update") else {throw AskChangeError.permission}
+                    }
                     object.setValue(linked,forKey:name)
+                }
+            }
+            // Validate newly restored relationships/identities. An unrelated
+            // metadata Undo must preserve legacy nested/duplicate state exactly.
+            for image in entry.before {
+                guard let object=objects[image.entity+":"+image.id],!object.isDeleted else {continue}
+                let after=entry.after.first(where:{$0.entity==image.entity && $0.id==image.id})
+                let restored=after==nil
+                if let place=object as? SavedPlace {
+                    let cityChanged=restored || image.links["feastList"] != after?.links["feastList"]
+                    let sectionChanged=restored || image.links["listSection"] != after?.links["listSection"]
+                    if cityChanged || sectionChanged {
+                        guard let city=place.feastList,place.listSection==nil || (place.listSection?.feastList===city && (place.listSection?.parent==nil || place.listSection?.parent?.feastList===city)) else {throw AskChangeError.conflict}
+                    }
+                    if restored || cityChanged || image.strings["applePlaceID"] != after?.strings["applePlaceID"],let apple=place.applePlaceIDValue,let city=place.feastList {
+                        let query=SavedPlace.fetchRequest();query.predicate=NSPredicate(format:"applePlaceID == %@ AND feastList == %@",apple,city)
+                        guard !(try context.fetch(query)).contains(where:{!$0.isDeleted && $0 !== place && !isOriginalRestoredMapsPeer($0,of:image)}) else {throw AskChangeError.conflict}
+                    }
+                } else if let section=object as? ListSection {
+                    let relationshipChanged=restored || image.links != after?.links
+                    if relationshipChanged {guard let city=section.feastList,section.parent==nil || section.parent?.feastList===city else {throw AskChangeError.recoveryUnavailable}}
+                    if !restored && (relationshipChanged || image.strings["name"] != after?.strings["name"]) {
+                        guard !(section.feastList?.sortedSections ?? []).contains(where:{$0 !== section && !$0.isDeleted && AskCityIdentity.key($0.displayName)==AskCityIdentity.key(section.displayName)}) else {throw AskChangeError.conflict}
+                    }
+                } else if let city=object as? FeastList,!restored && image.strings["name"] != after?.strings["name"] {
+                    let query=FeastList.fetchRequest()
+                    guard !(try context.fetch(query)).contains(where:{$0 !== city && !$0.isDeleted && AskCityIdentity.key($0.displayName)==AskCityIdentity.key(city.displayName)}) else {throw AskChangeError.conflict}
                 }
             }
             let ids=Set(context.updatedObjects.union(context.deletedObjects).map(\.objectID))
@@ -446,20 +515,39 @@ enum AskChangeError:LocalizedError {
         NSManagedObjectContext.mergeChanges(fromRemoteContextSave:[NSUpdatedObjectsKey:updated.map(\.objectID),NSInsertedObjectsKey:inserted.map(\.objectID),NSDeletedObjectsKey:deleted.map(\.objectID)],into:[adapter.context])
         return entry.action
     }
+    private static func findingIdentity(_ place:SavedPlace)->AskFindingIdentity {
+        .init(name:place.displayNameSnapshot ?? "",city:place.feastList?.name ?? "",website:place.websiteURL,applePlaceID:place.applePlaceID)
+    }
+    private func validateReadBounds(_ place:SavedPlace,previous:AskChangeSnapshot?=nil)throws {
+        guard place.id != nil,let city=place.feastList else {throw AskChangeError.invalid}
+        func changed(_ key:String)->Bool {previous==nil || previous?.strings[key] != (place.value(forKey:key) as? String)}
+        // Lossless restore deliberately preserves legacy oversized fields. Check
+        // newly written normalized values, not unrelated unchanged legacy data.
+        if changed("displayNameSnapshot") {guard let name=place.displayNameSnapshot,!name.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty,name.utf16.count<=200 else {throw AskChangeError.invalid}}
+        if changed("cuisinesStorage") {guard place.cuisines.count<=20,place.cuisines.allSatisfy({!$0.isEmpty && $0.utf16.count<=100}) else {throw AskChangeError.invalid}}
+        if changed("tagsStorage") {guard place.tags.count<=30,place.tags.allSatisfy({$0.utf16.count<=200}) else {throw AskChangeError.invalid}}
+        if changed("note") {guard (place.note?.utf16.count ?? 0)<=4000 else {throw AskChangeError.invalid}}
+        for key in ["status","placeType"] where changed(key) {guard ((place.value(forKey:key) as? String)?.utf16.count ?? 0)<=200 else {throw AskChangeError.invalid}}
+        for key in ["websiteURL","instagramURL"] where changed(key) {guard ((place.value(forKey:key) as? String)?.utf16.count ?? 0)<=2000 else {throw AskChangeError.invalid}}
+        if changed("applePlaceID") {guard (place.applePlaceID?.utf16.count ?? 0)<=300 else {throw AskChangeError.invalid}}
+        if previous==nil || previous?.links["feastList"] != city.id?.uuidString {guard (city.name?.utf16.count ?? 0)<=200 else {throw AskChangeError.invalid}}
+        if previous==nil || previous?.links["listSection"] != place.listSection?.id?.uuidString {guard (place.listSection?.name?.utf16.count ?? 0)<=200 else {throw AskChangeError.invalid}}
+    }
     private func execute(_ p:AskChangeProposal,targets:[NSManagedObject],context:NSManagedObjectContext,repository:FeastRepository,maps:[String:ApplePlaceMatch])throws->[NSManagedObject] {
         func city() throws -> FeastList {guard let id=p.cityID,let city=try fetch("city",[id],context).first as? FeastList else {throw AskChangeError.missing};guard adapter.canMutate("city",city.objectID,"update") else {throw AskChangeError.permission};return city}
         func section() throws -> ListSection? {guard let id=p.sectionID else {return nil};return try fetch("neighborhood",[id],context).first as? ListSection}
         let name=p.changes.first(where:{$0.field=="name"})?.value?.trimmingCharacters(in:.whitespacesAndNewlines)
         if p.operation=="create" {
             if p.entity != "place",p.changes.contains(where:{$0.field != "name"}) {throw AskChangeError.invalid}
-            if p.entity=="city" {guard let name,!name.isEmpty,name.count<=200 else {throw AskChangeError.invalid};guard !(try repository.fetchFeastLists()).contains(where:{AskCityIdentity.key($0.displayName)==AskCityIdentity.key(name)}) else {throw AskChangeError.conflict};return [try repository.createFeastList(named:name)]}
-            if p.entity=="neighborhood" {guard let name,!name.isEmpty,name.count<=200 else {throw AskChangeError.invalid};let destination=try city();guard !destination.sortedSections.contains(where:{AskCityIdentity.key($0.displayName)==AskCityIdentity.key(name)}) else {throw AskChangeError.conflict};return [try repository.createListSection(named:name,in:destination)]}
+            if p.entity=="city" {guard let name,!name.isEmpty,name.utf16.count<=200 else {throw AskChangeError.invalid};guard !(try repository.fetchFeastLists()).contains(where:{AskCityIdentity.key($0.displayName)==AskCityIdentity.key(name)}) else {throw AskChangeError.conflict};return [try repository.createFeastList(named:name)]}
+            if p.entity=="neighborhood" {guard let name,!name.isEmpty,name.utf16.count<=200 else {throw AskChangeError.invalid};let destination=try city();guard !destination.sortedSections.contains(where:{AskCityIdentity.key($0.displayName)==AskCityIdentity.key(name)}) else {throw AskChangeError.conflict};return [try repository.createListSection(named:name,in:destination)]}
             guard let matchID=p.mapMatchID,let match=maps[matchID],!match.applePlaceID.isEmpty else {throw AskChangeError.invalid}
             let created=try repository.createSavedPlace(from:.init(applePlaceID:match.applePlaceID,displayNameSnapshot:match.displayName,status:.wantToTry,placeType:match.suggestedPlaceType ?? .other,cuisines:[],tags:[],note:nil,websiteURL:match.websiteURL,instagramURL:match.instagramURL,feastList:city(),listSection:section()))
             if !p.changes.isEmpty {
                 let update=AskChangeProposal(entity:"place",operation:"update",targetIDs:[created.id!.uuidString],cityID:nil,sectionID:nil,mapMatchID:nil,changes:p.changes,instructionQuote:p.instructionQuote)
                 _ = try execute(update,targets:[created],context:context,repository:repository,maps:maps)
             }
+            try validateReadBounds(created)
             return [created]
         }
         for target in targets {
@@ -474,22 +562,23 @@ enum AskChangeError:LocalizedError {
                 if p.operation=="move" {try repository.move(place,to:city(),section:section())}
                 for change in p.changes {
                     switch change.field {
-                    case "name":guard let value=change.value,!value.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty,value.count<=200 else {throw AskChangeError.invalid};place.displayNameSnapshot=value
+                    case "name":guard let value=change.value,!value.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty,value.utf16.count<=200 else {throw AskChangeError.invalid};place.displayNameSnapshot=value
                     case "status":guard let value=change.value,let status=PlaceStatus(rawValue:value) else {throw AskChangeError.invalid};place.placeStatus=status
                     case "type":guard let value=change.value,let type=PlaceType(rawValue:value) else {throw AskChangeError.invalid};place.placeTypeValue=type
-                    case "cuisines":guard let values=change.values,values.count<=20,values.allSatisfy({$0.count<=100}) else {throw AskChangeError.invalid};place.cuisines=p.operation=="append" ? place.cuisines+values : values
-                    case "tags":guard let values=change.values,values.count<=30,values.allSatisfy({$0.count<=200}) else {throw AskChangeError.invalid};place.tags=p.operation=="append" ? place.tags+values : values
-                    case "note":guard (change.value?.count ?? 0)<=4000 else {throw AskChangeError.invalid};place.note=p.operation=="append" ? [place.note,change.value].compactMap {$0}.joined(separator:"\n") : change.value
+                    case "cuisines":guard let values=change.values,values.count<=20,values.allSatisfy({$0.utf16.count<=100}) else {throw AskChangeError.invalid};place.cuisines=p.operation=="append" ? place.cuisines+values : values
+                    case "tags":guard let values=change.values,values.count<=30,values.allSatisfy({$0.utf16.count<=200}) else {throw AskChangeError.invalid};place.tags=p.operation=="append" ? place.tags+values : values
+                    case "note":guard (change.value?.utf16.count ?? 0)<=4000 else {throw AskChangeError.invalid};place.note=p.operation=="append" ? [place.note,change.value].compactMap {$0}.joined(separator:"\n") : change.value
                     case "website":guard change.value==nil || change.value.flatMap(InstagramWebsiteClient.websiteURL) != nil else {throw AskChangeError.invalid};place.websiteURL=change.value
                     case "instagram":guard change.value==nil || change.value.flatMap(InstagramWebsiteParser.profileURL) != nil else {throw AskChangeError.invalid};place.instagramURL=change.value.flatMap(InstagramWebsiteParser.profileURL)
                     default:throw AskChangeError.invalid
                     }
                 }
+                try validateReadBounds(place,previous:previous)
                 let current=try snapshots([place])[0]
                 if previous.strings != current.strings || previous.links != current.links {place.updatedAt=Date();place.feastList?.updatedAt=Date();place.listSection?.updatedAt=Date()}
                 else if place.hasChanges {context.refresh(place,mergeChanges:false)}
-            }else if let city=target as? FeastList {guard p.changes.count==1,let name,!name.isEmpty,name.count<=200 else {throw AskChangeError.invalid};guard !(try repository.fetchFeastLists()).contains(where:{$0.id != city.id && AskCityIdentity.key($0.displayName)==AskCityIdentity.key(name)}) else {throw AskChangeError.conflict};try repository.rename(city,to:name)}
-            else if let section=target as? ListSection {guard p.changes.count==1,let name,!name.isEmpty,name.count<=200 else {throw AskChangeError.invalid};guard !(section.feastList?.sortedSections ?? []).contains(where:{$0.id != section.id && AskCityIdentity.key($0.displayName)==AskCityIdentity.key(name)}) else {throw AskChangeError.conflict};try repository.rename(section,to:name)}
+            }else if let city=target as? FeastList {guard p.changes.count==1,let name,!name.isEmpty,name.utf16.count<=200 else {throw AskChangeError.invalid};guard !(try repository.fetchFeastLists()).contains(where:{$0.id != city.id && AskCityIdentity.key($0.displayName)==AskCityIdentity.key(name)}) else {throw AskChangeError.conflict};try repository.rename(city,to:name)}
+            else if let section=target as? ListSection {guard p.changes.count==1,let name,!name.isEmpty,name.utf16.count<=200 else {throw AskChangeError.invalid};guard !(section.feastList?.sortedSections ?? []).contains(where:{$0.id != section.id && AskCityIdentity.key($0.displayName)==AskCityIdentity.key(name)}) else {throw AskChangeError.conflict};try repository.rename(section,to:name)}
         }
         return targets.filter {!$0.isDeleted}
     }

@@ -109,10 +109,15 @@ extension AskLibraryIntentPlanning {
     func libraryPlan(_ request:AskRequest,catalog:AskLibrarySnapshot) async throws -> AskLibraryPlan? { try await libraryPlan(request.text) }
 }
 struct AskLibraryContext: Codable, Equatable, Sendable {
-    let ids: [String] // shown order, kept on device; never sent as model context
+    let ids: [String] // unique native row membership, kept on device
     let filters: AskLibraryPlan
     var selectionIDs: [String]? = nil // aggregate membership; not a displayed ordinal order
     var excludesExternalReferences:Bool? = nil // on-device privacy taint, never part of the model projection
+    var displayOrder:[String]? = nil // Local rendered occurrences; a multi-cuisine row may repeat.
+    var validDisplayOrder:Bool {
+        guard let displayOrder else {return true}
+        return displayOrder.count<=ids.count*20 && Set(displayOrder)==Set(ids)
+    }
 }
 struct AskLibrarySnapshot: Sendable {
     let places: [AskPersonalPlace]
@@ -163,7 +168,7 @@ enum AskLibraryReadTools {
         let snapshot=snapshot.sanitized(),all = snapshot.places
         if let context {
             let selection = context.selectionIDs ?? context.ids
-            guard context.ids.count <= (allowLargeResults ? AskCollectionPage.maximumRenderedRecords : 200),Set(context.ids).count == context.ids.count,Set(selection).count == selection.count,Set(context.ids).isSubset(of:Set(selection)) else { throw AskError.invalidEvidence }
+            guard context.validDisplayOrder,context.ids.count <= (allowLargeResults ? AskCollectionPage.maximumRenderedRecords : 200),Set(context.ids).count == context.ids.count,Set(selection).count == selection.count,Set(context.ids).isSubset(of:Set(selection)) else { throw AskError.invalidEvidence }
         }
         func result(_ status: AskLibraryToolResult.Status, _ records: [AskPersonalPlace]) -> AskLibraryToolResult {
             var value=AskLibraryToolResult(status: status, records: records, appliedFilters: plan, totalCount: records.count, complete: snapshot.complete(in:plan.city), cities: snapshot.cities)
@@ -185,6 +190,20 @@ enum AskLibraryReadTools {
             plan.placeType = plan.placeType ?? context.filters.placeType
             plan.neighborhood = plan.neighborhood ?? context.filters.neighborhood
         }
+        // Resolve the original displayed occurrences BEFORE any new predicate.
+        // Filtering first would silently turn "the second" into a different place.
+        if !plan.positions.isEmpty {
+            guard plan.scope == .previous,let context,context.filters.groupBy==nil || context.displayOrder != nil else {return result(.stale,[])}
+            let shown=context.displayOrder ?? context.ids
+            guard !shown.isEmpty else {
+                var clarification=result(.stale,[]);clarification.clarification="That answer didn’t show an ordered place list. Ask for the places first.";return clarification
+            }
+            guard plan.positions.allSatisfy({$0<=shown.count}) else {return result(.stale,[])}
+            let ids=plan.positions.map {shown[$0-1]}.reduce(into:[String]()) {if !$0.contains($1) {$0.append($1)}}
+            let byID=Dictionary(uniqueKeysWithValues:records.map {($0.id,$0)})
+            guard ids.allSatisfy({byID[$0] != nil}) else{return result(.stale,[])}
+            records=ids.compactMap {byID[$0]}
+        }
         // A new city uses library scope; previous scope always intersects the accepted result identities.
         if let city = plan.city {
             switch AskCityIdentity.resolve(city,available:snapshot.cities) {
@@ -197,7 +216,7 @@ enum AskLibraryReadTools {
         if let search=plan.searchText {
             records=records.filter {record in
                 var values=[record.name,record.city,record.neighborhood]
-                values += [record.note ?? "",record.status ?? "",record.type ?? ""]
+                values += [record.note ?? "",record.status ?? "",record.type ?? "",record.websiteURL ?? "",record.instagramURL ?? ""]
                 values += record.cuisines
                 values += record.tags ?? []
                 return values.contains {$0.range(of:search,options:[.caseInsensitive,.diacriticInsensitive]) != nil}
@@ -222,17 +241,7 @@ enum AskLibraryReadTools {
             guard Set(selected.map(\.id)).count == selected.count else { return result(.ambiguous,[]) }
             records=selected
         }
-        if !plan.positions.isEmpty {
-            guard plan.scope == .previous,let context else { return result(.stale,[]) }
-            guard !context.ids.isEmpty else {
-                var clarification=result(.stale,[]);clarification.clarification="That answer didn’t show an ordered place list. Ask for the places first.";return clarification
-            }
-            let shown=context.ids.compactMap { id in records.first {$0.id == id} }
-            guard plan.positions.allSatisfy({$0 <= shown.count}) else { return result(.stale,[]) }
-            records=plan.positions.map {shown[$0-1]}
-        }
-        // An ordinal names the displayed row, not its position in a newly
-        // filtered subset. Intersect presence only after resolving that identity.
+        // Presence is also intersected only after the displayed identity is resolved.
         if let presence=plan.fieldPresence {records=records.filter(presence.matches)}
         if !snapshot.complete(in:plan.city) { return result(.partial,records) }
         if !allowLargeResults,![.count,.group].contains(plan.operation),records.count > 200 {return result(.limited,records)}
@@ -354,7 +363,8 @@ enum AskLibraryReadTools {
         }
         guard characters<=60_000 else {return plain("Those saved details are too long to show in one answer. Narrow the request by city, cuisine, or name.")}
         var response = AskResponse(summary:"\(candidates.count) saved \(candidates.count == 1 ? "place" : "places").",candidates:candidates,paragraphs:paragraphs,listedCandidateIDs:[],usesLocalCatalog:true)
-        response.libraryContext = .init(ids:result.records.map(\.id),filters:plan,excludesExternalReferences:result.excludesExternalReferences)
+        let displayed=paragraphs.flatMap(\.spans).compactMap {span->String? in if case .place(let id)=span{return id};return nil}
+        response.libraryContext = .init(ids:result.records.map(\.id),filters:plan,excludesExternalReferences:result.excludesExternalReferences,displayOrder:plan.groupBy==nil ? nil : displayed)
         return response
     }
 }

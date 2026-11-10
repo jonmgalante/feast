@@ -229,10 +229,10 @@ struct AskConversationLoop:Sendable {
         let recovery=AskRecoveryScope.handle
         var state=AskRecoveryLoopState()
         state.referencesIncomplete=request.agentTask?.referencesIncomplete
-        state.ordered=request.agentTask?.orderedIDs ?? request.libraryContext?.ids ?? []
+        state.ordered=request.agentTask?.selectionIDs ?? request.agentTask?.orderedIDs ?? request.libraryContext?.selectionIDs ?? request.libraryContext?.ids ?? []
+        state.displayOrder=request.agentTask != nil ? request.agentTask?.displayOrder : request.libraryContext?.displayOrder
         state.privateScope=(request.agentTask?.privateSelection==true || request.libraryContext?.excludesExternalReferences==true)
         state.selectionIsOrdered=request.agentTask.map {$0.selectionIDs == nil} ?? (request.libraryContext?.selectionIDs == nil)
-        if let membership=request.agentTask?.selectionIDs ?? request.libraryContext?.selectionIDs {state.ordered=membership}
         state.available=availableCandidates
         if fullCollection,let prior=request.collectionContinuation {for candidate in prior.candidates where state.available[candidate.id]==nil {state.available[candidate.id]=candidate}}
         state.publicResearch=request.publicResearch
@@ -276,7 +276,7 @@ struct AskConversationLoop:Sendable {
             response.paragraphs.removeAll {$0.id=="conversation-interrupted"}
             response.paragraphs.insert(.init(id:"conversation-interrupted",spans:[.text(explanation)],sourceIDs:[]),at:0)
             if !state.durableActions.isEmpty {response.collectionActions=state.durableActions}
-            response.agentTask = .init(action:state.attemptedChange || !state.durableActions.isEmpty ? "change" : "query",fields:state.taskFields,orderedIDs:state.selectionIsOrdered ? state.ordered : [],sourcePolicy:"public_if_missing",privateSelection:state.privateScope || state.privateHistory,outcomes:state.durableOutcomes.isEmpty ? nil : state.durableOutcomes,selectionIDs:state.selectionIsOrdered ? nil : state.ordered,referencesIncomplete:state.referencesIncomplete)
+            response.agentTask = .init(action:state.attemptedChange || !state.durableActions.isEmpty ? "change" : "query",fields:state.taskFields,orderedIDs:state.selectionIsOrdered ? state.ordered : [],sourcePolicy:"public_if_missing",privateSelection:state.privateScope || state.privateHistory,outcomes:state.durableOutcomes.isEmpty ? nil : state.durableOutcomes,selectionIDs:state.selectionIsOrdered ? nil : state.ordered,referencesIncomplete:state.referencesIncomplete,displayOrder:state.selectionIsOrdered ? state.displayOrder : nil)
             response.publicConversationText=state.privateHistory || state.privateScope ? nil : "Unfinished task. "+(state.selectionIsOrdered ? "Saved result IDs: "+state.ordered.joined(separator:",")+". " : "The aggregate selection remains on device. ")+String(response.summary.prefix(1000))
             keepCollectionHistory(&response,text:"Unfinished task. Continue from the saved page metadata.")
             return response
@@ -386,7 +386,7 @@ struct AskConversationLoop:Sendable {
                     // the executor likewise keeps its selection unchanged.
                     let retainedQuery=call.name=="retain_findings" && value.output.status=="success" && state.latest?.libraryContext != nil ? state.latest : nil
                     if retainedQuery != nil {
-                        value.orderedIDs=state.ordered;value.selectionIsOrdered=state.selectionIsOrdered;value.selectionIsPrivate=state.privateScope
+                        value.orderedIDs=state.ordered;value.selectionIsOrdered=state.selectionIsOrdered;value.displayOrder=state.displayOrder;value.selectionIsPrivate=state.privateScope
                     }
                     if let response=value.response {
                         for candidate in response.candidates {state.available[candidate.id]=candidate}
@@ -399,13 +399,22 @@ struct AskConversationLoop:Sendable {
                             var visiblePrevious=previous
                             visiblePrevious.paragraphs.removeAll {$0.id=="conversation-interrupted" || $0.id=="conversation-limit"}
                             var merged=AskAgentLoop.merged(visiblePrevious,response)
+                            // Consecutive native pages contain real row occurrences,
+                            // including repeated cuisine membership. Generic answer
+                            // deduplication must not erase a displayed row and shift
+                            // every subsequent ordinal.
+                            merged.paragraphs=(visiblePrevious.paragraphs+response.paragraphs).enumerated().map {i,p in
+                                .init(id:"collection-row-\(i)",spans:p.spans,sourceIDs:p.sourceIDs,citations:p.citations,citationsAreResearchPool:p.citationsAreResearchPool,representedField:p.representedField,transientToolStatus:p.transientToolStatus,operationStatus:p.operationStatus)
+                            }
                             merged.paragraphs.removeAll {paragraph in paragraph.spans.count==1 && {if case .text(let value)=paragraph.spans[0] {return value.hasPrefix("Showing ") && value.contains("matching saved")};return false}()}
                             merged.collectionPage = .init(snapshot:page.snapshot,totalCount:page.totalCount,offset:prior.offset,returnedCount:prior.returnedCount+page.returnedCount,nextOffset:page.nextOffset)
                             if let context=merged.libraryContext {
                                 // Prior answers may also reference places outside these pages.
                                 // Only native row IDs participate in the continued query.
                                 let ids=((previous.libraryContext?.ids ?? [])+context.ids).reduce(into:[String]()) {if !$0.contains($1) {$0.append($1)}}
-                                merged.libraryContext = .init(ids:ids,filters:context.filters,excludesExternalReferences:true)
+                                let priorOrder=previous.libraryContext?.displayOrder ?? previous.libraryContext?.ids ?? []
+                                let display=priorOrder+(context.displayOrder ?? context.ids)
+                                merged.libraryContext = .init(ids:ids,filters:context.filters,excludesExternalReferences:true,displayOrder:context.filters.groupBy != nil || display != ids ? display : nil)
                                 merged.answerMentionIDs=merged.answerMentionIDs.map {$0.filter {!ids.contains($0)}}
                                 let byID=Dictionary(uniqueKeysWithValues:merged.candidates.map {($0.id,$0)})
                                 merged.candidates=ids.compactMap {byID[$0]}+merged.candidates.filter {!ids.contains($0.id)}
@@ -421,17 +430,17 @@ struct AskConversationLoop:Sendable {
                     for outcome in value.outcomes ?? [] {if let i=state.durableOutcomes.firstIndex(where:{$0.id==outcome.id}) {state.durableOutcomes[i]=outcome}else{state.durableOutcomes.append(outcome)}}
                     if !state.durableActions.isEmpty {let actions=state.durableActions;state.latest?.collectionActions=actions}
                     if call.name=="query_collection",["success","empty","local_only"].contains(value.output.status) {state.referencesIncomplete=nil}
-                    state.ordered=value.orderedIDs;state.selectionIsOrdered=value.selectionIsOrdered;state.privateScope=value.selectionIsPrivate;state.privateHistory = state.privateHistory || value.selectionIsPrivate || value.output.localOnly;state.currentPrivateTool = state.currentPrivateTool || value.selectionIsPrivate || value.output.localOnly;state.localOnlyTool = state.localOnlyTool || value.output.localOnly
+                    state.ordered=value.orderedIDs;state.selectionIsOrdered=value.selectionIsOrdered;state.displayOrder=value.displayOrder;state.privateScope=value.selectionIsPrivate;state.privateHistory = state.privateHistory || value.selectionIsPrivate || value.output.localOnly;state.currentPrivateTool = state.currentPrivateTool || value.selectionIsPrivate || value.output.localOnly;state.localOnlyTool = state.localOnlyTool || value.output.localOnly
                     var output=AskConversationToolResult(value.output)
                     output.presentation=value.presentation
                     if output.presentation==nil,call.name=="propose_changes" {output.presentation = .init(kind:"action",requestedFields:[],returnedFields:[],complete:value.output.complete,renderedLocally:true)}
                     state.result = .init(callID:call.callID,output:output)
-                    if ["budget_stopped","needs_confirmation","conflict","unavailable"].contains(value.output.status),!(call.name=="propose_changes" && ["conflict","unavailable"].contains(value.output.status)),!(call.name=="search_maps" && value.output.status=="unavailable"),var response=state.latest {response.publicResearch=Array(state.publicResearch.suffix(4));response.operationRecords=state.operationRecords.isEmpty ? nil : state.operationRecords;response.agentTask = .init(action:state.attemptedChange ? "change" : "query",fields:state.taskFields,orderedIDs:state.selectionIsOrdered ? state.ordered : [],sourcePolicy:"public_if_missing",privateSelection:state.privateScope || state.privateHistory,outcomes:state.durableOutcomes.isEmpty ? nil : state.durableOutcomes,selectionIDs:state.selectionIsOrdered ? nil : state.ordered,referencesIncomplete:state.referencesIncomplete);return response}
+                    if ["budget_stopped","needs_confirmation","conflict","unavailable"].contains(value.output.status),!(call.name=="propose_changes" && ["conflict","unavailable"].contains(value.output.status)),!(call.name=="search_maps" && value.output.status=="unavailable"),var response=state.latest {response.publicResearch=Array(state.publicResearch.suffix(4));response.operationRecords=state.operationRecords.isEmpty ? nil : state.operationRecords;response.agentTask = .init(action:state.attemptedChange ? "change" : "query",fields:state.taskFields,orderedIDs:state.selectionIsOrdered ? state.ordered : [],sourcePolicy:"public_if_missing",privateSelection:state.privateScope || state.privateHistory,outcomes:state.durableOutcomes.isEmpty ? nil : state.durableOutcomes,selectionIDs:state.selectionIsOrdered ? nil : state.ordered,referencesIncomplete:state.referencesIncomplete,displayOrder:state.selectionIsOrdered ? state.displayOrder : nil);return response}
                 }
                 if recovery == nil,let lease=AskProviderAttemptScope.lease {
                     var checkpoint=state.latest ?? AskResponse(summary:"Completed research retained.",candidates:[],listedCandidateIDs:[],usesLocalCatalog:true)
                     checkpoint.publicResearch=Array(state.publicResearch.suffix(4))
-                    checkpoint.agentTask = .init(action:"query",fields:state.taskFields,orderedIDs:state.selectionIsOrdered ? state.ordered : [],sourcePolicy:"public_if_missing",privateSelection:state.privateScope || state.privateHistory,selectionIDs:state.selectionIsOrdered ? nil : state.ordered,referencesIncomplete:state.referencesIncomplete)
+                    checkpoint.agentTask = .init(action:"query",fields:state.taskFields,orderedIDs:state.selectionIsOrdered ? state.ordered : [],sourcePolicy:"public_if_missing",privateSelection:state.privateScope || state.privateHistory,selectionIDs:state.selectionIsOrdered ? nil : state.ordered,referencesIncomplete:state.referencesIncomplete,displayOrder:state.selectionIsOrdered ? state.displayOrder : nil)
                     do {try await AskProviderAttempts.shared.keepReadContext(checkpoint,lease:lease)}
                     catch {if let retained=interrupted(error) {return retained};throw error}
                 }
@@ -475,12 +484,12 @@ struct AskConversationLoop:Sendable {
                 let mentioned=Set(rendered.spans.compactMap {span->String? in if case .place(let id)=span {return id};return nil})
                 let supporting=mentioned.union(response.supplementalFindingIDs)
                 response.candidates=references.compactMap {byID[$0]}+response.candidates.filter {!references.contains($0.id) && supporting.contains($0.id)}
-                if let previous=response.libraryContext {response.libraryContext = .init(ids:references,filters:previous.filters,excludesExternalReferences:true)}
-                state.selectionIsOrdered=true;state.ordered=references;state.referencesIncomplete=nil
+                if let previous=response.libraryContext {response.libraryContext = .init(ids:references,filters:previous.filters,excludesExternalReferences:true,displayOrder:previous.filters.groupBy==nil ? nil : references)}
+                state.selectionIsOrdered=true;state.ordered=references;state.displayOrder=nil;state.referencesIncomplete=nil
             } else if explicitAnswerSelection {
-                state.selectionIsOrdered=true;state.ordered=references;state.referencesIncomplete=nil
+                state.selectionIsOrdered=true;state.ordered=references;state.displayOrder=nil;state.referencesIncomplete=nil
             } else if nativeOperation == nil && !references.isEmpty {
-                state.selectionIsOrdered=true;state.ordered=references;state.referencesIncomplete=incomplete ? true : nil
+                state.selectionIsOrdered=true;state.ordered=references;state.displayOrder=nil;state.referencesIncomplete=incomplete ? true : nil
             }
             // Two conflicting displayed lists must not silently select one order.
             let aggregateListConflict=aggregate && sequence.explicitList && Set(references) != Set(state.ordered)
@@ -496,7 +505,7 @@ struct AskConversationLoop:Sendable {
                 let extras=response.candidates.map(\.id).filter {!native.contains($0) && mentioned.contains($0)}
                 response.answerMentionIDs=extras.isEmpty ? nil : extras
             }
-            response.agentTask = .init(action:state.attemptedChange || !state.durableActions.isEmpty ? "change" : "query",fields:state.taskFields,orderedIDs:state.selectionIsOrdered ? state.ordered : [],sourcePolicy:"public_if_missing",privateSelection:state.privateScope || state.privateHistory,outcomes:state.durableOutcomes.isEmpty ? nil : state.durableOutcomes,selectionIDs:state.selectionIsOrdered ? nil : state.ordered,referencesIncomplete:state.referencesIncomplete)
+            response.agentTask = .init(action:state.attemptedChange || !state.durableActions.isEmpty ? "change" : "query",fields:state.taskFields,orderedIDs:state.selectionIsOrdered ? state.ordered : [],sourcePolicy:"public_if_missing",privateSelection:state.privateScope || state.privateHistory,outcomes:state.durableOutcomes.isEmpty ? nil : state.durableOutcomes,selectionIDs:state.selectionIsOrdered ? nil : state.ordered,referencesIncomplete:state.referencesIncomplete,displayOrder:state.selectionIsOrdered ? state.displayOrder : nil)
             let acknowledgements=state.durableActions.map {"action \($0.id.uuidString) \($0.entity) \($0.operation) \($0.state.rawValue) targets \($0.targetIDs.joined(separator:","))"}.joined(separator:"; ")
             response.publicConversationText=state.privateHistory || state.privateScope ? nil : (!state.unresolvedChanges.isEmpty ? "The requested change was not completed. Check its execution result before retrying." : reply.text)+(acknowledgements.isEmpty ? "" : "\nApp outcomes: "+acknowledgements)
             keepCollectionHistory(&response,text:reply.text+"\n"+acknowledgements)

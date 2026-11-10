@@ -35,6 +35,7 @@ struct AskRecoveryLoopState:Codable,Sendable {
     var privateScope=false,privateHistory=false,currentPrivateTool=false,localOnlyTool=false
     var taskFields:[String]=[]
     var selectionIsOrdered=true
+    var displayOrder:[String]? = nil
     var referencesIncomplete:Bool? = nil
     var available:[String:AskCandidate]=[:]
     var publicResearch:[AskRetainedResearch]=[]

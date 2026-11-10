@@ -29,6 +29,8 @@ enum AskRecoveryOperationScope {
     private var conversationalExecution=false
     private var selection:[String]
     private var selectionIsOrdered:Bool
+    private var displayOrder:[String]?
+    private let humanReferenceDisplayOrder:[String]?
     private let humanReferenceSelection:[String]
     private let humanReferenceIsOrdered:Bool
     private var selectionIsPrivate:Bool
@@ -46,18 +48,29 @@ enum AskRecoveryOperationScope {
     private var retainedPublicKeys=Set<String>()
     private var createdCities:[String:String]=[:]
     private var collectionPageProgress:[String:Int]=[:]
+    private var collectionPageDisplayOrders:[String:[String]]=[:]
     private var readContexts:[NSManagedObjectContext]=[]
     init(adapter:AskSavedCollection,engine:AskCollectionChangeEngine,request:AskRequest,researcher:any AskBusinessResearching,searchMaps:@escaping (String)async throws->[ApplePlaceMatch],resolveMaps:@escaping @MainActor @Sendable (String)async throws->ApplePlaceMatch? = {_ in nil},fullCollectionContext:Bool=false,supportsCollectionQueryV2:Bool=false) {
         self.fullCollectionContext=fullCollectionContext
         self.supportsCollectionQueryV2=fullCollectionContext && supportsCollectionQueryV2
         self.adapter=adapter;self.engine=engine;self.request=request;self.researcher=researcher;self.searchMaps=searchMaps;self.resolveMaps=resolveMaps
         humanReferenceSelection=request.agentTask?.selectionIDs ?? request.agentTask?.orderedIDs ?? request.libraryContext?.selectionIDs ?? request.libraryContext?.ids ?? []
-        humanReferenceIsOrdered=request.agentTask.map {$0.selectionIDs == nil} ?? (request.libraryContext?.selectionIDs == nil)
+        // Historical grouped archives have no trustworthy occurrence order.
+        // Keep membership, but require a fresh list before any ordinal can write.
+        let legacyGrouped=request.libraryContext.map {$0.filters.groupBy != nil && $0.displayOrder==nil && ![AskLibraryPlan.Operation.count,.group,.catalog].contains($0.filters.operation)} ?? false
+        humanReferenceIsOrdered=(request.agentTask.map {$0.selectionIDs == nil} ?? (request.libraryContext?.selectionIDs == nil)) && !legacyGrouped
+        // Membership and order are one provenance unit. A task's nil occurrence
+        // list means its own unique order, not an older native query's full list.
+        humanReferenceDisplayOrder=request.agentTask != nil ? request.agentTask?.displayOrder : request.libraryContext?.displayOrder
+        displayOrder=humanReferenceDisplayOrder
         selectionIsOrdered=humanReferenceIsOrdered
         selection=humanReferenceSelection;selectionIsPrivate=(request.agentTask?.privateSelection ?? (request.agentTask?.sourcePolicy=="local_only")) || request.libraryContext?.excludesExternalReferences==true;findings=request.verifiedFindings
         maps=Dictionary(request.mapChoices.map {($0.id,$0.match)},uniquingKeysWith:{$1})
         mapsQuery=request.mapChoices.first?.query
-        if let page=request.collectionContinuation?.collectionPage,page.offset==0 {collectionPageProgress[page.snapshot]=page.returnedCount}
+        if let response=request.collectionContinuation,let page=response.collectionPage,page.offset==0 {
+            collectionPageProgress[page.snapshot]=page.returnedCount
+            collectionPageDisplayOrders[page.snapshot]=response.libraryContext?.displayOrder ?? response.libraryContext?.ids ?? []
+        }
 
     }
     // Checkpoints contain values and receipts only. Core Data contexts and prepared
@@ -89,13 +102,15 @@ enum AskRecoveryOperationScope {
         let mapsQuery:String?
         let researchCache:[String:AskResponse],researchOrder:[String],researchResults:[String:AskResponse],researchFieldOrder:[String]
         let retainedPublicKeys:Set<String>,createdCities:[String:String],collectionPageProgress:[String:Int]
+        var displayOrder:[String]? = nil
+        var collectionPageDisplayOrders:[String:[String]]? = nil
     }
     private func recoveryRequestDigest()throws->String {
         let encoder=JSONEncoder();encoder.outputFormatting = .sortedKeys
         return SHA256.hash(data:try encoder.encode(request)).map {String(format:"%02x",$0)}.joined()
     }
     func recoverySnapshot()throws->Data {
-        let value=RecoverySnapshot(requestDigest:try recoveryRequestDigest(),selection:selection,selectionIsOrdered:selectionIsOrdered,selectionIsPrivate:selectionIsPrivate,findings:findings,maps:maps.mapValues(RecoveryMap.init),mutationOrder:mutationOrder,mutationStates:mutationStates,completedLeaves:completedLeaves,frozenUndoActions:frozenUndoActions,mapsQuery:mapsQuery,researchCache:researchCache,researchOrder:researchOrder,researchResults:researchResults,researchFieldOrder:researchFieldOrder,retainedPublicKeys:retainedPublicKeys,createdCities:createdCities,collectionPageProgress:collectionPageProgress)
+        let value=RecoverySnapshot(requestDigest:try recoveryRequestDigest(),selection:selection,selectionIsOrdered:selectionIsOrdered,selectionIsPrivate:selectionIsPrivate,findings:findings,maps:maps.mapValues(RecoveryMap.init),mutationOrder:mutationOrder,mutationStates:mutationStates,completedLeaves:completedLeaves,frozenUndoActions:frozenUndoActions,mapsQuery:mapsQuery,researchCache:researchCache,researchOrder:researchOrder,researchResults:researchResults,researchFieldOrder:researchFieldOrder,retainedPublicKeys:retainedPublicKeys,createdCities:createdCities,collectionPageProgress:collectionPageProgress,displayOrder:displayOrder,collectionPageDisplayOrders:collectionPageDisplayOrders)
         let data=try JSONEncoder().encode(value)
         guard data.count<=8*1024*1024 else {throw AskChangeError.journal}
         return data
@@ -105,12 +120,21 @@ enum AskRecoveryOperationScope {
         let value=try JSONDecoder().decode(RecoverySnapshot.self,from:data)
         guard value.version==1,value.requestDigest == (try recoveryRequestDigest()),value.selection.count<=2400,value.mutationOrder.count<=2400,value.collectionPageProgress.values.allSatisfy({$0>=0 && $0<=2400}) else {throw AskChangeError.journal}
         let restoredMaps=try value.maps.mapValues {try $0.restored()}
-        selection=value.selection;selectionIsOrdered=value.selectionIsOrdered;selectionIsPrivate=value.selectionIsPrivate
+        if let displayed=value.displayOrder {guard value.selectionIsOrdered,displayed.count<=value.selection.count*20,Set(displayed)==Set(value.selection) else{throw AskChangeError.journal}}
+        if let pages=value.collectionPageDisplayOrders {guard pages.allSatisfy({key,ids in ids.count<=(value.collectionPageProgress[key] ?? 0)*20 && ids.allSatisfy {UUID(uuidString:$0) != nil}}) else{throw AskChangeError.journal}}
+        selection=value.selection;selectionIsOrdered=value.selectionIsOrdered;selectionIsPrivate=value.selectionIsPrivate;displayOrder=value.displayOrder
+        collectionPageDisplayOrders=value.collectionPageDisplayOrders ?? [:]
         findings=value.findings;maps=restoredMaps;mutationOrder=value.mutationOrder;mutationStates=value.mutationStates
         completedLeaves=value.completedLeaves;frozenUndoActions=value.frozenUndoActions;mapsQuery=value.mapsQuery
         researchCache=value.researchCache;researchOrder=value.researchOrder;researchResults=value.researchResults;researchFieldOrder=value.researchFieldOrder
         retainedPublicKeys=value.retainedPublicKeys;createdCities=value.createdCities;collectionPageProgress=value.collectionPageProgress
         prepared=[];conversationalReplacement=false;conversationalExecution=false;readContexts=[]
+    }
+    private func pruneStaleFindings()throws {
+        let current=try adapter.personalPlaces()
+        findings=findings.filter {finding in
+            (try? finding.validated()) != nil && current.contains {$0.id==finding.recordID && AskFindingIdentity($0)==finding.identity}
+        }
     }
     /// Per-operation optimistic concurrency guard, local only and never serialized
     /// into authorization/model context. Unrelated fields do not block narrow edits.
@@ -134,6 +158,10 @@ enum AskRecoveryOperationScope {
                 let related=object.value(forKey:key)
                 let records=(related as? NSSet)?.allObjects as? [NSManagedObject] ?? (related as? NSManagedObject).map {[$0]} ?? []
                 values["relationship:"+key]=records.compactMap {($0.value(forKey:"id") as? UUID)?.uuidString}.sorted()
+            }
+            if proposal.entity=="place",proposal.changes.contains(where:{$0.source=="verified_finding" || $0.findingID != nil}),let place=object as? SavedPlace {
+                let identity=AskFindingIdentity(name:place.displayNameSnapshot ?? "",city:place.feastList?.name ?? "",website:place.websiteURL,applePlaceID:place.applePlaceID)
+                values["findingIdentity"]=try JSONSerialization.jsonObject(with:JSONEncoder().encode(identity))
             }
             result[id]=try JSONSerialization.data(withJSONObject:values,options:.sortedKeys)
         }
@@ -176,11 +204,13 @@ enum AskRecoveryOperationScope {
             guard let selector=permission.selector,selector.scope != "previous",(selector.positions ?? []).isEmpty else{throw AskChangeError.invalid}
         }
         let selection=reference ?? self.selection
+        let occurrenceOrder=(reference==nil ? displayOrder : humanReferenceDisplayOrder) ?? selection
+        guard Set(occurrenceOrder).isSubset(of:Set(selection)) else{throw AskChangeError.missing}
         if permission.selector?.positions?.isEmpty == false {guard reference == nil ? selectionIsOrdered : humanReferenceIsOrdered else {throw AskChangeError.missing}}
         let all=try objects(permission.entity)
         if permission.operations==["undo"],let positions=permission.selector?.positions,!positions.isEmpty {
-            guard positions.allSatisfy({$0>0&&$0<=selection.count}),Set(positions).count==positions.count else {throw AskChangeError.invalid}
-            let ids=positions.map {selection[$0-1]}
+            guard positions.allSatisfy({$0>0&&$0<=occurrenceOrder.count}),Set(positions).count==positions.count else {throw AskChangeError.invalid}
+            let ids=positions.map {occurrenceOrder[$0-1]}.reduce(into:[String]()) {if !$0.contains($1) {$0.append($1)}}
             guard permission.targetIDs.isEmpty || Set(permission.targetIDs)==Set(ids) else {throw AskChangeError.invalid}
             guard try ids.allSatisfy({try engine.latestAction(for:$0) != nil}) else {throw AskChangeError.missing}
             return ids
@@ -203,7 +233,12 @@ enum AskRecoveryOperationScope {
             let byID=Dictionary(uniqueKeysWithValues:all.compactMap {object->(String,NSManagedObject)? in guard let id=object.value(forKey:"id") as? UUID else{return nil};return (id.uuidString,object)})
             guard !selection.isEmpty,selection.allSatisfy({byID[$0] != nil}) else {throw AskChangeError.missing}
             values=selection.compactMap {byID[$0]}
-            if let positions=selector.positions,!positions.isEmpty {guard positions.allSatisfy({$0>0&&$0<=values.count}) else {throw AskChangeError.invalid};values=positions.map {values[$0-1]}}
+            if let positions=selector.positions,!positions.isEmpty {
+                guard positions.allSatisfy({$0>0&&$0<=occurrenceOrder.count}) else {throw AskChangeError.invalid}
+                let ids=positions.map {occurrenceOrder[$0-1]}.reduce(into:[String]()) {if !$0.contains($1) {$0.append($1)}}
+                guard ids.allSatisfy({byID[$0] != nil}) else{throw AskChangeError.missing}
+                values=ids.compactMap {byID[$0]}
+            }
         }
         if let supplied=selector.city {
             let available=try cities().map(\.name)
@@ -256,7 +291,7 @@ enum AskRecoveryOperationScope {
             }
             // Pending previews can contain local-only values: never project their contents.
             selectionIsPrivate=true
-            return .init(output:.init(status:failure==nil ? "applied" : "unavailable",complete:failure==nil,totalCount:0,records:[],findings:[],message:failure==nil ? "changed" : "unavailable",localOnly:false),response:plain(failure ?? "Saved.",actions:applied,statusOnly:failure==nil),orderedIDs:selection,appendPreviousResults:true,selectionIsPrivate:true,outcomes:applied.flatMap {action in action.targetIDs.map {.init(id:$0,state:action.state.rawValue)}},selectionIsOrdered:selectionIsOrdered)
+            return .init(output:.init(status:failure==nil ? "applied" : "unavailable",complete:failure==nil,totalCount:0,records:[],findings:[],message:failure==nil ? "changed" : "unavailable",localOnly:false),response:plain(failure ?? "Saved.",actions:applied,statusOnly:failure==nil),orderedIDs:selection,appendPreviousResults:true,selectionIsPrivate:true,outcomes:applied.flatMap {action in action.targetIDs.map {.init(id:$0,state:action.state.rawValue)}},selectionIsOrdered:selectionIsOrdered,displayOrder:selectionIsOrdered ? displayOrder : nil)
         }
         if call.name=="propose_changes" {
             var proposal=try JSONDecoder().decode(AskChangeProposal.self,from:Data(call.arguments.utf8))
@@ -266,7 +301,7 @@ enum AskRecoveryOperationScope {
                 guard let fresh=try await resolveMaps(choice.applePlaceID),fresh.applePlaceID==choice.applePlaceID,AskCityIdentity.key(fresh.displayName)==AskCityIdentity.key(choice.name),(choice.address.isEmpty || AskCityIdentity.key(fresh.secondaryText)==AskCityIdentity.key(choice.address)) else {
                     var response=plain("That Maps choice is no longer available. Search again before saving it.")
                     response.mapChoices=request.mapChoices;response.pendingProposal=proposal;response.executionStatus="unresolved"
-                    return .init(output:.init(status:"stale",complete:false,totalCount:0,records:[],findings:[],message:"unavailable",localOnly:false),response:response,orderedIDs:selection,selectionIsOrdered:selectionIsOrdered)
+                    return .init(output:.init(status:"stale",complete:false,totalCount:0,records:[],findings:[],message:"unavailable",localOnly:false),response:response,orderedIDs:selection,selectionIsOrdered:selectionIsOrdered,displayOrder:selectionIsOrdered ? displayOrder : nil)
                 }
                 try await AskRecoveryActivity.check()
                 maps[choice.id]=fresh
@@ -281,7 +316,7 @@ enum AskRecoveryOperationScope {
                     (object.value(forKey:"feastList") as? FeastList)?.id?.uuidString==parent && AskCityIdentity.key((object.value(forKey:"name") as? String) ?? "")==AskCityIdentity.key(supplied)
                 }
                 guard let parent,matches.count==1,let section=matches[0].value(forKey:"id") as? UUID else {
-                    return .init(output:.init(status:"needs_confirmation",complete:true,totalCount:0,records:[],findings:[],message:"needs_review",localOnly:false),response:plain("Please specify one existing destination city and neighborhood."),orderedIDs:selection,selectionIsPrivate:selectionIsPrivate,selectionIsOrdered:selectionIsOrdered)
+                    return .init(output:.init(status:"needs_confirmation",complete:true,totalCount:0,records:[],findings:[],message:"needs_review",localOnly:false),response:plain("Please specify one existing destination city and neighborhood."),orderedIDs:selection,selectionIsPrivate:selectionIsPrivate,selectionIsOrdered:selectionIsOrdered,displayOrder:selectionIsOrdered ? displayOrder : nil)
                 }
                 // The model/auth check sees its own requested name, not private IDs.
                 // Persistence receives the unique fresh native identity.
@@ -330,6 +365,7 @@ enum AskRecoveryOperationScope {
                 }
             }
             authorizationProposal.referenceContext=references.isEmpty ? nil : references
+            try pruneStaleFindings()
             let researchedFields=Set(proposal.changes.filter {$0.source=="verified_finding"}.map(\.field))
             let contextFindings=findings.filter {researchedFields.contains($0.field) && ($0.externallyReusable==true || !selectionIsPrivate) && (usesPrivateSelection || proposal.targetIDs.contains($0.recordID))}
             authorizationProposal.findingContext=contextFindings.isEmpty ? nil : contextFindings.map {.init(id:$0.id.uuidString,recordID:$0.recordID,field:$0.field,value:$0.value,sourceURL:$0.evidenceURL)}
@@ -338,7 +374,7 @@ enum AskRecoveryOperationScope {
             let decision:AskHumanAuthorization
             do {defer {AskPipelineScope.record(.authorization,since:authorizationStarted)};decision=try await planner.authorizeConversationChange(authorizationProposal,question:request.text,history:AskConversationProjection.authorizationHistory(request.dialogue,recent:request.recentQuestions),targets:usesPrivateSelection ? [] : targets)}
             try await AskRecoveryActivity.check()
-            guard decision.approved else {return .init(output:.init(status:"needs_confirmation",complete:true,totalCount:0,records:[],findings:[],message:"needs_review",localOnly:false),response:plain(decision.reason=="ambiguous" ? "Which change would you like me to make?" : "Tell me what you’d like changed before I save anything."),orderedIDs:selection,selectionIsPrivate:selectionIsPrivate,selectionIsOrdered:selectionIsOrdered)}
+            guard decision.approved else {return .init(output:.init(status:"needs_confirmation",complete:true,totalCount:0,records:[],findings:[],message:"needs_review",localOnly:false),response:plain(decision.reason=="ambiguous" ? "Which change would you like me to make?" : "Tell me what you’d like changed before I save anything."),orderedIDs:selection,selectionIsPrivate:selectionIsPrivate,selectionIsOrdered:selectionIsOrdered,displayOrder:selectionIsOrdered ? displayOrder : nil)}
             try Task.checkCancellation()
             guard try authorizationState(proposal)==pinnedSource else{throw AskChangeError.conflict}
             if let city=destinationCity {guard try cities().contains(where:{$0.id==city.id && $0.name==city.name}) else{throw AskChangeError.conflict}}
@@ -361,23 +397,23 @@ enum AskRecoveryOperationScope {
                 // A missing selector cannot turn an ambiguous earlier answer into
                 // permission. Newly named targets can still resolve independently.
                 guard let selector=decision.targetSelector,selector.scope != "previous",(selector.positions ?? []).isEmpty else {
-                    return .init(output:.init(status:"needs_confirmation",complete:false,totalCount:0,records:[],findings:[],message:"needs_review",localOnly:false),response:plain("I couldn’t match every place in that earlier answer. Please name the places you want changed, or ask me to show the list again."),orderedIDs:selection,selectionIsPrivate:selectionIsPrivate,selectionIsOrdered:selectionIsOrdered)
+                    return .init(output:.init(status:"needs_confirmation",complete:false,totalCount:0,records:[],findings:[],message:"needs_review",localOnly:false),response:plain("I couldn’t match every place in that earlier answer. Please name the places you want changed, or ask me to show the list again."),orderedIDs:selection,selectionIsPrivate:selectionIsPrivate,selectionIsOrdered:selectionIsOrdered,displayOrder:selectionIsOrdered ? displayOrder : nil)
                 }
             }
             if proposal.operation != "create",let selector=decision.targetSelector {
                 let scope=AskAgentPermission(entity:proposal.entity,operations:[proposal.operation],fields:proposal.changes.map(\.field),targetIDs:[],instructionQuote:request.text,selector:selector)
                 if !(selector.positions ?? []).isEmpty,let context=request.libraryContext,[AskLibraryPlan.Operation.count,.group,.catalog].contains(context.filters.operation),context.ids.isEmpty {
-                    return .init(output:.init(status:"needs_confirmation",complete:true,totalCount:0,records:[],findings:[],message:"needs_review",localOnly:false),response:plain("Those results weren’t displayed in an order. Show a list before choosing an item by position."),orderedIDs:selection,selectionIsPrivate:selectionIsPrivate,selectionIsOrdered:selectionIsOrdered)
+                    return .init(output:.init(status:"needs_confirmation",complete:true,totalCount:0,records:[],findings:[],message:"needs_review",localOnly:false),response:plain("Those results weren’t displayed in an order. Show a list before choosing an item by position."),orderedIDs:selection,selectionIsPrivate:selectionIsPrivate,selectionIsOrdered:selectionIsOrdered,displayOrder:selectionIsOrdered ? displayOrder : nil)
                 }
                 let permitted:[String]
                 do {permitted=try resolved(scope,reference:humanReferenceSelection)}
                 catch AskChangeError.invalid {
-                    return .init(output:.init(status:"conflict",complete:true,totalCount:0,records:[],findings:[],message:"target_mismatch",localOnly:false),response:plain("No change was applied: the requested record or relationship does not match the saved details."),orderedIDs:selection,appendPreviousResults:true,selectionIsPrivate:selectionIsPrivate,presentation:.init(kind:"action",requestedFields:proposal.changes.map(\.field),returnedFields:[],complete:true,renderedLocally:true),selectionIsOrdered:selectionIsOrdered)
+                    return .init(output:.init(status:"conflict",complete:true,totalCount:0,records:[],findings:[],message:"target_mismatch",localOnly:false),response:plain("No change was applied: the requested record or relationship does not match the saved details."),orderedIDs:selection,appendPreviousResults:true,selectionIsPrivate:selectionIsPrivate,presentation:.init(kind:"action",requestedFields:proposal.changes.map(\.field),returnedFields:[],complete:true,renderedLocally:true),selectionIsOrdered:selectionIsOrdered,displayOrder:selectionIsOrdered ? displayOrder : nil)
                 }
 
                 guard !proposal.targetIDs.isEmpty,Set(proposal.targetIDs).isSubset(of:Set(permitted)) else{throw AskChangeError.permission}
             }else if usesPrivateSelection {
-                return .init(output:.init(status:"needs_confirmation",complete:true,totalCount:0,records:[],findings:[],message:"needs_review",localOnly:false),response:plain("Which of the displayed places should I change?"),orderedIDs:selection,selectionIsPrivate:true,selectionIsOrdered:selectionIsOrdered)
+                return .init(output:.init(status:"needs_confirmation",complete:true,totalCount:0,records:[],findings:[],message:"needs_review",localOnly:false),response:plain("Which of the displayed places should I change?"),orderedIDs:selection,selectionIsPrivate:true,selectionIsOrdered:selectionIsOrdered,displayOrder:selectionIsOrdered ? displayOrder : nil)
             }
             conversationalReplacement=decision.replaceExisting
             let expected=proposal.changes.map {change in AskAgentExpectedChange(field:change.field,source:change.source ?? (change.findingID==nil ? "user" : "verified_finding"),value:change.value,values:change.values)}
@@ -469,7 +505,7 @@ enum AskRecoveryOperationScope {
                 let failure=error as NSError
                 guard ["MKErrorDomain",NSURLErrorDomain].contains(failure.domain) else{throw error}
                 maps=[:];mapsQuery=nil
-                return .init(output:.init(status:"unavailable",complete:false,totalCount:0,records:[],findings:[],message:"unavailable",localOnly:false),response:plain("Apple Maps couldn’t complete that search. Earlier changes remain saved."),orderedIDs:selection,appendPreviousResults:true,selectionIsPrivate:selectionIsPrivate,selectionIsOrdered:selectionIsOrdered)
+                return .init(output:.init(status:"unavailable",complete:false,totalCount:0,records:[],findings:[],message:"unavailable",localOnly:false),response:plain("Apple Maps couldn’t complete that search. Earlier changes remain saved."),orderedIDs:selection,appendPreviousResults:true,selectionIsPrivate:selectionIsPrivate,selectionIsOrdered:selectionIsOrdered,displayOrder:selectionIsOrdered ? displayOrder : nil)
             }
             try Task.checkCancellation()
             try await AskRecoveryActivity.check()
@@ -483,7 +519,7 @@ enum AskRecoveryOperationScope {
             let records=choices.map {AskAgentRecord(id:$0.id,name:$0.name,city:$0.city,cuisines:[],kind:"maps",detail:$0.address)}
             var response=plain(records.isEmpty ? "No Maps match was found." : "")
             response.mapChoices=choices
-            return .init(output:.init(status:records.isEmpty ? "empty" : "success",complete:results.count<=6,totalCount:results.count,records:records,findings:[],message:records.isEmpty ? "not_found" : "ok",localOnly:false),response:response,orderedIDs:selection,selectionIsOrdered:selectionIsOrdered)
+            return .init(output:.init(status:records.isEmpty ? "empty" : "success",complete:results.count<=6,totalCount:results.count,records:records,findings:[],message:records.isEmpty ? "not_found" : "ok",localOnly:false),response:response,orderedIDs:selection,selectionIsOrdered:selectionIsOrdered,displayOrder:selectionIsOrdered ? displayOrder : nil)
         case "propose_changes":return try change(Data(call.arguments.utf8),intent:intent)
         default:throw AskError.invalidEvidence
         }
@@ -498,17 +534,28 @@ enum AskRecoveryOperationScope {
         let view=try adapter.readView(includeDetails:true)
         var matched:[AskPersonalPlace]=[],result:AskLibraryToolResult?
         if entity=="place" {
-            let selected=selectionIDs ?? (plan.scope == .previous ? selection : nil)
+            var selected=selectionIDs ?? (plan.scope == .previous ? selection : nil)
             if let selected {guard Set(selected).count==selected.count,Set(selected).isSubset(of:Set(view.snapshot.places.map(\.id))) else{return .init(output:.init(status:"stale",complete:false,totalCount:0,records:[],findings:[],message:"target_mismatch",localOnly:false),response:plain("Those results have changed. Ask for the list again."),orderedIDs:[],selectionIsOrdered:false)}}
-            let context=selected.map {AskLibraryContext(ids:selectionIsOrdered && $0.count<=AskCollectionPage.maximumRenderedRecords ? $0 : [],filters:plan,selectionIDs:$0)}
+            var readPlan=plan
+            if !plan.positions.isEmpty {
+                let shown=displayOrder ?? selection
+                guard plan.scope == .previous,selectionIsOrdered,!shown.isEmpty,Set(shown).isSubset(of:Set(selection)),plan.positions.allSatisfy({$0<=shown.count}),Set(shown).isSubset(of:Set(view.snapshot.places.map(\.id))) else {
+                    return .init(output:.init(status:"stale",complete:false,totalCount:0,records:[],findings:[],message:"target_mismatch",localOnly:false),response:plain("That answer didn’t show an ordered place list. Ask for the places first."),orderedIDs:[],selectionIsOrdered:false)
+                }
+                // Explicit member narrowing is a predicate too, never a new
+                // ordinal numbering. Resolve against the original occurrences.
+                selected=plan.positions.map {shown[$0-1]}.filter {selectionIDs?.contains($0) ?? true}.reduce(into:[String]()) {if !$0.contains($1) {$0.append($1)}}
+                readPlan.positions=[]
+            }
+            let context=selected.map {ids in AskLibraryContext(ids:selectionIsOrdered && ids.count<=AskCollectionPage.maximumRenderedRecords ? ids : [],filters:readPlan,selectionIDs:ids,displayOrder:selectionIsOrdered && plan.positions.isEmpty && Set(ids)==Set(selection) ? displayOrder : nil)}
             let filtered=selected.map {ids in AskLibrarySnapshot(places:view.snapshot.places.filter {ids.contains($0.id)},totalCount:ids.count,cityNames:view.snapshot.cityNames)} ?? view.snapshot
-            result=try AskLibraryReadTools.execute(plan,snapshot:filtered,context:context,requireUniqueDetails:false,allowLargeResults:true,allowStoredFieldPresence:supportsCollectionQueryV2)
+            result=try AskLibraryReadTools.execute(readPlan,snapshot:filtered,context:context,requireUniqueDetails:false,allowLargeResults:true,allowStoredFieldPresence:supportsCollectionQueryV2)
             guard result!.status == .success else {
                 return .init(output:.init(status:result!.status == .stale ? "stale" : result!.status == .ambiguous ? "ambiguous" : "partial",complete:false,totalCount:result!.totalCount,records:[],findings:[],message:"unavailable",localOnly:false),response:try AskLibraryReadTools.response(result!,tools:AskReadTools(request:request.collectionReadVersion(),index:view.index)),orderedIDs:[],selectionIsOrdered:false)
             }
             matched=result!.records
         } else {
-            guard ["city","neighborhood"].contains(entity),![.compare,.group,.catalog].contains(plan.operation) else{throw AskError.invalidEvidence}
+            guard ["city","neighborhood"].contains(entity),plan.groupBy==nil,![.compare,.group,.catalog].contains(plan.operation) else{throw AskError.invalidEvidence}
             var values=try objects(entity)
             if let selected=selectionIDs ?? (plan.scope == .previous ? selection : nil) {
                 let available=Set(values.compactMap {($0.value(forKey:"id") as? UUID)?.uuidString})
@@ -520,6 +567,15 @@ enum AskRecoveryOperationScope {
                 let city=entity=="city" ? name : (object.value(forKey:"feastList") as? FeastList)?.displayName ?? ""
                 matched.append(.init(id:id.uuidString,name:name,status:nil,type:nil,cuisines:[],city:city,neighborhood:entity=="neighborhood" ? name : ""))
             }
+            if !plan.positions.isEmpty {
+                guard plan.scope == .previous,selectionIsOrdered else{throw AskError.invalidEvidence}
+                let shown=displayOrder ?? selection
+                guard plan.positions.allSatisfy({$0<=shown.count}) else{throw AskError.invalidEvidence}
+                let ids=plan.positions.map {shown[$0-1]}.reduce(into:[String]()) {if !$0.contains($1) {$0.append($1)}}
+                let byID=Dictionary(uniqueKeysWithValues:matched.map {($0.id,$0)})
+                guard ids.allSatisfy({byID[$0] != nil}) else{throw AskError.invalidEvidence}
+                matched=ids.compactMap {byID[$0]}
+            }
             if let city=plan.city {
                 switch AskCityIdentity.resolve(city,available:view.snapshot.cities) {
                 case .matched(let canonical):matched=matched.filter {AskCityIdentity.key($0.city)==AskCityIdentity.key(canonical)}
@@ -527,19 +583,17 @@ enum AskRecoveryOperationScope {
                 case .ambiguous:return .init(output:.init(status:"ambiguous",complete:false,totalCount:0,records:[],findings:[],message:"ambiguous",localOnly:false),response:plain("Which saved city do you mean?"),orderedIDs:[],selectionIsOrdered:false)
                 }
             }
+            if let neighborhood=plan.neighborhood {
+                guard entity=="neighborhood" else{throw AskError.invalidEvidence}
+                matched=matched.filter {AskCityIdentity.key($0.neighborhood)==AskCityIdentity.key(neighborhood)}
+            }
             if let name=plan.name {matched=matched.filter {AskCityIdentity.key($0.name)==AskCityIdentity.key(name)}}
             if let search=plan.searchText {matched=matched.filter {$0.name.range(of:search,options:[.caseInsensitive,.diacriticInsensitive]) != nil}}
-            matched.sort {$0.name == $1.name ? $0.id<$1.id : $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending}
+            if plan.positions.isEmpty {matched.sort {$0.name == $1.name ? $0.id<$1.id : $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending}}
             if let names=plan.names {
                 var selected:[AskPersonalPlace]=[]
                 for name in names {let matches=matched.filter {AskCityIdentity.key($0.name)==AskCityIdentity.key(name)};guard matches.count==1 else{throw AskError.invalidEvidence};selected.append(matches[0])}
                 matched=selected
-            }
-            if !plan.positions.isEmpty {
-                guard plan.scope == .previous,selectionIsOrdered else{throw AskError.invalidEvidence}
-                let ordered=selection.compactMap {id in matched.first {$0.id==id}}
-                guard plan.positions.allSatisfy({$0<=ordered.count}) else{throw AskError.invalidEvidence}
-                matched=plan.positions.map {ordered[$0-1]}
             }
             guard plan.status==nil,plan.placeType==nil,plan.cuisine==nil,plan.tag==nil else{throw AskError.invalidEvidence}
         }
@@ -562,7 +616,7 @@ enum AskRecoveryOperationScope {
             // lists with the same projected rows can be appended as one page set.
             var identity=plan;identity.offset=nil;identity.limit=nil;identity.snapshot=nil
             var relevant=Set<String>()
-            if plan.searchText != nil {relevant.formUnion(["neighborhood","note","status","type","tags"])}
+            if plan.searchText != nil {relevant.formUnion(["neighborhood","note","status","type","tags","website","instagram"])}
             if plan.tag != nil {relevant.insert("tags")}
             if plan.neighborhood != nil {relevant.insert("neighborhood")}
             if plan.status != nil {relevant.insert("status")}
@@ -571,10 +625,10 @@ enum AskRecoveryOperationScope {
             // Keep raw filter values, including blank and invalid stored links.
             // Hash the eligible catalog independently of a narrowing previous
             // selection, so subsequent pages cannot lose the original scope.
-            struct FilterRecord:Encodable {let record:AskAgentRecord;let storedPresenceValue:String?}
+            struct FilterRecord:Encodable {let record:AskAgentRecord;let storedPresenceValue:String?;let searchWebsite:String?;let searchInstagram:String?}
             struct Snapshot:Encodable {let entity:String,query:AskLibraryPlan;let selectionIDs:[String]?;let records:[AskAgentRecord];let filterRecords:[FilterRecord]}
             let filterRecords=view.snapshot.places.sorted {$0.id<$1.id}.map {record in
-                FilterRecord(record:.collection(record,fields:relevant.sorted()),storedPresenceValue:plan.fieldPresence.map {$0.field == .instagram ? record.instagramURL : record.websiteURL} ?? nil)
+                FilterRecord(record:.collection(record,fields:relevant.sorted()),storedPresenceValue:plan.fieldPresence.map {$0.field == .instagram ? record.instagramURL : record.websiteURL} ?? nil,searchWebsite:plan.searchText==nil ? nil : record.websiteURL,searchInstagram:plan.searchText==nil ? nil : record.instagramURL)
             }
             snapshotData=try encoder.encode(Snapshot(entity:entity,query:identity,selectionIDs:selectionIDs,records:records,filterRecords:filterRecords))
         } else {snapshotData=try encoder.encode(records)}
@@ -589,7 +643,7 @@ enum AskRecoveryOperationScope {
             let summary=response.paragraphs.flatMap(\.spans).compactMap {if case .text(let value)=$0{return value};return nil}.joined(separator:"\n")
             let rendered = entity != "place" || plan.operation == .catalog || response.libraryContext?.selectionIDs != nil
             guard rendered,summary.utf16.count<=8000 else{return .init(output:.init(status:"partial",complete:false,totalCount:records.count,records:[],findings:[],message:"unavailable",localOnly:false),response:response,orderedIDs:[],selectionIsOrdered:false)}
-            selection=records.map(\.id);selectionIsOrdered=false;selectionIsPrivate=true
+            selection=records.map(\.id);selectionIsOrdered=false;displayOrder=nil;selectionIsPrivate=true
             let total=plan.operation == .catalog ? view.snapshot.totalCount : records.count
             return .init(output:.init(status:total==0 ? "empty" : "success",complete:true,totalCount:total,records:[],findings:[],message:total==0 ? "not_found" : "ok",localOnly:false,summary:summary),response:response,orderedIDs:selection,selectionIsPrivate:true,presentation:.init(kind:plan.operation == .count && plan.groupBy==nil || plan.operation == .catalog ? "count" : "groups",requestedFields:plan.fields,returnedFields:plan.groupBy.map {[$0]} ?? [],complete:true,renderedLocally:true),selectionIsOrdered:false)
         }
@@ -616,16 +670,26 @@ enum AskRecoveryOperationScope {
         if plan.operation == .answer {response.paragraphs=[]}
         response.collectionPage = .init(snapshot:fingerprint,totalCount:records.count,offset:offset,returnedCount:page.count,nextOffset:next)
         // Keep the complete membership for scope=previous, even when transport is paged.
-        if offset==0 {collectionPageProgress[fingerprint]=0}
-        if collectionPageProgress[fingerprint]==offset {collectionPageProgress[fingerprint]=end}
+        if offset==0 {collectionPageProgress[fingerprint]=0;collectionPageDisplayOrders[fingerprint]=[]}
+        if collectionPageProgress[fingerprint]==offset {
+            collectionPageProgress[fingerprint]=end
+            let shown=response.libraryContext?.displayOrder ?? response.libraryContext?.ids ?? page.map(\.id)
+            collectionPageDisplayOrders[fingerprint,default:[]] += shown
+        }
         selection=records.map(\.id);selectionIsOrdered=collectionPageProgress[fingerprint]==records.count && records.count<=AskCollectionPage.maximumRenderedRecords;selectionIsPrivate=true
+        displayOrder=nil
+        if selectionIsOrdered,let shown=collectionPageDisplayOrders[fingerprint],Set(shown)==Set(selection) {
+            selection=shown.reduce(into:[String]()) {if !$0.contains($1) {$0.append($1)}}
+            displayOrder=shown==selection ? nil : shown
+        }
         let output=AskAgentResult(status:records.isEmpty ? "empty" : "success",complete:offset==0 && next==nil,totalCount:records.count,records:page,findings:[],message:records.isEmpty ? "not_found" : "ok",localOnly:false,offset:offset,returnedCount:page.count,nextOffset:next,snapshot:fingerprint)
-        return .init(output:output,response:response,orderedIDs:selection,selectionIsPrivate:true,presentation:.init(kind:plan.operation == .details || plan.operation == .compare ? "details" : "rows",requestedFields:plan.fields,returnedFields:plan.fields.filter {$0 != "address"},complete:offset==0 && next==nil,renderedLocally:plan.operation != .answer),selectionIsOrdered:selectionIsOrdered)
+        return .init(output:output,response:response,orderedIDs:selection,selectionIsPrivate:true,presentation:.init(kind:plan.operation == .details || plan.operation == .compare ? "details" : "rows",requestedFields:plan.fields,returnedFields:plan.fields.filter {$0 != "address"},complete:offset==0 && next==nil,renderedLocally:plan.operation != .answer),selectionIsOrdered:selectionIsOrdered,displayOrder:selectionIsOrdered ? displayOrder : nil)
     }
     private func query(_ data:Data,intent:AskAgentInterpretation)throws->AskAgentExecution {
         struct Query:Decodable {let entity:String,query:AskLibraryPlan,selectionIDs:[String]?}
         let supplied=try JSONDecoder().decode(Query.self,from:data)
         if fullCollectionContext {return try collectionQuery(supplied.entity,plan:supplied.query,selectionIDs:supplied.selectionIDs)}
+        _ = try supplied.query.validated() // Validate original ordinals before resolving/normalizing them.
         guard supplied.query.offset==nil,supplied.query.limit==nil,supplied.query.searchText==nil,supplied.query.tag==nil,supplied.query.snapshot==nil,supplied.query.fieldPresence==nil else{throw AskError.invalidEvidence}
         if supplied.entity != "place" {
             guard ["city","neighborhood"].contains(supplied.entity) else {throw AskError.invalidEvidence}
@@ -647,35 +711,44 @@ enum AskRecoveryOperationScope {
             if let name=supplied.query.name {records=records.filter {AskCityIdentity.key(($0.value(forKey:"name") as? String) ?? "")==AskCityIdentity.key(name)}}
             if let ids=supplied.selectionIDs {records=records.filter {($0.value(forKey:"id") as? UUID).map {ids.contains($0.uuidString)} == true}}
             let names=records.compactMap {$0.value(forKey:"name") as? String},ids=records.compactMap {($0.value(forKey:"id") as? UUID)?.uuidString}
-            selection=ids
+            selection=ids;displayOrder=nil
             selectionIsPrivate = supplied.entity=="neighborhood" || (supplied.query.scope == .previous && selectionIsPrivate)
             let aggregate=supplied.query.operation == .count,limited = !aggregate && (records.count>200 || names.joined(separator:"\n").count>3000)
             selectionIsOrdered = !aggregate && !limited
             let text=aggregate ? "\(records.count) saved \(supplied.entity == "city" ? "cities" : "neighborhoods")." : limited ? "\(records.count) saved items match. Narrow the request by city or name to show the complete list." : names.isEmpty ? "No saved \(supplied.entity == "city" ? "cities" : "neighborhoods") match that request." : names.joined(separator:"\n")
             // Neighborhood names/membership are not part of the approved uploaded compact index.
             let presentation=AskToolPresentation(kind:aggregate ? "count" : "rows",requestedFields:supplied.query.fields,returnedFields:aggregate || limited ? [] : ["name"],complete:!limited,renderedLocally:!limited)
-            if selectionIsPrivate {return .init(output:.localPrivate(complete:!limited),response:plain(text),orderedIDs:ids,selectionIsPrivate:true,presentation:presentation,selectionIsOrdered:selectionIsOrdered)}
+            if selectionIsPrivate {return .init(output:.localPrivate(complete:!limited),response:plain(text),orderedIDs:ids,selectionIsPrivate:true,presentation:presentation,selectionIsOrdered:selectionIsOrdered,displayOrder:selectionIsOrdered ? displayOrder : nil)}
             let cloud=aggregate || limited ? [] : records.compactMap {object->AskAgentRecord? in guard let id=object.value(forKey:"id") as? UUID,let name=object.value(forKey:"name") as? String else{return nil};return .init(id:id.uuidString,name:name,city:name,cuisines:[],kind:"city")}
-            return .init(output:.init(status:limited ? "partial" : ids.isEmpty ? "empty" : "success",complete:!limited,totalCount:ids.count,records:cloud,findings:[],message:ids.isEmpty ? "not_found" : "ok",localOnly:false),response:plain(text),orderedIDs:ids,presentation:presentation,selectionIsOrdered:selectionIsOrdered)
+            return .init(output:.init(status:limited ? "partial" : ids.isEmpty ? "empty" : "success",complete:!limited,totalCount:ids.count,records:cloud,findings:[],message:ids.isEmpty ? "not_found" : "ok",localOnly:false),response:plain(text),orderedIDs:ids,presentation:presentation,selectionIsOrdered:selectionIsOrdered,displayOrder:selectionIsOrdered ? displayOrder : nil)
         }
         let view=try adapter.readView(),catalog=view.snapshot
         var plan=supplied.query
         let privateFields=Set(plan.fields).intersection(["note","tags"])
         plan.fields.removeAll {privateFields.contains($0)}
-        let selected=supplied.selectionIDs ?? (plan.scope == .previous ? selection : nil)
+        var selected=supplied.selectionIDs ?? (plan.scope == .previous ? selection : nil)
         if let selected {
             guard Set(selected).count==selected.count,Set(selected).isSubset(of:Set(catalog.places.map(\.id))) else {
                 selection=[];selectionIsOrdered=false
                 return .init(output:.init(status:"stale",complete:false,totalCount:0,records:[],findings:[],message:"target_mismatch",localOnly:false),response:plain("Those saved places could not be identified safely. Ask for the list again."),orderedIDs:[],selectionIsOrdered:false)
             }
         }
+        if !plan.positions.isEmpty {
+            let shown=displayOrder ?? selection
+            guard plan.scope == .previous,selectionIsOrdered,!shown.isEmpty,Set(shown).isSubset(of:Set(selection)),plan.positions.allSatisfy({$0>0 && $0<=shown.count}),Set(shown).isSubset(of:Set(catalog.places.map(\.id))) else {
+                return .init(output:.init(status:"stale",complete:false,totalCount:0,records:[],findings:[],message:"target_mismatch",localOnly:false),response:plain("That answer didn’t show an ordered place list. Ask for the places first."),orderedIDs:[],selectionIsOrdered:false)
+            }
+            selected=plan.positions.map {shown[$0-1]}.filter {supplied.selectionIDs?.contains($0) ?? true}.reduce(into:[String]()) {if !$0.contains($1) {$0.append($1)}}
+            plan.positions=[]
+        }
         let hasOrder=selected.map {$0.count<=200} == true && (supplied.selectionIDs != nil || selectionIsOrdered)
-        var context=selected.map {AskLibraryContext(ids:hasOrder ? $0 : [],filters:plan,selectionIDs:hasOrder ? nil : $0)}
+        var context=selected.map {ids in AskLibraryContext(ids:hasOrder ? ids : [],filters:plan,selectionIDs:hasOrder ? nil : ids,displayOrder:hasOrder && Set(ids)==Set(selection) ? displayOrder : nil)}
         if selectionIsPrivate,plan.scope == .previous || (supplied.selectionIDs != nil && plan.name==nil && plan.names==nil && plan.city==nil) {context?.excludesExternalReferences=true}
         let filtered=selected.map {ids in AskLibrarySnapshot(places:catalog.places.filter {ids.contains($0.id)},totalCount:catalog.places.filter {ids.contains($0.id)}.count,cityNames:catalog.cityNames)} ?? catalog
         var result=try AskLibraryReadTools.execute(plan,snapshot:filtered,context:context,requireUniqueDetails:false)
         if result.excludesExternalReferences,plan.fields.allSatisfy(AskBusinessRequest.allowedFields.contains),plan.status==nil,plan.placeType==nil,plan.neighborhood==nil,context?.excludesExternalReferences != true {result.excludesExternalReferences=false}
         let aggregate=plan.operation == .count || plan.operation == .group || plan.operation == .catalog
+        displayOrder=nil
         selection=result.status == .success || result.status == .limited ? result.records.map(\.id) : []
         selectionIsOrdered = !aggregate && result.status == .success
         selectionIsPrivate=result.excludesExternalReferences || !privateFields.isEmpty
@@ -698,21 +771,23 @@ enum AskRecoveryOperationScope {
         if !rendered {selectionIsOrdered=false}
         let presentation=AskToolPresentation(kind:kind,requestedFields:supplied.query.fields,returnedFields:rendered ? (aggregate ? plan.groupBy.map {[$0]} ?? [] : supplied.query.fields) : [],complete:rendered,renderedLocally:rendered)
         if plan.groupBy != nil,plan.operation != .group,plan.operation != .count {
-            selection=response.paragraphs.flatMap(\.spans).compactMap {span->String? in if case .place(let id)=span{return id};return nil}.reduce(into:[]) {if !$0.contains($1){$0.append($1)}}
+            let shown=response.paragraphs.flatMap(\.spans).compactMap {span->String? in if case .place(let id)=span{return id};return nil}
+            selection=shown.reduce(into:[]) {if !$0.contains($1){$0.append($1)}}
+            displayOrder=shown==selection ? nil : shown
         }
         let storedFindings=aggregate || !rendered ? [] : result.records.flatMap {record in plan.fields.compactMap {field->AskVerifiedFinding? in
             let value=field=="instagram" ? record.instagramURL.flatMap(InstagramWebsiteParser.profileURL) : field=="website" ? record.websiteURL.flatMap {InstagramWebsiteClient.websiteURL($0)?.absoluteString} : nil
             guard let value else{return nil};return .init(id:UUID(),recordID:record.id,identity:.init(record),field:field,value:value,evidenceURL:value,verification:"saved",originatingTurn:request.performanceID ?? UUID())
         }}
         response.verifiedPublicFindings=storedFindings.isEmpty ? nil : storedFindings
-        if result.excludesExternalReferences || !privateFields.isEmpty {response.verifiedPublicFindings=nil;return .init(output:.localPrivate(complete:rendered),response:response,orderedIDs:selection,selectionIsPrivate:true,presentation:presentation,selectionIsOrdered:selectionIsOrdered)}
+        if result.excludesExternalReferences || !privateFields.isEmpty {response.verifiedPublicFindings=nil;return .init(output:.localPrivate(complete:rendered),response:response,orderedIDs:selection,selectionIsPrivate:true,presentation:presentation,selectionIsOrdered:selectionIsOrdered,displayOrder:selectionIsOrdered ? displayOrder : nil)}
         let count=plan.operation == .catalog ? result.totalCount : result.records.count
         // Aggregates are computed over the full local membership. Do not serialize
         // that membership or silently present a bounded prefix as a complete list.
         let transport=aggregate || !rendered ? [] : result.records
         let cloud=output(rendered ? (count==0 ? "empty" : "success") : result.status == .ambiguous ? "ambiguous" : "partial",transport,complete:rendered,publicFindings:storedFindings)
         let measured=AskAgentResult(status:cloud.status,complete:cloud.complete,totalCount:count,records:cloud.records,findings:cloud.findings,message:cloud.message,localOnly:false)
-        return .init(output:measured,response:response,orderedIDs:selection,presentation:presentation,selectionIsOrdered:selectionIsOrdered)
+        return .init(output:measured,response:response,orderedIDs:selection,presentation:presentation,selectionIsOrdered:selectionIsOrdered,displayOrder:selectionIsOrdered ? displayOrder : nil)
     }
     /// Releasing a privately selected identity requires the user's complete business name,
     /// never a substring of another word. This does not determine conversational intent.
@@ -737,7 +812,7 @@ enum AskRecoveryOperationScope {
         guard (1...6).contains(value.targetIDs.count),Set(value.targetIDs).count==value.targetIDs.count,(1...4).contains(value.fields.count),value.fields.allSatisfy(AskBusinessRequest.allowedFields.contains),intent.sourcePolicy != "local_only",value.sourcePolicy=="stored_only" || intent.sourcePolicy=="public_if_missing" else {throw AskError.invalidEvidence}
         let all=try adapter.personalPlaces(),records=try value.targetIDs.map {id in guard let record=all.first(where:{$0.id==id}) else {throw AskChangeError.missing};return record}
         if !fullCollectionContext,selectionIsPrivate,!Set(value.targetIDs).isDisjoint(with:Set(selection)) {
-            guard records.allSatisfy({Self.explicitlyNames($0.name,in:request.text)}) else {return .init(output:.localPrivate(),response:plain("Please name the places you’d like me to look up online."),orderedIDs:selection,selectionIsPrivate:true,selectionIsOrdered:selectionIsOrdered)}
+            guard records.allSatisfy({Self.explicitlyNames($0.name,in:request.text)}) else {return .init(output:.localPrivate(),response:plain("Please name the places you’d like me to look up online."),orderedIDs:selection,selectionIsPrivate:true,selectionIsOrdered:selectionIsOrdered,displayOrder:selectionIsOrdered ? displayOrder : nil)}
         }
         selectionIsPrivate=false
         let requestedKeys=Set(value.targetIDs.flatMap {id in value.fields.map {id+":"+$0}})
@@ -788,12 +863,13 @@ enum AskRecoveryOperationScope {
             }
         }
         for id in value.targetIDs where !researchOrder.contains(id) {researchOrder.append(id)}
-        selection=researchOrder;selectionIsOrdered=true
+        selection=researchOrder;selectionIsOrdered=true;displayOrder=nil
         let merged=Self.merge(researchFieldOrder.compactMap {researchResults[$0]})
         let current=findings.filter {value.targetIDs.contains($0.recordID)&&value.fields.contains($0.field)}
-        return .init(output:output(stopped ? stopStatus : "success",records,complete:!stopped,publicFindings:current,message:stopped ? "budget_limit" : "ok"),response:merged,orderedIDs:selection,appendPreviousResults:false,selectionIsOrdered:selectionIsOrdered)
+        return .init(output:output(stopped ? stopStatus : "success",records,complete:!stopped,publicFindings:current,message:stopped ? "budget_limit" : "ok"),response:merged,orderedIDs:selection,appendPreviousResults:false,selectionIsOrdered:selectionIsOrdered,displayOrder:selectionIsOrdered ? displayOrder : nil)
     }
     private func change(_ data:Data,intent:AskAgentInterpretation)throws->AskAgentExecution {
+        try pruneStaleFindings()
         var p=try JSONDecoder().decode(AskChangeProposal.self,from:data)
         guard let match=prepared.enumerated().first(where:{entry in
             let (permission,ids)=entry.element
@@ -824,7 +900,7 @@ enum AskRecoveryOperationScope {
             sectionIDs=Set(try objects("neighborhood").filter {AskCityIdentity.key(($0.value(forKey:"name") as? String) ?? "")==AskCityIdentity.key(name) && ($0.value(forKey:"feastList") as? FeastList)?.id?.uuidString==cityID}.compactMap {($0.value(forKey:"id") as? UUID)?.uuidString})
         }
         guard p.sectionID==nil ? permission.destinationNeighborhood==nil : sectionIDs.contains(p.sectionID!) else {throw AskChangeError.permission}
-        if p.operation=="create",p.entity=="place" {guard permission.mapQuery==mapsQuery,let id=p.mapMatchID,maps[id] != nil,(conversationalExecution || maps.count==1) else {return .init(output:.init(status:"needs_confirmation",complete:true,totalCount:0,records:[],findings:[],message:"needs_review",localOnly:false),response:plain("Choose the exact Maps result before adding this place."),orderedIDs:selection,selectionIsOrdered:selectionIsOrdered)}}
+        if p.operation=="create",p.entity=="place" {guard permission.mapQuery==mapsQuery,let id=p.mapMatchID,maps[id] != nil,(conversationalExecution || maps.count==1) else {return .init(output:.init(status:"needs_confirmation",complete:true,totalCount:0,records:[],findings:[],message:"needs_review",localOnly:false),response:plain("Choose the exact Maps result before adding this place."),orderedIDs:selection,selectionIsOrdered:selectionIsOrdered,displayOrder:selectionIsOrdered ? displayOrder : nil)}}
         var actions:[AskCollectionAction]=[]
         var failure:String?,failedTarget:String?
         // One leaf executor, including per-target finding values and independently undoable outcomes.
@@ -894,7 +970,7 @@ enum AskRecoveryOperationScope {
         for id in actions.flatMap(\.targetIDs) where !mutationOrder.contains(id) {mutationOrder.append(id)}
         for action in actions {for id in action.targetIDs {mutationStates[id]=action.state == .needsConfirmation ? "needs_confirmation" : action.state.rawValue}}
         if let failedTarget {mutationStates[failedTarget]="failed"}
-        selection=mutationOrder;selectionIsOrdered=true
+        selection=mutationOrder;selectionIsOrdered=true;displayOrder=nil
         // Only a bounded execution acknowledgement returns to the model. No changed field values,
         // private-derived IDs, counts, before-images or action previews leave the device.
         let createdRecords:[AskAgentRecord] = ["city","neighborhood"].contains(p.entity) && p.operation=="create" ? actions.filter {$0.state == .applied}.flatMap(\.targetIDs).compactMap {id in
@@ -926,19 +1002,22 @@ enum AskRecoveryOperationScope {
             if finding.identity==current {return finding}
             // Only the exact researched website that actually committed may
             // advance its website identity; unrelated identity drift stays stale.
-            guard p.entity=="place",p.operation=="update",appliedTargets.contains(record.id),finding.field=="website",
-                  p.changes.contains(where:{$0.field=="website" && ($0.source=="verified_finding" || $0.findingID==finding.id.uuidString) && ($0.value==nil || $0.value==finding.value)}),
-                  record.websiteURL==finding.value,finding.identity.name==current.name,
+            guard p.entity=="place",p.operation=="update",appliedTargets.contains(record.id),
+                  let website=findings.first(where:{site in site.recordID==record.id && site.field=="website" && site.identity==finding.identity && site.value==record.websiteURL && p.changes.contains(where:{change in change.field=="website" && (change.source=="verified_finding" || change.findingID==site.id.uuidString) && (change.value==nil || change.value==site.value)})}),
+                  record.websiteURL==website.value,finding.identity.name==current.name,
                   finding.identity.city==current.city,finding.identity.applePlaceID==current.applePlaceID else{return nil}
             return .init(id:finding.id,recordID:finding.recordID,identity:current,field:finding.field,value:finding.value,evidenceURL:finding.evidenceURL,verification:finding.verification,originatingTurn:finding.originatingTurn,externallyReusable:finding.externallyReusable)
         }
+        // The exact own-write identity rebase above must also update local
+        // evidence; otherwise an idempotent repeated tool loses its receipt path.
+        for refreshed in retained {if let index=findings.firstIndex(where:{$0.id==refreshed.id}) {findings[index]=refreshed}}
         if !retained.isEmpty {
             response.verifiedPublicFindings=retained
             var seen=Set<String>()
             response.candidates=retained.compactMap {seen.insert($0.recordID).inserted ? tools.localCandidate($0.recordID) : nil}
         }
         }
-        let execution=AskAgentExecution(output:ack,response:response,orderedIDs:selection,appendPreviousResults:true,selectionIsPrivate:selectionIsPrivate,outcomes:selection.compactMap {id in mutationStates[id].map {.init(id:id,state:$0)}},effectiveTargetIDs:p.targetIDs,selectionIsOrdered:selectionIsOrdered)
+        let execution=AskAgentExecution(output:ack,response:response,orderedIDs:selection,appendPreviousResults:true,selectionIsPrivate:selectionIsPrivate,outcomes:selection.compactMap {id in mutationStates[id].map {.init(id:id,state:$0)}},effectiveTargetIDs:p.targetIDs,selectionIsOrdered:selectionIsOrdered,displayOrder:selectionIsOrdered ? displayOrder : nil)
         return execution
     }
     private static func trace(_ root:UUID,_ id:String)->UUID {
