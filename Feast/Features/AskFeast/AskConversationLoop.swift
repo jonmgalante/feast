@@ -381,6 +381,13 @@ struct AskConversationLoop:Sendable {
                         }else if !["applied","unchanged"].contains(value.output.status) {state.unresolvedChanges.insert(call.callID)}
                         if let fields=value.presentation?.requestedFields {state.taskFields=fields}
                     }
+                    // Evidence retention is not another query or a displayed
+                    // selection. Keep the current query provenance and ordering;
+                    // the executor likewise keeps its selection unchanged.
+                    let retainedQuery=call.name=="retain_findings" && value.output.status=="success" && state.latest?.libraryContext != nil ? state.latest : nil
+                    if retainedQuery != nil {
+                        value.orderedIDs=state.ordered;value.selectionIsOrdered=state.selectionIsOrdered;value.selectionIsPrivate=state.privateScope
+                    }
                     if let response=value.response {
                         for candidate in response.candidates {state.available[candidate.id]=candidate}
                         // A successful mutation invalidates earlier read snapshots. Keep
@@ -406,6 +413,10 @@ struct AskConversationLoop:Sendable {
                             if let remaining=page.nextOffset {merged.paragraphs.append(.init(id:"collection-page",spans:[.text("Showing \(remaining) of \(page.totalCount) matching saved places. More results remain.")],sourceIDs:[]))}
                             state.latest=merged
                         } else {state.latest=value.appendPreviousResults ? AskAgentLoop.merged(state.latest,response) : response}
+                        if let retainedQuery {
+                            state.latest?.libraryContext=retainedQuery.libraryContext
+                            state.latest?.collectionPage=retainedQuery.collectionPage
+                        }
                     }
                     for outcome in value.outcomes ?? [] {if let i=state.durableOutcomes.firstIndex(where:{$0.id==outcome.id}) {state.durableOutcomes[i]=outcome}else{state.durableOutcomes.append(outcome)}}
                     if !state.durableActions.isEmpty {let actions=state.durableActions;state.latest?.collectionActions=actions}
@@ -462,7 +473,8 @@ struct AskConversationLoop:Sendable {
                 response.paragraphs=[rendered]
                 let byID=Dictionary(uniqueKeysWithValues:response.candidates.map {($0.id,$0)})
                 let mentioned=Set(rendered.spans.compactMap {span->String? in if case .place(let id)=span {return id};return nil})
-                response.candidates=references.compactMap {byID[$0]}+response.candidates.filter {!references.contains($0.id) && mentioned.contains($0.id)}
+                let supporting=mentioned.union(response.supplementalFindingIDs)
+                response.candidates=references.compactMap {byID[$0]}+response.candidates.filter {!references.contains($0.id) && supporting.contains($0.id)}
                 if let previous=response.libraryContext {response.libraryContext = .init(ids:references,filters:previous.filters,excludesExternalReferences:true)}
                 state.selectionIsOrdered=true;state.ordered=references;state.referencesIncomplete=nil
             } else if explicitAnswerSelection {

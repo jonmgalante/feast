@@ -242,6 +242,11 @@ struct AskResponse: Codable, Equatable, Sendable {
             if ["Review this change before applying it.","Saved.","Undone."].contains(summary) {summary=text}
         }
     }
+    /// Retained findings are independently verified evidence, not necessarily
+    /// prose mentions or native query members. They never grant edit authority.
+    var supplementalFindingIDs:Set<String> {
+        Set((verifiedPublicFindings ?? []).map(\.recordID)).subtracting(Set(libraryContext?.ids ?? []))
+    }
     var layout:AskResponseLayout {
         if let fieldActions,!fieldActions.isEmpty {return fieldActions.allSatisfy {$0.outcome == .ready || $0.outcome == .alreadySaved} ? .lookup : .action}
         return presentation ?? (candidates.count > 1 ? .list : .direct)
@@ -393,22 +398,25 @@ struct AskReadTools: Sendable {
         response.fieldActions=response.fieldActions.map {$0.filter {available.contains($0.finding.recordID)}}
         response.verifiedPublicFindings=response.verifiedPublicFindings.map {$0.filter {available.contains($0.recordID)}}
         response.answerMentionIDs=response.answerMentionIDs.map {$0.filter {available.contains($0)}}
-        let mentions=Set(response.answerMentionIDs ?? [])
-        if response.libraryContext?.ids != response.candidates.map(\.id).filter({!mentions.contains($0)}) {response.libraryContext=nil}
+        let supplemental=Set(response.answerMentionIDs ?? []).union(response.supplementalFindingIDs)
+        if response.libraryContext?.ids != response.candidates.map(\.id).filter({!supplemental.contains($0)}) {response.libraryContext=nil}
         return response
     }
     func checked(_ response: AskResponse, validationTrace:AskPipelineTrace?=nil) throws -> AskResponse {
         func rejected(_ reason:AskAnswerValidationReason)->AskError {validationTrace?.rejectAnswer(reason);return .invalidEvidence}
         let mentions=response.answerMentionIDs ?? []
-        let mentionSet=Set(mentions)
+        let mentionSet=Set(mentions),candidateIDs=Set(response.candidates.map(\.id))
+        let supplemental=response.supplementalFindingIDs
+        guard supplemental.count<=24,supplemental.isSubset(of:candidateIDs),response.libraryContext == nil || supplemental.isEmpty || response.usesLocalCatalog else {throw rejected(.findings)}
+        let extraIDs=mentionSet.union(supplemental)
         let referenced=Set(response.paragraphs.flatMap(\.spans).compactMap {span->String? in if case .place(let id)=span {return id};return nil})
         guard mentions.count<=AskResponse.maximumAnswerMentions,mentionSet.count==mentions.count,
-              mentionSet.isSubset(of:Set(response.candidates.map(\.id))),mentionSet.isSubset(of:referenced),
+              mentionSet.isSubset(of:candidateIDs),mentionSet.isSubset(of:referenced),
               mentionSet.isDisjoint(with:Set(response.libraryContext?.ids ?? [])),mentions.isEmpty || response.usesLocalCatalog else {throw rejected(.answerMentions)}
         let listing = response.usesLocalCatalog ? AskCollectionListingPlan.make(request, places: index.personalCatalog) : nil
         let localTool = response.usesLocalCatalog && (response.libraryContext != nil || response.agentTask != nil)
         let localListing = listing != nil || localTool
-        guard response.summary.count <= 3_000, response.candidates.count - (response.libraryContext == nil ? 0 : mentions.count) <= (response.collectionPage != nil ? AskCollectionPage.maximumRenderedRecords : localListing ? 200 : 6),
+        guard response.summary.count <= 3_000, response.candidates.count - (response.libraryContext == nil ? 0 : extraIDs.count) <= (response.collectionPage != nil ? AskCollectionPage.maximumRenderedRecords : localListing ? 200 : 6),
               Set(response.candidates.map(\.id)).count == response.candidates.count else { throw rejected(.responseBounds) }
         let available = response.usesLocalCatalog ? localEvidence : evidence
         let catalog = Dictionary(uniqueKeysWithValues: available.candidates.map { ($0.id, $0) })
@@ -419,7 +427,7 @@ struct AskReadTools: Sendable {
                   candidate.facts.allSatisfy({ candidate.sourceIDs.contains($0.sourceID) }) else { throw rejected(.candidateEvidence) }
         }
         if let context = response.libraryContext {
-            guard context.ids.count <= (response.collectionPage != nil ? AskCollectionPage.maximumRenderedRecords : 200), Set(context.ids).count == context.ids.count, context.ids == response.candidates.map(\.id).filter({!mentionSet.contains($0)}) else { throw rejected(.queryMembership) }
+            guard context.ids.count <= (response.collectionPage != nil ? AskCollectionPage.maximumRenderedRecords : 200), Set(context.ids).count == context.ids.count, context.ids == response.candidates.map(\.id).filter({!extraIDs.contains($0)}) else { throw rejected(.queryMembership) }
             if let selection=context.selectionIDs {
                 guard response.usesLocalCatalog,[AskLibraryPlan.Operation.count,.group].contains(context.filters.operation),Set(selection).count == selection.count,Set(selection).isSubset(of:Set(index.personalCatalog.map(\.id))) else { throw rejected(.aggregateMembership) }
             }
@@ -628,9 +636,10 @@ struct AskTurn: Identifiable, Equatable {
         let followUp = AskQueryPlan.isFollowUp(input) || namedPublicReference
         let knownWeb = completed?.response?.referenceWebPlaces ?? completed?.response?.webPlaces ?? []
         let criterionText = knownWeb.sorted { $0.name.count > $1.name.count }.reduce(input) { $0.replacingOccurrences(of: $1.name, with: "", options: .caseInsensitive) }
-        let mentions=Set(completed?.response?.answerMentionIDs ?? [])
-        let referenced = completed?.response?.paragraphs.flatMap(\.spans).compactMap { span -> String? in if case .place(let id) = span, !mentions.contains(id) { return id }; return nil } ?? []
-        let references = followUp ? Array(Set(referenced.isEmpty ? (completed?.response?.candidates.map(\.id) ?? []).filter {!mentions.contains($0)} : referenced).sorted().prefix(6)) : []
+        let supplemental=completed?.response.flatMap {$0.libraryContext == nil ? nil : $0.supplementalFindingIDs} ?? []
+        let nonQueryReferences=Set(completed?.response?.answerMentionIDs ?? []).union(supplemental)
+        let referenced = completed?.response?.paragraphs.flatMap(\.spans).compactMap { span -> String? in if case .place(let id) = span, !nonQueryReferences.contains(id) { return id }; return nil } ?? []
+        let references = followUp ? Array(Set(referenced.isEmpty ? (completed?.response?.candidates.map(\.id) ?? []).filter {!nonQueryReferences.contains($0)} : referenced).sorted().prefix(6)) : []
         let priorContext = index.scope == .savedMetadata && mode == .discovery ? completed.flatMap { AskPublicCriteria.make($0.request.retrievalText)?.contextText } : completed?.request.text
         let previous = mode == .importText || (index.scope == .savedMetadata && !followUp) ? nil : priorContext
         let id = UUID()

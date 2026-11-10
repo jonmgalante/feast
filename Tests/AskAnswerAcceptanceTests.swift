@@ -4,14 +4,15 @@ import CoreData
 /// Every reply is scripted. The real local loop, executor and session acceptance
 /// run, but no provider, network, live store or production credentials are used.
 private actor AcceptancePlanner:AskConversationPlanning,AskBusinessResearching {
-    let calls:[AskAgentReply.Call],text:String,selector:AskAgentSelector?
-    init(_ calls:[AskAgentReply.Call],text:String,selector:AskAgentSelector?=nil) {self.calls=calls;self.text=text;self.selector=selector}
+    let calls:[AskAgentReply.Call],text:String,selector:AskAgentSelector?,interruptFinal:Bool
+    init(_ calls:[AskAgentReply.Call],text:String,selector:AskAgentSelector?=nil,interruptFinal:Bool=false) {self.calls=calls;self.text=text;self.selector=selector;self.interruptFinal=interruptFinal}
     func conversationAvailable()async->Bool {true}
     func publicLookupAvailable()async->Bool {false}
     func businessResearch(_ request:AskBusinessRequest)async throws->AskBusinessResult {preconditionFailure("No external research")}
     func searchConversationWeb(_ query:String)async throws->AskWebResearchResult {preconditionFailure("No external search")}
     func conversationStep(_ step:AskConversationStep)async throws->AskConversationReply {
         let call=step.step<calls.count ? calls[step.step] : nil
+        if call==nil,interruptFinal {throw AskHostedError.service(503)}
         return .init(version:9,requestID:step.requestID,step:step.step,kind:call==nil ? "answer" : "tool",text:call==nil ? text : "",continuation:"synthetic",model:"gpt-6-astra",call:call)
     }
     func authorizePendingConfirmation(_ actions:[AskCollectionAction],question:String,history:[String])async throws->AskHumanAuthorization {preconditionFailure("No pending approvals")}
@@ -24,15 +25,23 @@ private struct AcceptanceProvider:AskFeastProvider {
     let label="Offline acceptance fixture"
     let adapter:AskSavedCollection,engine:AskCollectionChangeEngine,planner:AcceptancePlanner
     var damage:String?=nil
+    var research:[AskRetainedResearch]=[]
     func answer(_ request:AskRequest,tools:AskReadTools)async throws->AskResponse {
+        var request=request;request.publicResearch += research
         let view=try await adapter.readView()
         let context=try AskSemanticContext.make(request,catalog:view.snapshot,fullCollection:true)
         let executor=await AskAgentExecutor(adapter:adapter,engine:engine,request:request,researcher:planner,searchMaps:{_ in []},fullCollectionContext:true)
         let available=AskReadTools.localCandidates(Set(view.snapshot.places.map(\.id)),in:view.index)
-        var answer=try await AskConversationLoop(planner:planner,availableCandidates:available,execute:{call in try await executor.executeConversation(call,planner:planner)}).answer(request,context:context,cities:[],findings:[])
+        var answer=try await AskConversationLoop(planner:planner,availableCandidates:available,execute:{call in try await executor.executeConversation(call,planner:planner)},retainFindings:{call,evidence in try await executor.retainPublicFindings(call,evidence:evidence)}).answer(request,context:context,cities:[],findings:[])
         if damage=="citation" {answer.paragraphs[0].citations=[.init(title:"Rejected",url:"javascript:invalid")]}
         if damage=="candidate",let original=answer.candidates.first {
             answer.candidates[0] = .init(id:original.id,name:"Forged private payload",city:original.city,facts:original.facts,sourceIDs:original.sourceIDs,uncertainty:original.uncertainty,mapOptions:original.mapOptions,existingRecordID:original.existingRecordID)
+        }
+        if damage=="supplementalCandidate",let original=answer.candidates.last {
+            answer.candidates[answer.candidates.count-1] = .init(id:original.id,name:"Forged supplemental field",city:original.city,facts:original.facts,sourceIDs:original.sourceIDs,uncertainty:original.uncertainty,mapOptions:original.mapOptions,existingRecordID:original.existingRecordID)
+        }
+        if damage=="supplementalSource",let original=answer.candidates.last {
+            answer.candidates[answer.candidates.count-1] = .init(id:original.id,name:original.name,city:original.city,facts:original.facts,sourceIDs:["unapproved-source"],uncertainty:original.uncertainty,mapOptions:original.mapOptions,existingRecordID:original.existingRecordID)
         }
         return answer
     }
@@ -71,8 +80,8 @@ private struct AcceptanceProvider:AskFeastProvider {
             let body:[String:Any] = ["entity":"place","selectionIDs":ids,"query":q]
             return .init(name:"query_collection",callID:UUID().uuidString,arguments:String(data:try! JSONSerialization.data(withJSONObject:body),encoding:.utf8)!)
         }
-        func session(_ calls:[AskAgentReply.Call],text:String,selector:AskAgentSelector?=nil,damage:String?=nil)throws->AskSession {
-            let provider=AcceptanceProvider(adapter:adapter,engine:engine,planner:AcceptancePlanner(calls,text:text,selector:selector),damage:damage)
+        func session(_ calls:[AskAgentReply.Call],text:String,selector:AskAgentSelector?=nil,damage:String?=nil,research:[AskRetainedResearch]=[],interruptFinal:Bool=false)throws->AskSession {
+            let provider=AcceptanceProvider(adapter:adapter,engine:engine,planner:AcceptancePlanner(calls,text:text,selector:selector,interruptFinal:interruptFinal),damage:damage,research:research)
             let value=AskSession(index:try adapter.readView().index,provider:provider)
             value.refreshIndex={try adapter.readView().index};return value
         }
@@ -259,6 +268,166 @@ private struct AcceptanceProvider:AskFeastProvider {
         precondition(nativeComplete.libraryContext?.ids==all && nativeComplete.agentTask?.orderedIDs==all && nativeComplete.candidates.count==205)
         precondition(nativeComplete.answerMentionIDs?.isEmpty != false && nativeComplete.candidates.filter {$0.id==laterID}.count==1)
         print("PASS page continuation promotes a prior mention only when its authoritative native row arrives, without duplicating identity or changing membership")
+
+        // Retention adds verified evidence, not a new query or displayed order.
+        // Use the real executor retention path with an exact, cited handle.
+        func retention(_ id:String,name:String,handle:String)->(AskAgentReply.Call,AskRetainedResearch) {
+            let quote=name+" uses @"+handle+" on Instagram.",source="https://example.org/"+handle
+            let payload:[String:Any] = ["findings":[["recordID":id,"field":"instagram","value":"https://www.instagram.com/"+handle+"/","sourceURL":source,"quote":quote]]]
+            let call=AskAgentReply.Call(name:"retain_findings",callID:UUID().uuidString,arguments:String(data:try! JSONSerialization.data(withJSONObject:payload),encoding:.utf8)!)
+            let research=AskRetainedResearch(id:UUID(),originatingTurn:UUID(),query:name+" official Instagram",result:.init(text:quote,citations:[.init(title:"Official",url:source)]))
+            return (call,research)
+        }
+        let (retainThird,thirdResearch)=retention(ids[2],name:"Cafe 002",handle:"cafe002")
+        let retained=try session([query(ids:ids),retainThird],text:"I found Instagram for [[place:\(ids[2])]].",research:[thirdResearch])
+        retained.input="Show my three cafes and find Cafe 002's Instagram";retained.run();try await settle(retained)
+        precondition(retained.turns.last?.status == .complete)
+        let retainedResponse=retained.response!
+        precondition(retainedResponse.libraryContext?.ids==ids && retainedResponse.collectionPage?.returnedCount==3 && retainedResponse.agentTask?.orderedIDs==ids)
+        precondition(retainedResponse.verifiedPublicFindings?.map(\.recordID)==[ids[2]] && retainedResponse.answerMentionIDs?.isEmpty != false)
+        let retainedArchive=AskConversationStore(url:temporaryDirectory.appendingPathComponent("acceptance-retained-query.json"))
+        precondition(retainedArchive.save(.init(turns:[AskArchivedTurn(retained.turns.last!)])))
+        let firstQuestion="Save https://www.instagram.com/firstfixture/ to the first place in the displayed list"
+        let firstProposal=AskChangeProposal(entity:"place",operation:"update",targetIDs:[ids[0]],cityID:nil,sectionID:nil,mapMatchID:nil,changes:[.init(field:"instagram",value:"https://www.instagram.com/firstfixture/",values:nil,findingID:nil,source:"user")],instructionQuote:firstQuestion)
+        let firstCall=AskAgentReply.Call(name:"propose_changes",callID:"first-after-retention",arguments:String(data:try JSONEncoder().encode(firstProposal),encoding:.utf8)!)
+        let firstWriter=try session([firstCall],text:"Saved.",selector:.init(city:nil,name:nil,neighborhood:nil,cuisine:nil,status:nil,placeType:nil,scope:"previous",positions:[1]))
+        firstWriter.restoreHistory(from:retainedArchive);firstWriter.input=firstQuestion;firstWriter.run();try await settle(firstWriter)
+        precondition(firstWriter.turns.last?.status == .complete && firstWriter.turns.last?.request.agentTask?.orderedIDs==ids)
+        let retainedActions=firstWriter.response?.collectionActions ?? []
+        precondition(!retainedActions.isEmpty && retainedActions.allSatisfy {$0.state == .applied && $0.undoable && $0.targetIDs==[ids[0]]})
+        precondition(places[0].instagramURL=="https://www.instagram.com/firstfixture/" && places.dropFirst().allSatisfy {$0.instagramURL==nil} && extra.instagramURL==nil)
+        for action in retainedActions {
+            let undo=AskChangeProposal(entity:"place",operation:"undo",targetIDs:action.targetIDs,cityID:nil,sectionID:nil,mapMatchID:nil,changes:[],instructionQuote:"Undo")
+            _ = try engine.undo(action.id,authorization:.init(question:"Undo",entity:"place",operations:["undo"],fields:[],targetIDs:Set(action.targetIDs),allowsCreation:false,boundProposal:undo))
+        }
+        precondition(places.allSatisfy {$0.instagramURL==nil})
+        var retainedCheckpoint=checkpoint
+        retainedCheckpoint.finalResponse=retainedResponse;retainedCheckpoint.state.latest=retainedResponse;retainedCheckpoint.state.ordered=ids
+        let checkpointCopy=try JSONDecoder().decode(AskTurnCheckpoint.self,from:JSONEncoder().encode(retainedCheckpoint))
+        precondition(checkpointCopy.finalResponse==retainedResponse && checkpointCopy.state.latest?.libraryContext?.ids==ids && checkpointCopy.state.latest?.collectionPage?.returnedCount==3 && checkpointCopy.state.ordered==ids)
+        print("PASS query then real finding retention preserves all three visible rows and archived first-place save/Undo targets the original first record")
+
+        let (retainFirst,firstResearch)=retention(ids[0],name:"Cafe 000",handle:"cafe000")
+        let thirdPayload=try JSONSerialization.jsonObject(with:Data(retainThird.arguments.utf8)) as! [String:Any]
+        let firstPayload=try JSONSerialization.jsonObject(with:Data(retainFirst.arguments.utf8)) as! [String:Any]
+        let reversePayload:[String:Any] = ["findings":(thirdPayload["findings"] as! [[String:Any]])+(firstPayload["findings"] as! [[String:Any]])]
+        let reverseCall=AskAgentReply.Call(name:"retain_findings",callID:"reverse-retention",arguments:String(data:try JSONSerialization.data(withJSONObject:reversePayload),encoding:.utf8)!)
+        let reversedRetention=try session([query(ids:ids),reverseCall],text:"The profiles are verified.",research:[thirdResearch,firstResearch])
+        reversedRetention.input="List my three cafes and verify Cafe 002 and Cafe 000";reversedRetention.run();try await settle(reversedRetention)
+        precondition(reversedRetention.turns.last?.status == .complete && reversedRetention.response?.agentTask?.orderedIDs==ids && reversedRetention.response?.libraryContext?.ids==ids)
+        precondition(reversedRetention.response?.verifiedPublicFindings?.map(\.recordID)==[ids[2],ids[0]])
+        let reversedArchive=AskConversationStore(url:temporaryDirectory.appendingPathComponent("acceptance-reversed-retention.json"))
+        precondition(reversedArchive.save(.init(turns:[AskArchivedTurn(reversedRetention.turns.last!)])))
+        let reversedWriter=try session([firstCall],text:"Saved.",selector:.init(city:nil,name:nil,neighborhood:nil,cuisine:nil,status:nil,placeType:nil,scope:"previous",positions:[1]))
+        reversedWriter.restoreHistory(from:reversedArchive);reversedWriter.input=firstQuestion;reversedWriter.run();try await settle(reversedWriter)
+        precondition(reversedWriter.turns.last?.status == .complete && reversedWriter.turns.last?.request.agentTask?.orderedIDs==ids)
+        let reversedActions=reversedWriter.response?.collectionActions ?? []
+        precondition(!reversedActions.isEmpty && reversedActions.allSatisfy {$0.state == .applied && $0.undoable && $0.targetIDs==[ids[0]]})
+        precondition(places[0].instagramURL=="https://www.instagram.com/firstfixture/" && places.dropFirst().allSatisfy {$0.instagramURL==nil})
+        for action in reversedActions {
+            let undo=AskChangeProposal(entity:"place",operation:"undo",targetIDs:action.targetIDs,cityID:nil,sectionID:nil,mapMatchID:nil,changes:[],instructionQuote:"Undo")
+            _ = try engine.undo(action.id,authorization:.init(question:"Undo",entity:"place",operations:["undo"],fields:[],targetIDs:Set(action.targetIDs),allowsCreation:false,boundProposal:undo))
+        }
+        print("PASS reversed multi-record retention leaves native display order and archived first-place write/Undo unchanged")
+
+        // Compute a current, synthetic fingerprint for the second native page.
+        let probeRequest=AskRequest(mode:.collection,text:"List cafes",fromOCR:false)
+        let probePlanner=AcceptancePlanner([],text:"")
+        let probe=AskAgentExecutor(adapter:adapter,engine:engine,request:probeRequest,researcher:probePlanner,searchMaps:{_ in []},fullCollectionContext:true)
+        let firstNative=try await probe.executeConversation(query(ids:all),planner:probePlanner)
+        let nativePage=firstNative.response!.collectionPage!
+        let secondNative=query(ids:all,offset:nativePage.nextOffset,snapshot:nativePage.snapshot)
+        for interrupted in [false,true] {
+            let large=try session([query(ids:all),secondNative,retainThird],text:"The cafes are listed and the profile is verified.",research:[thirdResearch],interruptFinal:interrupted)
+            large.input="List every cafe and verify Cafe 002's Instagram";large.run();try await settle(large)
+            precondition(large.turns.last?.status == .complete)
+            let result=large.response!
+            precondition(result.candidates.count==205 && result.libraryContext?.ids==all && result.collectionPage?.returnedCount==205 && result.collectionPage?.nextOffset==nil && result.agentTask?.orderedIDs==all)
+            precondition(result.verifiedPublicFindings?.map(\.recordID)==[ids[2]])
+            if interrupted {precondition(AskAnswerCopy.text(result).contains("unfinished"))}
+        }
+        let partialRetained=try session([query(ids:all),retainThird],text:"",research:[thirdResearch],interruptFinal:true)
+        partialRetained.input="List every cafe and verify Cafe 002's Instagram";partialRetained.run();try await settle(partialRetained)
+        precondition(partialRetained.turns.last?.status == .complete)
+        precondition(partialRetained.response?.libraryContext?.ids==Array(all.prefix(200)) && partialRetained.response?.collectionPage?.nextOffset==200 && partialRetained.response?.agentTask?.selectionIDs==all)
+        precondition(partialRetained.response?.verifiedPublicFindings?.map(\.recordID)==[ids[2]])
+        print("PASS completed and interrupted 205-row query/retention paths retain native page capacity and membership, including unfinished 200-row paging")
+
+        let (retainExtra,extraResearch)=retention(extraID,name:"Extra Cafe",handle:"extracafe")
+        for mention in [false,true] {
+            let text=mention ? "A verified alternative is [[place:\(extraID)]]." : "The saved matches are shown below."
+            let outside=try session([query(ids:ids),retainExtra],text:text,research:[extraResearch])
+            outside.input="Show my three cafes and verify Extra Cafe's profile";outside.run();try await settle(outside)
+            precondition(outside.turns.last?.status == .complete)
+            let result=outside.response!
+            precondition(result.libraryContext?.ids==ids && result.agentTask?.orderedIDs==ids && result.collectionPage?.totalCount==3 && result.candidates.count==4)
+            precondition(result.verifiedPublicFindings?.map(\.recordID)==[extraID] && result.fieldActions?.map { $0.finding.recordID }==[extraID])
+            if !mention {
+                precondition(result.answerMentionIDs?.isEmpty != false,"Undisplayed retained evidence must not be fabricated as a prose mention")
+                let supplementalArchive=AskConversationStore(url:temporaryDirectory.appendingPathComponent("acceptance-supplemental-reference.json"))
+                precondition(supplementalArchive.save(.init(turns:[AskArchivedTurn(outside.turns.last!)])))
+                let followup=try session([],text:"No change requested.")
+                followup.restoreHistory(from:supplementalArchive);followup.input="Tell me more about those places";followup.run();try await settle(followup)
+                precondition(followup.turns.last?.status == .complete && followup.turns.last?.request.agentTask?.orderedIDs==ids)
+                precondition(!followup.turns.last!.request.referencedIDs.contains(extraID))
+            }
+            precondition(!result.agentTask!.orderedIDs.contains(extraID) && extra.instagramURL==nil)
+        }
+        print("PASS out-of-query retained evidence is accepted with or without prose without expanding native rows or implicit edit targets")
+
+        let fullNativeList=ids.enumerated().map {"\($0.offset+1). [[place:\($0.element)]]"}.joined(separator:"\n")
+        let unmentionedProfile=try session([query(ids:ids),retainExtra],text:fullNativeList,research:[extraResearch])
+        unmentionedProfile.input="Show my three cafes and verify Extra Cafe's Instagram";unmentionedProfile.run();try await settle(unmentionedProfile)
+        precondition(unmentionedProfile.turns.last?.status == .complete)
+        let replacedProfile=unmentionedProfile.response!
+        precondition(replacedProfile.paragraphs.count==1 && replacedProfile.libraryContext?.ids==ids && replacedProfile.agentTask?.orderedIDs==ids && replacedProfile.candidates.count==4)
+        precondition(replacedProfile.verifiedPublicFindings?.map(\.recordID)==[extraID] && replacedProfile.fieldActions?.map {$0.finding.recordID}==[extraID] && replacedProfile.answerMentionIDs?.isEmpty != false)
+        let website="https://example.org/extra-cafe",websiteSource="https://example.org/extra-cafe-source"
+        let websiteQuote="Extra Cafe lists its official website as "+website+" for visitors."
+        let websitePayload:[String:Any] = ["findings":[["recordID":extraID,"field":"website","value":website,"sourceURL":websiteSource,"quote":websiteQuote]]]
+        let retainWebsite=AskAgentReply.Call(name:"retain_findings",callID:"retain-hidden-website",arguments:String(data:try JSONSerialization.data(withJSONObject:websitePayload),encoding:.utf8)!)
+        let websiteResearch=AskRetainedResearch(id:UUID(),originatingTurn:UUID(),query:"Extra Cafe official website",result:.init(text:websiteQuote,citations:[.init(title:"Official",url:websiteSource)]))
+        let hiddenWebsite=try session([query(ids:ids),retainWebsite],text:fullNativeList,research:[websiteResearch])
+        hiddenWebsite.input="Show my three cafes and verify Extra Cafe's website";hiddenWebsite.run();try await settle(hiddenWebsite)
+        precondition(hiddenWebsite.turns.last?.status == .complete)
+        let replacedWebsite=hiddenWebsite.response!
+        precondition(replacedWebsite.paragraphs.count==1 && replacedWebsite.libraryContext?.ids==ids && replacedWebsite.agentTask?.orderedIDs==ids && replacedWebsite.candidates.count==4)
+        precondition(replacedWebsite.verifiedPublicFindings?.map(\.recordID)==[extraID] && replacedWebsite.verifiedPublicFindings?.first?.field=="website")
+        precondition(replacedWebsite.fieldActions?.isEmpty != false && replacedWebsite.answerMentionIDs?.isEmpty != false && !AskAnswerCopy.text(replacedWebsite).contains("Extra Cafe"))
+        print("PASS complete explicit native list replacement retains unmentioned Instagram/action and website-only evidence without expanding displayed selection")
+
+        for operation in ["count","group"] {
+            let interrupted=try session([query(operation,ids:ids),retainExtra],text:"",research:[extraResearch],interruptFinal:true)
+            interrupted.input="Summarize my three cafes and verify Extra Cafe";interrupted.run();try await settle(interrupted)
+            precondition(interrupted.turns.last?.status == .complete)
+            let result=interrupted.response!
+            precondition(result.libraryContext?.ids==[] && result.libraryContext?.selectionIDs==ids && result.agentTask?.orderedIDs==[] && result.agentTask?.selectionIDs==ids)
+            precondition(result.agentTask?.privateSelection==true && result.answerMentionIDs?.isEmpty != false && result.verifiedPublicFindings?.map(\.recordID)==[extraID])
+        }
+        for damage in ["supplementalCandidate","supplementalSource"] {
+            let rejected=try session([query(ids:ids),retainExtra],text:"The profile is verified.",damage:damage,research:[extraResearch])
+            rejected.input="Show my three cafes and verify Extra Cafe";rejected.run();try await settle(rejected)
+            precondition(rejected.turns.last?.status == .failed(AskError.invalidEvidence.localizedDescription) && rejected.response==nil)
+            let failure=try await diagnostic(rejected.turns.last!.id)
+            precondition(failure.validationFailure == .candidateEvidence)
+        }
+        print("PASS interrupted aggregate retention preserves private membership; supplemental references never bypass candidate/source checks or legacy follow-up scope")
+
+        let mutationQuestion="Mark Cafe 000 as Been, then retain Cafe 002's Instagram"
+        let mutation=AskChangeProposal(entity:"place",operation:"update",targetIDs:[ids[0]],cityID:nil,sectionID:nil,mapMatchID:nil,changes:[.init(field:"status",value:"Been",values:nil,findingID:nil,source:"user")],instructionQuote:mutationQuestion)
+        let mutationCall=AskAgentReply.Call(name:"propose_changes",callID:"mutation-before-retain",arguments:String(data:try JSONEncoder().encode(mutation),encoding:.utf8)!)
+        let mutated=try session([query(ids:ids),mutationCall,retainThird],text:"Saved and retained the verified profile.",selector:.init(city:"Acceptance City",name:"Cafe 000",neighborhood:nil,cuisine:nil,status:nil,placeType:nil,scope:"library",positions:[]),research:[thirdResearch])
+        mutated.input=mutationQuestion;mutated.run();try await settle(mutated)
+        precondition(mutated.turns.last?.status == .complete)
+        precondition(mutated.response?.libraryContext==nil && mutated.response?.collectionPage==nil && mutated.response?.verifiedPublicFindings?.map(\.recordID)==[ids[2]])
+        let mutationActions=mutated.response?.collectionActions ?? []
+        precondition(!mutationActions.isEmpty && mutationActions.allSatisfy {$0.state == .applied && $0.targetIDs==[ids[0]]})
+        for action in mutationActions {
+            let undo=AskChangeProposal(entity:"place",operation:"undo",targetIDs:action.targetIDs,cityID:nil,sectionID:nil,mapMatchID:nil,changes:[],instructionQuote:"Undo")
+            _ = try engine.undo(action.id,authorization:.init(question:"Undo",entity:"place",operations:["undo"],fields:[],targetIDs:Set(action.targetIDs),allowsCreation:false,boundProposal:undo))
+        }
+        precondition(places.allSatisfy {$0.instagramURL==nil && $0.note=="Unchanged" && $0.tags==["Keep"]})
+        print("PASS mutation invalidates the old query page and subsequent retention does not resurrect it; the mutation receipt remains undoable")
 
         for (damage,reason) in [("citation",AskAnswerValidationReason.citations),("candidate",.candidateEvidence),("revoked",.candidateEvidence)] {
             let rejected=try session([query(ids:ids)],text:prose,damage:damage)
