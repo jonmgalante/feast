@@ -17,13 +17,20 @@ struct LibraryImportFlowView: View {
     @State private var errorMessage: String?
     @State private var completionMessage: String?
 
+    private let onClose: (() -> Void)?
+
+    init(onClose: (() -> Void)? = nil) { self.onClose = onClose }
+
     var body: some View {
         List {
             Section {
-                Button("From a Feast export file", systemImage: "doc") { choosingFile = true }
-                Text("Choose a Feast JSON export, up to 32 MB. Your library will not change until you review it and restore.")
-                    .font(.footnote).foregroundStyle(FeastTheme.Colors.secondaryText)
+                Button { choosingFile = true } label: {
+                    NotesImportMethodRow(title: "Choose Backup File", systemName: "doc")
+                }
+            } footer: {
+                Text("Feast JSON files, up to 32 MB.")
             }
+            .feastSectionSurface()
             if isReading {
                 Section { ProgressView("Reading export…") }
             }
@@ -33,7 +40,6 @@ struct LibraryImportFlowView: View {
                     LabeledContent("Cities", value: String(archive.cities.count))
                     LabeledContent("Neighborhoods", value: String(archive.neighborhoods.count))
                     LabeledContent("Places", value: String(archive.places.count))
-                    LabeledContent("Format version", value: String(archive.version))
                     if archive.places.contains(where: { $0.cityID == nil }) {
                         LabeledContent("Places without a city", value: String(archive.places.filter { $0.cityID == nil }.count))
                     }
@@ -41,11 +47,11 @@ struct LibraryImportFlowView: View {
                         LabeledContent("Neighborhoods without a city", value: String(archive.neighborhoods.filter { $0.cityID == nil }.count))
                     }
                     if archive.places.contains(where: { $0.cityID == nil }) || archive.neighborhoods.contains(where: { $0.cityID == nil }) {
-                        Text("Records without a city will be retained, but may not appear in city browsing. Keep the original export.")
+                        Text("Records without a city stay saved but aren’t shown in city browsing.")
                             .font(.footnote).foregroundStyle(FeastTheme.Colors.secondaryText)
                     }
                     if archive.neighborhoods.contains(where: { $0.parentID != nil }) {
-                        Text("This file has legacy nested neighborhoods. Their raw hierarchy will be retained and shown as flat neighborhood paths in city browsing.")
+                        Text("Nested neighborhoods appear as flat paths; their saved hierarchy is unchanged.")
                             .font(.footnote).foregroundStyle(FeastTheme.Colors.secondaryText)
                     }
                 }
@@ -67,26 +73,30 @@ struct LibraryImportFlowView: View {
                     }
                     .disabled(isReading || (archive.cities.isEmpty && archive.neighborhoods.isEmpty && archive.places.isEmpty))
                 } footer: {
-                    Text("Importing the same snapshot again will not add another copy while its restored records remain. Existing cities and places will not be replaced, merged, or deleted.")
+                    Text("Adds private copies without replacing your library. Sharing and invitations aren’t restored.")
                 }
+                Section {
+                    DisclosureGroup("About this backup") {
+                        LabeledContent("Format version", value: String(archive.version))
+                        Text("This is the library saved on the export device. Unsynced changes may be missing.")
+                        Text("Reimporting the same snapshot won’t add duplicates while its restored records remain.")
+                        Text("Ask Feast chats and app settings aren’t included. Keep the original file: it contains private notes and isn’t password-encrypted.")
+                    }
+                }
+                .font(.footnote)
+                .foregroundStyle(FeastTheme.Colors.secondaryText)
             }
-            Section("Before restoring") {
-                Text("Restored cities are independent private copies with new identifiers. Sharing information covers only participants visible when exported and is for reference only: owners, invitations, and permissions are not restored.")
-                Text("An export reflects the data available on its device, not necessarily the latest iCloud data. Shared or unsynced changes may be missing.")
-                Text("Only the saved library is included, not Ask Feast conversations or app settings. Export files contain private notes and are not password-encrypted.")
-            }
-            .font(.footnote)
-            .foregroundStyle(FeastTheme.Colors.secondaryText)
         }
         .feastScrollableChrome()
         .listStyle(.insetGrouped)
-        .navigationTitle("Import library")
+        .navigationTitle("Import Backup")
         .navigationBarTitleDisplayMode(.inline)
         .disabled(isRestoring)
         .interactiveDismissDisabled(isRestoring)
+        .navigationBarBackButtonHidden(isRestoring)
         .toolbar {
-            ToolbarItem(placement: .cancellationAction) {
-                Button("Close") { cancelPreview(); dismiss() }.disabled(isRestoring)
+            ToolbarItem(placement: onClose == nil ? .cancellationAction : .confirmationAction) {
+                Button("Close", action: closeFlow).disabled(isRestoring)
             }
         }
         .onDisappear { cancelPreview() }
@@ -104,8 +114,14 @@ struct LibraryImportFlowView: View {
             Button("OK") { errorMessage = nil }
         } message: { Text(errorMessage ?? "") }
         .alert("Library import", isPresented: Binding(get: { completionMessage != nil }, set: { if !$0 { completionMessage = nil } })) {
-            Button("Done") { completionMessage = nil; dismiss() }
+            Button("Done") { completionMessage = nil; closeFlow() }
         } message: { Text(completionMessage ?? "") }
+    }
+
+    private func closeFlow() {
+        guard !isRestoring else { return }
+        cancelPreview()
+        if let onClose { onClose() } else { dismiss() }
     }
 
     private func cancelPreview() {

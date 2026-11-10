@@ -70,11 +70,11 @@ struct ListsRootView: View {
             .sheet(isPresented: $showingAddPlace) {
                 NavigationStack { AddPlaceView() }
             }
-            .alert("Export library", isPresented: $confirmingExport) {
-                Button("Export library") { exportLibrary() }
+            .alert("Export Library", isPresented: $confirmingExport) {
+                Button("Export Library") { exportLibrary() }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("Export all saved-library details and relationships currently on this device, plus available sharing information. Shared or unsynced changes may be missing. Ask Feast conversations are not included. This file contains private notes and is not password-encrypted. Imports create independent private copies, not shared cities.")
+                Text("Save the library on this device, including private notes. Ask Feast chats aren’t included. The file isn’t password-encrypted and may miss unsynced changes.")
             }
             .sheet(isPresented: Binding(get: { exportURL != nil }, set: { if !$0 { removeExport() } }), onDismiss: removeExport) {
                 if let exportURL { ExportShareSheet(url: exportURL) }
@@ -112,7 +112,7 @@ struct ListsRootView: View {
                 }
             }
             .sheet(isPresented: $showingLibraryImportFlow) {
-                NavigationStack { LibraryImportFlowView() }
+                ImportLibraryView(onViewImportedCity: openImportedCity)
             }
             .sheet(isPresented: $showingNotesImportFlow) {
                 NavigationStack {
@@ -415,9 +415,8 @@ struct ListsRootView: View {
                 .accessibilityLabel("Add City")
 
                 Menu {
-                    Button("Import from Notes", systemImage: "square.and.arrow.down") { presentImportFromNotes() }
-                    Button("Import library", systemImage: "doc.badge.arrow.up") { showingLibraryImportFlow = true }
-                    Button("Export library", systemImage: "square.and.arrow.up") { confirmingExport = true }
+                    Button("Import Library", systemImage: "square.and.arrow.down") { showingLibraryImportFlow = true }
+                    Button("Export Library", systemImage: "square.and.arrow.up") { confirmingExport = true }
                 } label: {
                     FeastToolbarSymbol(systemName: "ellipsis")
                         .frame(width: 44, height: 44)
@@ -740,25 +739,25 @@ struct ListsRootView: View {
 
     private func listPrimaryMetadata(for feastList: FeastList) -> String {
         let savedPlacesLabel = "\(feastList.savedPlaceCount) saved"
-        let topLevelSectionCount = feastList.neighborhoodSections.count
+        let visibleSectionCount = feastList.visibleNeighborhoodSections.count
 
-        guard topLevelSectionCount > 0 else {
+        guard visibleSectionCount > 0 else {
             return savedPlacesLabel
         }
 
-        let neighborhoodLabel = topLevelSectionCount == 1 ? "1 neighborhood" : "\(topLevelSectionCount) neighborhoods"
+        let neighborhoodLabel = visibleSectionCount == 1 ? "1 neighborhood" : "\(visibleSectionCount) neighborhoods"
         return "\(savedPlacesLabel) • \(neighborhoodLabel)"
     }
 
     private func listSecondaryMetadata(for feastList: FeastList) -> String? {
-        let topLevelSectionNames = feastList.neighborhoodSections.map(\.displayName)
+        let visibleSectionNames = feastList.visibleNeighborhoodSections.map(\.neighborhoodDisplayName)
 
-        guard !topLevelSectionNames.isEmpty else {
+        guard !visibleSectionNames.isEmpty else {
             return "Add neighborhoods to organize places"
         }
 
-        let visibleNames = Array(topLevelSectionNames.prefix(2))
-        let remainingCount = topLevelSectionNames.count - visibleNames.count
+        let visibleNames = Array(visibleSectionNames.prefix(2))
+        let remainingCount = visibleSectionNames.count - visibleNames.count
         let remainingSuffix = remainingCount > 0 ? " +\(remainingCount)" : ""
 
         return visibleNames.joined(separator: " • ") + remainingSuffix

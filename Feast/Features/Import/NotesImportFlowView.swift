@@ -7,8 +7,11 @@ struct NotesImportFlowView: View {
 
     let onViewImportedCity: ((String) -> Void)?
 
-    init(onViewImportedCity: ((String) -> Void)? = nil) {
+    private let onClose: (() -> Void)?
+
+    init(onViewImportedCity: ((String) -> Void)? = nil, onClose: (() -> Void)? = nil) {
         self.onViewImportedCity = onViewImportedCity
+        self.onClose = onClose
     }
 
     var body: some View {
@@ -22,9 +25,9 @@ struct NotesImportFlowView: View {
         .navigationTitle("Import from Notes")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .cancellationAction) {
+            ToolbarItem(placement: onClose == nil ? .cancellationAction : .confirmationAction) {
                 Button("Close") {
-                    dismiss()
+                    closeFlow()
                 }
             }
         }
@@ -103,11 +106,11 @@ struct NotesImportFlowView: View {
     }
 
     private func closeFlow() {
-        dismiss()
+        if let onClose { onClose() } else { dismiss() }
     }
 
     private func viewImportedCity(_ cityURIString: String) {
-        dismiss()
+        closeFlow()
 
         guard let onViewImportedCity else {
             return
@@ -2118,9 +2121,9 @@ private enum NotesImportMatchSearchState {
     case failed(String)
 }
 
-private struct NotesImportMethodRow: View {
+struct NotesImportMethodRow: View {
     let title: String
-    let subtitle: String
+    var subtitle: String? = nil
     let systemName: String
 
     var body: some View {
@@ -2140,10 +2143,12 @@ private struct NotesImportMethodRow: View {
                     .font(FeastTheme.Typography.rowTitle)
                     .foregroundStyle(FeastTheme.Colors.primaryText)
 
-                Text(subtitle)
-                    .font(FeastTheme.Typography.rowMetadata)
-                    .foregroundStyle(FeastTheme.Colors.secondaryText)
-                    .fixedSize(horizontal: false, vertical: true)
+                if let subtitle {
+                    Text(subtitle)
+                        .font(FeastTheme.Typography.rowMetadata)
+                        .foregroundStyle(FeastTheme.Colors.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
         .padding(.vertical, 4)

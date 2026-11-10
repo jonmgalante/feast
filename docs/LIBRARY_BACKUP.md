@@ -1,6 +1,6 @@
 # Saved-library export and restore
 
-`Export library` writes `Feast-places-v2.json`. `Import library` → `From a Feast export file` accepts v1 and v2, previews the file, and writes only after **Restore private copies**. Import from Notes is unchanged.
+`Export Library` writes `Feast-places-v2.json`. `Import Library` offers **From Notes** and **From Feast Backup**. The backup flow accepts v1 and v2, previews the file, and writes only after **Restore private copies**. Notes import and its direct empty-state entry remain unchanged. Back returns to the source chooser; Close or successful completion dismisses the whole import sheet.
 
 ## What is preserved
 

@@ -95,6 +95,15 @@ import Foundation
         precondition(!restoredChild.feastList!.neighborhoodSections.contains { $0 === restoredChild })
         precondition(restoredChild.neighborhoodDisplayName == "Same neighborhood • Same neighborhood")
         precondition(restoredChild.neighborhoodDisplayName == restoredChild.pathDisplay)
+        let restoredCity = restoredChild.feastList!
+        precondition(restoredCity.visibleNeighborhoodSections.count == 3)
+        precondition(restoredCity.neighborhoodSections.count == 2)
+        let cardPaths = restoredCity.visibleNeighborhoodSections.map(\.neighborhoodDisplayName)
+        precondition(cardPaths == ["", "Same neighborhood", "Same neighborhood • Same neighborhood"])
+        for ordinaryCity in cities {
+            precondition(ordinaryCity.visibleNeighborhoodSections.map(\.objectID) == ordinaryCity.neighborhoodSections.map(\.objectID))
+            precondition(ordinaryCity.visibleNeighborhoodSections.map(\.neighborhoodDisplayName) == ordinaryCity.neighborhoodSections.map(\.displayName))
+        }
         precondition(!sections[1].isVisibleNeighborhood)
         precondition(!cities[0].neighborhoodSections.contains { $0 === sections[1] })
         precondition(!cities[0].visibleNeighborhoodSections.contains { $0 === sections[1] })
