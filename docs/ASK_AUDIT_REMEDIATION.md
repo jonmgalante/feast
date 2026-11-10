@@ -75,6 +75,16 @@ recovery activation, TestFlight upload, or deployment is part of this batch.
 - The new cancellation-claim metadata requires a claim-aware rollback target or
   a quiesced, verified drain. See `Backend/feast-production/ANSWER_JOB_RECOVERY.md`.
 
+## Compatibility and rollback limits
+
+The compatibility tests cover upgrading old archives/journals without losing their
+meaning. They do not establish arbitrary app downgrade compatibility. Older app
+binaries ignore occurrence-order and finding-identity metadata, and their archive
+validator may reject newly accepted full native lists plus extra mentions. Use a
+tested, compatible rollback build; preserve history/journal files rather than
+clearing them to make an older reader open. Backend rollback must also understand
+the new cancellation claims or follow the verified-drain procedure above.
+
 ## Verification
 
 The original audit failures were first reproduced against an immutable baseline
