@@ -137,3 +137,55 @@ test('fully elapsed long-polls renew promptly while early pending responses reta
  assert.equal((await(await early).json()).retryAfterMs,1500);assert.equal(obj.waiters.size,0);
  await f.run();const completed=await(await f.op('status',p)).json();assert.equal(completed.state,'completed');assert.equal(completed.retryAfterMs,undefined);assert.equal(f.calls.paid,1);
 });
+
+test('cancel without a local job rejects another protocol owner before persisting a tombstone, including recovery OFF',async()=>{
+ const f=await setup(),p=payload();f.env.ASK_FEAST_RECOVERY_ENABLED='false';
+ f.ledger.data.set('production-validation-v2:stage-root:'+p.requestID.toUpperCase(),{userHash:'b'.repeat(64),fingerprint:'f'.repeat(64),nextIndex:1});
+ const before=structuredClone(f.ledger.data),r=await f.op('cancel',p);assert.equal(r.status,403);
+ assert.equal(f.jobs.data.size,0);assert.deepEqual(f.ledger.data,before);assert.equal(f.calls.paid,0);
+});
+
+test('cancel at local job capacity does not create unbounded ledger fences',async()=>{
+ const f=await setup(),p=payload();
+ for(let i=0;i<ANSWER_JOBS.maxJobs;i++)f.jobs.data.set('job:capacity-'+i,{state:'cancelled'});
+ const before=structuredClone(f.ledger.data);assert.equal((await f.op('cancel',p)).status,429);
+ assert.deepEqual(f.ledger.data,before);assert.equal(f.jobs.data.size,ANSWER_JOBS.maxJobs);
+});
+
+test('slow unknown-root ownership claim cannot block an existing owned local Stop or status',async()=>{
+ const f=await setup(),owned=payload(),unknown=payload();await f.submit(owned);
+ const original=f.env.PRODUCTION_STATE.get;let release,started;
+ const gate=new Promise(r=>release=r),began=new Promise(r=>started=r);
+ f.env.PRODUCTION_STATE.get=id=>{const target=original(id);return {fetch:async request=>{
+  if(new URL(request.url).pathname==='/native-close-v2'&&(await request.clone().json()).root===unknown.requestID){started();await gate}
+  return target.fetch(request);
+ }}};
+ const pending=f.op('cancel',unknown);await began;
+ let stopped=false;const local=f.op('cancel',owned).then(r=>{stopped=true;return r});
+ try{
+  for(let i=0;i<15&&!stopped;i++)await new Promise(r=>setImmediate(r));
+  assert.equal(stopped,true,'unrelated ledger latency must not hold the local job transaction');
+  assert.equal((await(await local).json()).state,'cancelled');
+  assert.equal((await(await f.op('status',owned)).json()).state,'cancelled');assert.equal(f.calls.paid,0);
+ }finally{release();await pending}
+});
+
+test('lost cancellation claim acknowledgment is bounded, blocks delayed submit and resolves after restart without dispatch',async()=>{
+ const f=await setup(),p=payload(),original=f.env.PRODUCTION_STATE.get;let lost=true;
+ f.env.PRODUCTION_STATE.get=id=>{const target=original(id);return {fetch:async request=>{
+  const r=await target.fetch(request);if(new URL(request.url).pathname==='/native-close-v2'&&r.ok&&lost){lost=false;throw Error('lost close acknowledgment')}return r;
+ }}};
+ assert.equal((await f.op('cancel',p)).status,503);
+ assert(f.jobs.data.has('cancel-claim:'+jobKey(p.requestID,0)));assert(!f.jobs.data.has('job:'+jobKey(p.requestID,0)));
+ assert.equal((await f.submit(p)).status,409);assert(f.jobs.alarm!==null);
+ f.restart();await f.run();assert.equal((await(await f.op('status',p)).json()).state,'cancelled');
+ assert(!f.jobs.data.has('cancel-claim:'+jobKey(p.requestID,0)));assert.equal((await(await f.submit(p)).json()).state,'cancelled');
+ assert.equal(f.calls.paid,0);assert.equal(f.calls.count,0);assert.equal((await f.budget()).pendingMicroUSD,0);
+});
+
+test('unconfirmed cancellation claims share the normal job capacity and never grant provider execution',async()=>{
+ const f=await setup(),p=payload();
+ for(let i=0;i<ANSWER_JOBS.maxJobs;i++)f.jobs.data.set('cancel-claim:capacity-'+i,{userHash:'a'.repeat(64)});
+ const before=structuredClone(f.ledger.data);assert.equal((await f.submit(p)).status,429);assert.equal((await f.op('cancel',p)).status,429);
+ assert.deepEqual(f.ledger.data,before);assert.equal(f.jobs.data.size,ANSWER_JOBS.maxJobs);assert.equal(f.calls.paid,0);
+});

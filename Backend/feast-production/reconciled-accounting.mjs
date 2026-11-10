@@ -1,3 +1,4 @@
+import {attemptOwnershipBatch} from './attempt-ownership.mjs';
 import {pilotAccountingFetch} from './pilot-accounting.mjs';
 import {nativeAccountingFetch,NATIVE_PROFILE,NATIVE_ESTIMATE,NATIVE_PROFILES,nativeUsageCost} from './native-accounting.mjs';
 import {knownProviderRejection} from './provider-errors.mjs';
@@ -85,14 +86,11 @@ export async function reconciledFetch(storage,request,reconcileLegacy=false,env=
    const p=await request.json();
    if(!p||!/^[a-f0-9]{64}$/.test(p.userHash??'')||!Array.isArray(p.roots)||!p.roots.length||p.roots.length>64||new Set(p.roots).size!==p.roots.length||p.roots.some(x=>!/^[a-f0-9-]{36}$/i.test(x)))return json({error:'invalid_attempt'},400);
    return await storage.transaction(async tx=>{
-    const records=await rows(tx,V2+'request:');
+    const owners=await attemptOwnershipBatch(tx,p.roots,p.userHash);
     for(const root of p.roots){
-     const lookup=async prefix=>(await tx.get(prefix+root))??(await tx.get(prefix+root.toLowerCase()))??(await tx.get(prefix+root.toUpperCase()));
-     const identity=await lookup(V2+'stage-root:'),direct=await lookup(V2+'request:'),legacy=await lookup(V1+'request:'),closed=await tx.get(V2+'closed-root:'+root.toLowerCase());
-     const native=await lookup(V2+'native-root:');
-     const matching=records.filter(r=>r.rootRequestID?.toLowerCase()===root.toLowerCase());
-     if([identity,native,direct,legacy,closed,...matching].some(r=>r&&r.userHash!==p.userHash))return json({error:'attempt_unavailable'},403);
-     if([...(direct?[direct]:[]),...(legacy?[legacy]:[]),...matching].some(r=>!['complete','rejected','cancelled'].includes(r.state)))return json({error:'attempt_unsettled'},409);
+     const ownership=owners.get(root.toLowerCase());
+     if(!ownership.owned)return json({error:'attempt_unavailable'},403);
+     if(ownership.accounting.some(r=>!['complete','rejected','cancelled'].includes(r.state)))return json({error:'attempt_unsettled'},409);
     }
     for(const root of p.roots)await tx.put(V2+'closed-root:'+root.toLowerCase(),{userHash:p.userHash});
     return json({version:9,state:'fenced',roots:p.roots});

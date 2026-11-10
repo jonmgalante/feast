@@ -135,6 +135,33 @@ required. A new unrelated user question must not resume an older job.
    decoder still performs no provider requests. If accounting is disabled,
    content cleanup continues and compact settlement/fence intents wait safely.
 
+## Cancellation ownership and rollback compatibility
+
+Cancellation validates the logical root's owner across native, staged, direct-v2,
+and v1 records, including all UUID case aliases. Stop may close an owned pending
+root but does not settle or release its accounting exposure. Retry fencing still
+requires settled accounting and validates its whole batch before any close write.
+
+A cancel without a local job first reserves a compact `cancel-claim:` intent in
+that grant's existing AnswerJobs store. Claims and jobs share the existing 1,024
+entry bound. This is not a cancellation tombstone or provider dispatch permission.
+A matching delayed submit is blocked while ownership is unresolved. The shared
+ledger ownership/close RPC runs outside local storage transactions, so an unrelated
+owned Stop or status is not blocked by that RPC. Verified ownership converts the
+claim to a cancelled, fenced job; a definite ownership rejection removes only the
+claim; an ambiguous reply retains the bounded claim and alarm for an idempotent
+retry. Existing content cleanup takes priority over these retries. Claims contain
+only compact cancellation identity/timing metadata, not questions or answers.
+
+This is additive persisted metadata. A pre-fix binary does not understand an
+unconfirmed claim. Any separately approved rollback must therefore retain a
+claim-aware compatibility reader/alarm implementation, or first verify that no
+unresolved claims remain while acceptance/cancellation writers are quiesced.
+Do not delete claims or assume a timed-out close did not commit. Switching recovery
+OFF is not permission to replace the reader or erase the existing namespace.
+The larger reservation/dispatch-claim and uncertain-accounting remediation is
+separate and is not implemented by this cancellation repair.
+
 ## Offline checks
 
 From the repository root:

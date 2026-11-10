@@ -1,3 +1,4 @@
+import {attemptOwnership} from './attempt-ownership.mjs';
 // Provider-controlled usage accounting. Allowances are estimates, NOT dollar ceilings.
 import {stageID} from './stage-accounting.mjs';
 import {knownProviderRejection} from './provider-errors.mjs';
@@ -33,8 +34,7 @@ export async function nativeAccountingFetch(storage,request,view,rows){
   if(!integer(turn.responses)||turn.responses>12||!integer(turn.webActions)||turn.webActions>12||!integer(turn.revision)||typeof turn.privateLatched!=='boolean')return json({error:'native_accounting_corrupt'},503);
   if(root&&root.userHash!==p.userHash)return json({error:'native_identity'},403);
   if(path==='/native-close-v2'){
-   const closed=await tx.get(P+'closed-root:'+p.root);
-   if(closed&&closed.userHash!==p.userHash)return json({error:'native_identity'},403);
+   if(!(await attemptOwnership(tx,p.root,p.userHash)).owned)return json({error:'native_identity'},403);
    await tx.put(P+'closed-root:'+p.root,{userHash:p.userHash});
    return json({closed:true});
   }

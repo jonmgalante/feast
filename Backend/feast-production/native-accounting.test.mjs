@@ -53,3 +53,30 @@ test('settled historical Astra tool continuation is attested on real ledger afte
  assert.equal((await nativeConversationAnswer(next,'a'.repeat(64),env,send)).status,200);assert.equal(paid,2);
  assert.equal((await(await ledger.fetch(new Request('https://ledger/status-v2'))).json()).pendingMicroUSD,0);
 });
+
+test('Stop validates every cross-protocol owner and case alias before closing; pending owned exposure is unchanged',async()=>{
+ const V2='production-validation-v2:',V1='production-validation-v1:';
+ for(const kind of ['native','stage','direct','legacy','associated','closed','conflicting-alias']){
+  const {data,ledger}=setup(),p=request(),other='b'.repeat(64),mixed=p.root.slice(0,10).toUpperCase()+p.root.slice(10);
+  if(kind==='native')data.set(V2+'native-root:'+mixed,{userHash:other});
+  if(kind==='stage'||kind==='conflicting-alias')data.set(V2+'stage-root:'+mixed,{userHash:other});
+  if(kind==='conflicting-alias')data.set(V2+'stage-root:'+p.root,{userHash:p.userHash});
+  if(kind==='closed')data.set(V2+'closed-root:'+mixed,{userHash:other});
+  if(kind==='direct'||kind==='associated')data.set(V2+'request:'+(kind==='direct'?mixed:crypto.randomUUID()),{userHash:other,profile:'saved',reservedMicroUSD:2500000,state:'pending',...(kind==='associated'?{rootRequestID:mixed}:{})});
+  if(kind==='legacy'){data.set(V1+'request:'+mixed,{userHash:other,reservedMicroUSD:2500000,state:'pending'});data.set(V1+'total',2500000)}
+  const before=structuredClone(data),response=await ledger.fetch(new Request('https://ledger/native-close-v2',{method:'POST',body:JSON.stringify(p)}));
+  assert.equal(response.status,403,kind);assert.deepEqual(data,before,kind+' must not write a close fence');
+ }
+ const {a,data,ledger}=setup(),p=request();await reserve(a,p);const before=structuredClone(data);
+ const response=await ledger.fetch(new Request('https://ledger/native-close-v2',{method:'POST',body:JSON.stringify(p)}));assert.equal(response.status,200);
+ assert.deepEqual(new Map([...data].filter(([k])=>!k.startsWith(V2+'closed-root:'))),before);
+ assert.equal((await(await ledger.fetch(new Request('https://ledger/status-v2'))).json()).pendingMicroUSD,NATIVE_ESTIMATE);
+});
+
+test('retry fencing fails closed on corrupt scanned accounting history without partial close writes',async()=>{
+ for(const malformed of [null,[],42,{rootRequestID:42}]){
+  const {data,ledger}=setup(),p=request();data.set('production-validation-v2:request:'+crypto.randomUUID(),malformed);
+  const before=structuredClone(data),r=await ledger.fetch(new Request('https://ledger/fence-v2',{method:'POST',body:JSON.stringify({userHash:p.userHash,roots:[p.root]})}));
+  assert.equal(r.status,503);assert.deepEqual(data,before);
+ }
+});

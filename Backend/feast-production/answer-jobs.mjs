@@ -5,7 +5,7 @@ import {nativeAccountingAdapter} from './native-accounting.mjs';
 import {phoneStore,accessJSON} from './phone-access.mjs';
 import {boundedResponse} from '../feast-proxy/openai.mjs';
 import {providerFailure,knownProviderRejection} from './provider-errors.mjs';
-const META='job:',BLOB='content:';
+const META='job:',BLOB='content:',CANCEL_CLAIM='cancel-claim:';
 const json=(v,status=200)=>Response.json(v,{status,headers:{'Cache-Control':'no-store'}});
 const terminal=s=>['completed','failed','uncertain','cancelled','expired','acknowledged'].includes(s);
 const safeError=e=>/^[a-z_]{1,100}$/.test(e?.message??'')?e.message:'answer_job_unavailable';
@@ -46,6 +46,34 @@ export class AnswerJobs {
  async read(key){return this.storage.transaction(tx=>tx.get(META+key))}
  async wake(tx,at){const previous=await tx.getAlarm();if(previous===null||previous>at)await tx.setAlarm(at)}
  async list(){return this.storage.transaction(async tx=>[...(await tx.list({prefix:META,limit:LIMIT.maxJobs+1})).values()])}
+ // Unconfirmed cancel claims reserve capacity, but are NOT job tombstones.
+ // This lets ownership RPCs run outside local transactions, so unrelated owned
+ // Stop/status remains available when the shared ledger is slow or unavailable.
+ async cancellationClaim(c,p,now){
+  return this.storage.transaction(async tx=>{
+   const key=jobKey(c.requestID,c.step);if(await tx.get(META+key))return null;
+   const prior=await tx.get(CANCEL_CLAIM+key);if(prior)return prior.userHash===p.userHash?prior:json({error:'unauthorized'},401);
+   const jobs=await tx.list({prefix:META,limit:LIMIT.maxJobs+1}),claims=await tx.list({prefix:CANCEL_CLAIM,limit:LIMIT.maxJobs+1});
+   if(jobs.size+claims.size>=LIMIT.maxJobs)return json({error:'answer_job_capacity'},429);
+   const claim={key,requestID:c.requestID,turnID:c.requestID,step:c.step,userHash:p.userHash,credentialHash:p.credentialHash,createdAt:now,expiresAt:now+LIMIT.contentTTL,purgeAt:now+LIMIT.tombstoneTTL};
+   await tx.put(CANCEL_CLAIM+key,claim);await this.wake(tx,now+1);return claim;
+  });
+ }
+ async resolveCancellationClaim(claim){
+  // The ledger claim is idempotent. Unknown acknowledgment retains this bounded
+  // intent and wake-up; neither timeout nor expiry proves ownership or no work.
+  try{await this.close(claim)}catch(error){
+   if(error.accountingStatus!==403)throw error;
+   await this.storage.transaction(tx=>tx.delete(CANCEL_CLAIM+claim.key));return false;
+  }
+  await this.storage.transaction(async tx=>{
+   const current=await tx.get(CANCEL_CLAIM+claim.key);if(!current)return;
+   if(current.userHash!==claim.userHash)throw Error('answer_job_identity');
+   if(!await tx.get(META+claim.key))await tx.put(META+claim.key,{...current,digest:null,state:'cancelled',phase:'done',cancelled:true,hasContent:false,needsFence:false,fenced:true});
+   await tx.delete(CANCEL_CLAIM+claim.key);await this.wake(tx,this.now()+1);
+  });
+  this.notify(claim.key);return true;
+ }
  async view(j,longPollTimedOut=false){
   if(this.now()>=j.expiresAt&&!j.expired){
    await this.mutate(j.key,async(x,tx)=>{x.expired=true;x.needsFence=true;await this.wake(tx,this.now()+1)});
@@ -72,8 +100,9 @@ export class AnswerJobs {
     const accepted=await this.storage.transaction(async tx=>{
      const prior=await tx.get(META+key);
      if(prior){if(prior.userHash!==p.userHash)return json({error:'unauthorized'},401);if(prior.digest&&prior.digest!==digest)return json({error:'answer_job_conflict'},409);return prior}
-     const jobs=[...(await tx.list({prefix:META,limit:LIMIT.maxJobs+1})).values()];
-     if(jobs.length>=LIMIT.maxJobs||jobs.filter(j=>j.hasContent).length>=LIMIT.maxContentJobs||jobs.filter(j=>!terminal(j.state)&&!stopped(j)).length>=LIMIT.maxActive)return json({error:'answer_job_capacity'},429);
+     if(await tx.get(CANCEL_CLAIM+key))return json({error:'answer_job_cancel_pending'},409);
+     const jobs=[...(await tx.list({prefix:META,limit:LIMIT.maxJobs+1})).values()],claims=await tx.list({prefix:CANCEL_CLAIM,limit:LIMIT.maxJobs+1});
+     if(jobs.length+claims.size>=LIMIT.maxJobs||jobs.filter(j=>j.hasContent).length>=LIMIT.maxContentJobs||jobs.filter(j=>!terminal(j.state)&&!stopped(j)).length>=LIMIT.maxActive)return json({error:'answer_job_capacity'},429);
      const j={key,requestID:payload.requestID,step:payload.step,turnID:payload.turnID,userHash:p.userHash,credentialHash:p.credentialHash,digest,recoveryKey:await jobDigest({userHash:p.userHash,key,digest}),model,state:'queued',phase:'accepted',createdAt:now,expiresAt:now+LIMIT.contentTTL,purgeAt:now+LIMIT.tombstoneTTL,hasContent:true};
      await this.blob(tx,key,'payload',payload);await tx.put(META+key,j);
      // Acceptance and its independent wake-up commit atomically BEFORE the
@@ -89,18 +118,16 @@ export class AnswerJobs {
    }
    if(!sameKeys(c,['version','op','requestID','step'])||!jobUUID(c.requestID)||!jobStep(c.step))return json({error:'invalid_answer_job'},400);
    const key=jobKey(c.requestID,c.step),now=this.now();
+   if(c.op==='cancel'){
+    const claim=await this.cancellationClaim(c,p,now);if(claim instanceof Response)return claim;
+    if(claim&&!await this.resolveCancellationClaim(claim))return json({error:'answer_job_unavailable'},403);
+   }
    let j=await this.storage.transaction(async tx=>{
     let j=await tx.get(META+key);
-    if(!j){
-     if(c.op!=='cancel')return null;
-     if((await tx.list({prefix:META,limit:LIMIT.maxJobs+1})).size>=LIMIT.maxJobs)return json({error:'answer_job_capacity'},429);
-     // Stop may arrive before a delayed submit. Retain a tombstone so that the
-     // delayed submit cannot start work the user already cancelled.
-     j={key,requestID:c.requestID,turnID:c.requestID,step:c.step,userHash:p.userHash,credentialHash:p.credentialHash,digest:null,state:'cancelled',phase:'done',cancelled:true,createdAt:now,expiresAt:now+LIMIT.contentTTL,purgeAt:now+LIMIT.tombstoneTTL,needsFence:true};
-    }
+    if(!j)return null;
     if(j.userHash!==p.userHash)return json({error:'unauthorized'},401);
     if(now>=j.expiresAt){j.expired=true;j.needsFence=true}
-    if(c.op==='cancel'){j.cancelled=true;j.needsFence=true}
+    if(c.op==='cancel'){j.cancelled=true;j.needsFence=!j.fenced}
     if(c.op==='ack'){
      if(!terminal(j.state)&&!stopped(j))return json({error:'answer_job_not_complete'},409);
      j.acknowledged=true;
@@ -138,13 +165,13 @@ export class AnswerJobs {
  async close(j){
   const ledger=this.env.PRODUCTION_STATE.get(this.env.PRODUCTION_STATE.idFromName('production-validation-v1'));
   const r=await ledger.fetch(new Request('https://ledger/native-close-v2',{method:'POST',body:JSON.stringify({userHash:j.userHash,root:j.requestID,turnID:j.turnID,step:j.step})}));
-  if(!r.ok)throw Error('answer_job_fence_unavailable');
+  if(!r.ok)throw Object.assign(Error('answer_job_fence_unavailable'),{accountingStatus:r.status});
  }
  async schedule(){
   await this.storage.transaction(async tx=>{
-   const jobs=[...(await tx.list({prefix:META,limit:LIMIT.maxJobs+1})).values()],now=this.now();
-   if(!jobs.length){await tx.deleteAlarm();return}
-   const next=Math.min(...jobs.map(j=>j.phase!=='done'||j.needsFence?now+LIMIT.retryMs:Math.min(j.expired||j.acknowledged||j.cancelled?Infinity:j.expiresAt,j.purgeAt)));
+   const jobs=[...(await tx.list({prefix:META,limit:LIMIT.maxJobs+1})).values()],claims=await tx.list({prefix:CANCEL_CLAIM,limit:LIMIT.maxJobs+1}),now=this.now();
+   if(!jobs.length&&!claims.size){await tx.deleteAlarm();return}
+   const next=Math.min(claims.size?now+LIMIT.retryMs:Infinity,...jobs.map(j=>j.phase!=='done'||j.needsFence?now+LIMIT.retryMs:Math.min(j.expired||j.acknowledged||j.cancelled?Infinity:j.expiresAt,j.purgeAt)));
    await tx.setAlarm(Math.max(now+1,next));
   });
  }
@@ -158,6 +185,9 @@ export class AnswerJobs {
    if(j.needsFence){try{await this.close(j);j=await this.mutate(j.key,async x=>{x.needsFence=false;x.fenced=true})}catch{/* Keep only the compact fence and accounting intent for retry. */}}
    if(this.now()>=j.purgeAt&&j.fenced&&j.phase==='done')await this.storage.transaction(async tx=>{await this.eraseContent(tx,j.key);await tx.delete(META+j.key)});
   }
+  // Existing job cleanup takes priority over unrelated unconfirmed claims.
+  const claims=await this.storage.transaction(async tx=>[...(await tx.list({prefix:CANCEL_CLAIM,limit:LIMIT.maxJobs+1})).values()]);
+  for(const claim of claims){try{await this.resolveCancellationClaim(claim)}catch{/* Keep bounded claim and retry without blocking local Stop/status. */}}
  }
  async retireContent(key){
   return this.mutate(key,async(j,tx)=>{
