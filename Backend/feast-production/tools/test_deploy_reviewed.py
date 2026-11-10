@@ -30,4 +30,24 @@ class Tests(unittest.TestCase):
  def test_activation_or_storage_scope_change_rejected(self):
   p=self.root/'production/wrangler.json';c=json.loads(p.read_text());c['vars']['LIVE_AI']='true';p.write_text(json.dumps(c));self.m['files']['production/wrangler.json']=h.sha(p);(self.root/'manifest.json').write_text(json.dumps(self.m))
   with self.assertRaises(ValueError):h.inspect(self.root)
+ def test_exact_recovery_off_scaffold_and_legacy_packet_supported(self):
+  h.inspect(self.root)
+  p=self.root/'production/wrangler.json';c=json.loads(p.read_text())
+  del c['vars']['ASK_FEAST_RECOVERY_ENABLED'];c['durable_objects']['bindings'].pop();c['migrations'].pop()
+  p.write_text(json.dumps(c));self.m['files']['production/wrangler.json']=h.sha(p);(self.root/'manifest.json').write_text(json.dumps(self.m));h.inspect(self.root)
+ def test_recovery_schema_is_atomic_and_rejects_new_permissions_storage_and_activation(self):
+  p=self.root/'production/wrangler.json';original=json.loads(p.read_text())
+  for bad in ['enabled','missing-flag','missing-binding','missing-migration','wrong-class','extra-binding','changed-ledger','extra-migration']:
+   with self.subTest(bad=bad):
+    c=json.loads(json.dumps(original))
+    if bad=='enabled':c['vars']['ASK_FEAST_RECOVERY_ENABLED']='true'
+    if bad=='missing-flag':del c['vars']['ASK_FEAST_RECOVERY_ENABLED']
+    if bad=='missing-binding':c['durable_objects']['bindings'].pop()
+    if bad=='missing-migration':c['migrations'].pop()
+    if bad=='wrong-class':c['durable_objects']['bindings'][1]['class_name']='Replacement'
+    if bad=='extra-binding':c['durable_objects']['bindings'].append({'name':'EXTRA','class_name':'Extra'})
+    if bad=='changed-ledger':c['migrations'][0]['tag']='replacement'
+    if bad=='extra-migration':c['migrations'].append({'tag':'unreviewed','new_sqlite_classes':['Extra']})
+    p.write_text(json.dumps(c));self.m['files']['production/wrangler.json']=h.sha(p);(self.root/'manifest.json').write_text(json.dumps(self.m))
+    with self.assertRaises(ValueError):h.inspect(self.root)
 if __name__=='__main__':unittest.main()

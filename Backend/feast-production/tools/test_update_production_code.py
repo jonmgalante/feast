@@ -18,6 +18,12 @@ class LiveAPI(f.MockAPI):
   result=super().request(method,name,suffix,body,content_type)
   if method=='POST' and suffix=='/deployments':return copy.deepcopy(self.ack)
   return result
+def add_recovery_off_schema(api):
+ r=api.versions[h.PRODUCTION][api.live[h.PRODUCTION]]['resources']
+ r['bindings'] += [{'name':'ASK_FEAST_RECOVERY_ENABLED','type':'plain_text','text':'false'}, {'name':'ANSWER_JOBS','type':'durable_object_namespace','namespace_id':'36011118f6cc49ee910df65aa1a4cd8b','class_name':'AnswerJobs'}]
+ r['script_runtime']['migration_tag']='answer-jobs-v1'
+ r['script_runtime']['exports']['AnswerJobs']={'type':'durable-object','storage':'sqlite','state':'created'}
+ return r
 class OwnerLiveAPI(LiveAPI):
  def request(self,method,name,suffix='',body=None,content_type=None):
   if method!='GET' and name!=h.OWNER:raise AssertionError('production mutation in owner action')
@@ -29,6 +35,34 @@ class Tests(unittest.TestCase):
  tearDown=f.Tests.tearDown
  def run_update(self,api):return h.run(self.packet,api,dict(h.u.EXPECTED),self.packet/'production-only-receipt.json',h.u.reviewed.sha(self.packet/'production/worker.js'),pause=lambda _:None)
  def receipt(self):return json.loads((self.packet/'production-only-receipt.json').read_text())
+ def test_recovery_off_current_schema_preserved_by_code_only_update(self):
+  api=LiveAPI();add_recovery_off_schema(api);before=copy.deepcopy(api.versions[h.PRODUCTION][api.live[h.PRODUCTION]]['resources'])
+  h.resources(h.PRODUCTION,api.versions[h.PRODUCTION][api.live[h.PRODUCTION]])
+  self.assertTrue(self.run_update(api));self.assertEqual(len(api.events),2)
+  after=api.versions[h.PRODUCTION][api.live[h.PRODUCTION]]['resources']
+  self.assertEqual(sorted(before['bindings'],key=lambda x:x['name']),sorted(after['bindings'],key=lambda x:x['name']))
+  self.assertEqual(before['script_runtime'],after['script_runtime'])
+  metadata=api.uploads[0][1];self.assertNotIn('migration_tag',metadata);self.assertNotIn('migrations',metadata)
+  self.assertTrue(all(x['type']=='inherit' for x in metadata['bindings']))
+ def test_retained_current_metadata_may_omit_optional_exports_without_inventing_them(self):
+  api=LiveAPI();r=add_recovery_off_schema(api);del r['script_runtime']['exports']
+  self.assertTrue(self.run_update(api));self.assertEqual(len(api.events),2)
+  metadata=api.uploads[0][1]
+  self.assertNotIn('exports',metadata);self.assertNotIn('migration_tag',metadata);self.assertNotIn('migrations',metadata)
+ def test_recovery_shape_rejects_activation_namespace_export_or_migration_drift(self):
+  for bad in ['enabled','missing-flag','missing-binding','namespace','class','migration','missing-export','extra-export','storage']:
+   with self.subTest(bad=bad):
+    api=LiveAPI();r=add_recovery_off_schema(api);b={x['name']:x for x in r['bindings']};runtime=r['script_runtime']
+    if bad=='enabled':b['ASK_FEAST_RECOVERY_ENABLED']['text']='true'
+    if bad=='missing-flag':r['bindings'].remove(b['ASK_FEAST_RECOVERY_ENABLED'])
+    if bad=='missing-binding':r['bindings'].remove(b['ANSWER_JOBS'])
+    if bad=='namespace':b['ANSWER_JOBS']['namespace_id']='unreviewed'
+    if bad=='class':b['ANSWER_JOBS']['class_name']='Replacement'
+    if bad=='migration':runtime['migration_tag']='unreviewed'
+    if bad=='missing-export':del runtime['exports']['AnswerJobs']
+    if bad=='extra-export':runtime['exports']['Extra']={'type':'durable-object','storage':'sqlite'}
+    if bad=='storage':runtime['exports']['AnswerJobs']['storage']='kv'
+    with self.assertRaises(h.u.SafeStop):h.resources(h.PRODUCTION,api.versions[h.PRODUCTION][api.live[h.PRODUCTION]])
  def test_owner_only_upload_preserves_production_secrets_namespace_and_live_settings(self):
   api=OwnerLiveAPI();before=copy.deepcopy(api.versions[h.PRODUCTION]);settings=copy.deepcopy(api.settings)
   self.assertTrue(h.run(self.packet,api,dict(h.u.EXPECTED),self.packet/'owner-only-receipt.json',h.u.reviewed.sha(self.packet/'owner/worker.js'),pause=lambda _:None,target=h.OWNER))

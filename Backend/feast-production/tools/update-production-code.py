@@ -7,6 +7,9 @@ import argparse,copy,getpass,importlib.util,json,os,pathlib,re,resource,sys,time
 spec=importlib.util.spec_from_file_location('utilities',pathlib.Path(__file__).with_name('update-existing.py'))
 u=importlib.util.module_from_spec(spec);spec.loader.exec_module(u)
 PRODUCTION='feast-proxy-production';OWNER='feast-owner-validation'
+# Existing additive namespace, verified from retained 2026-11-10 release metadata.
+# Code-only updates inherit it; this helper never creates or migrates storage.
+ANSWER_JOBS_NAMESPACE='36011118f6cc49ee910df65aa1a4cd8b'
 MODULE_SHA='2279aa24d13cb9982b7dc08602caf2720cde03993355903eef9627695b9a3147'
 OWNER_MODULE_SHA='26708c9e883c2c9fdf4fe9922f096bf0ddc0ebdb33486e5b7a8985279613ade9'
 class ProductionAPI(u.API):
@@ -36,19 +39,28 @@ def resources(name,detail):
   if b.get('OWNER_TOKEN_HASHES_JSON',{}).get('type')!='secret_text':raise u.SafeStop('owner secret absent')
  runtime=r['script_runtime']
  if not isinstance(runtime,dict) or set(runtime)-u.RUNTIME_KEYS or runtime.get('compatibility_date')!='2026-10-20':raise u.SafeStop('unknown runtime')
- if runtime.get('migration_tag') not in [None,'production-v1']:raise u.SafeStop('migration drift')
+ recovery_schema=any([name==PRODUCTION and 'ASK_FEAST_RECOVERY_ENABLED' in b,'ANSWER_JOBS' in b,runtime.get('migration_tag')=='answer-jobs-v1',isinstance(runtime.get('exports'),dict) and 'AnswerJobs' in runtime['exports']])
+ if recovery_schema:
+  jobs=b.get('ANSWER_JOBS',{})
+  if name!=PRODUCTION or v.get('ASK_FEAST_RECOVERY_ENABLED')!='false':raise u.SafeStop('recovery must remain disabled')
+  if jobs.get('type')!='durable_object_namespace' or jobs.get('namespace_id')!=ANSWER_JOBS_NAMESPACE or jobs.get('class_name')!='AnswerJobs':raise u.SafeStop('answer jobs namespace drift')
+  if runtime.get('migration_tag')!='answer-jobs-v1':raise u.SafeStop('migration drift')
+  # Cloudflare may omit optional exports metadata entirely. If supplied, its
+  # declaration must include AnswerJobs; the reviewed code hash still pins code.
+  if runtime.get('exports') is not None and (not isinstance(runtime['exports'],dict) or 'AnswerJobs' not in runtime['exports']):raise u.SafeStop('answer jobs export absent')
+ elif runtime.get('migration_tag') not in [None,'production-v1']:raise u.SafeStop('migration drift')
  for key in ['limits','migration_tag','usage_model']:
   if runtime.get(key) is None:runtime.pop(key,None)
  if runtime.get('usage_model') not in [None,'standard','bundled','unbound']:raise u.SafeStop('usage mode')
  if runtime.get('compatibility_flags') is None:runtime['compatibility_flags']=[]
  if not isinstance(runtime['compatibility_flags'],list) or any(not isinstance(x,str) for x in runtime['compatibility_flags']):raise u.SafeStop('runtime flags')
  if runtime.get('exports') is None:runtime['exports']={}
- exports=runtime['exports'];allowed={'ProductionLedger','OwnerValidationRPC'} if name==PRODUCTION else set()
+ exports=runtime['exports'];allowed=({'ProductionLedger','OwnerValidationRPC'}|({'AnswerJobs'} if recovery_schema else set())) if name==PRODUCTION else set()
  if not isinstance(exports,dict) or set(exports)-allowed:raise u.SafeStop('exports shape')
  for key,value in exports.items():
-  kind='durable-object' if key=='ProductionLedger' else 'worker'
+  kind='durable-object' if key in ['ProductionLedger','AnswerJobs'] else 'worker'
   if not isinstance(value,dict) or set(value)-{'type','state','storage'} or value.get('type')!=kind or value.get('state') not in [None,'created']:raise u.SafeStop('export lifecycle')
-  if (key=='ProductionLedger' and value.get('storage')!='sqlite') or (kind=='worker' and 'storage' in value):raise u.SafeStop('export storage')
+  if (kind=='durable-object' and value.get('storage')!='sqlite') or (kind=='worker' and 'storage' in value):raise u.SafeStop('export storage')
   if value.get('state') is None:value.pop('state',None)
  limits=runtime.get('limits')
  if limits is not None and (not isinstance(limits,dict) or set(limits)-{'cpu_ms'} or any(not isinstance(x,int) or isinstance(x,bool) or x<=0 for x in limits.values())):raise u.SafeStop('limits shape')

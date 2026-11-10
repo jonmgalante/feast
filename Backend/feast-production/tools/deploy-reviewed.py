@@ -21,8 +21,16 @@ def inspect(packet):
         common={'name','main','account_id','compatibility_date','workers_dev','preview_urls','observability','send_metrics','vars'}
         if c.get('workers_dev') is not True or c.get('preview_urls') is not False or c.get('compatibility_date')!='2026-10-20': raise ValueError('unexpected network configuration')
         if folder=='production':
-            if set(c)!=common|{'durable_objects','migrations'} or c['vars']!={'ENVIRONMENT':'production','ENABLED':'false','LIVE_AI':'false','OWNER_VALIDATION_ENABLED':'false',**{k:'false' for k in ['ALLOW_PUBLIC_LOOKUP','ALLOW_RECONCILED_BUDGET','ALLOW_LEGACY_RECONCILIATION'] if k in c['vars']}}: raise ValueError('dispatch forbidden')
-            if c['durable_objects']!={'bindings':[{'name':'PRODUCTION_STATE','class_name':'ProductionLedger'}]} or c['migrations']!=[{'tag':'production-v1','new_sqlite_classes':['ProductionLedger']}]: raise ValueError('unexpected storage change')
+            if set(c)!=common|{'durable_objects','migrations'} or c['vars']!={'ENVIRONMENT':'production','ENABLED':'false','LIVE_AI':'false','OWNER_VALIDATION_ENABLED':'false',**{k:'false' for k in ['ALLOW_PUBLIC_LOOKUP','ALLOW_RECONCILED_BUDGET','ALLOW_LEGACY_RECONCILIATION','ASK_FEAST_RECOVERY_ENABLED'] if k in c['vars']}}: raise ValueError('dispatch forbidden')
+            # Two explicit reviewed schemas: the historical ledger-only packet,
+            # or the additive AnswerJobs scaffold with recovery still OFF. A
+            # partial migration/binding/flag combination is never accepted.
+            bindings=[{'name':'PRODUCTION_STATE','class_name':'ProductionLedger'}]
+            migrations=[{'tag':'production-v1','new_sqlite_classes':['ProductionLedger']}]
+            if 'ASK_FEAST_RECOVERY_ENABLED' in c['vars']:
+                bindings.append({'name':'ANSWER_JOBS','class_name':'AnswerJobs'})
+                migrations.append({'tag':'answer-jobs-v1','new_sqlite_classes':['AnswerJobs']})
+            if c['durable_objects']!={'bindings':bindings} or c['migrations']!=migrations: raise ValueError('unexpected storage change')
         else:
             if set(c)!=common|{'services'} or c['vars']!={'ENABLED':'false','LIVE_AI':'false',**{k:'false' for k in ['ALLOW_PUBLIC_LOOKUP','ALLOW_RECONCILED_BUDGET'] if k in c['vars']}} or c['services']!=[{'binding':'PRODUCTION','service':'feast-proxy-production','entrypoint':'OwnerValidationRPC'}]: raise ValueError('unexpected owner binding')
     cli=pathlib.Path(m['wranglerCLI']).resolve(); package=cli.parent.parent/'package.json'
