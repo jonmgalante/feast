@@ -37,5 +37,10 @@ try{
  await mf.dispose();options.bindings.TEST_DELAY_ALARM='false';mf=new Miniflare(convertV4MiniflareOptions(options));await mf.ready;
  const fast={...p,requestID:crypto.randomUUID(),turnID:crypto.randomUUID()},started=performance.now();
  const fastResult=await(await post('/v1/answer-jobs',{version:1,op:'submit',request:fast})).json();assert.equal(fastResult.state,'completed');assert(performance.now()-started<1500,'foreground must not impose a polling interval');assert.equal(paid,2);
- console.log('PASS real offline SQLite/workerd: atomic accepted job/alarm survives runtime restart before dispatch; exactly one mocked provider call; durable result retrieval/replay, mismatch rejection, sponsor redaction, acknowledgment. Zero live provider calls.');
+ const cancelled={...p,requestID:crypto.randomUUID(),turnID:crypto.randomUUID()};
+ const stop=await(await post('/v1/answer-jobs',{version:1,op:'cancel',requestID:cancelled.requestID,step:0})).json();assert.equal(stop.state,'cancelled');
+ assert.equal((await(await post('/v1/answer-jobs',{version:1,op:'submit',request:cancelled})).json()).state,'cancelled');assert.equal(paid,2);
+ await mf.dispose();mf=new Miniflare(convertV4MiniflareOptions(options));await mf.ready;
+ assert.equal((await(await post('/v1/answer-jobs',{version:1,op:'status',requestID:cancelled.requestID,step:0})).json()).state,'cancelled');assert.equal(paid,2);
+ console.log('PASS real offline SQLite/workerd: atomic accepted job/alarm survives runtime restart before dispatch; exactly one mocked provider call; durable result retrieval/replay, mismatch rejection, sponsor redaction, acknowledgment, and ownership-claimed cancel-before-submit across restart. Zero live provider calls.');
 }finally{if(mf)await mf.dispose();await rm(root,{recursive:true,force:true})}
