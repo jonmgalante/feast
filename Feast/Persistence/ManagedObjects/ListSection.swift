@@ -24,6 +24,15 @@ extension ListSection {
         name ?? "Untitled Neighborhood"
     }
 
+    /// Archive hierarchy is presented as flat paths without changing its stored edges.
+    var isVisibleNeighborhood: Bool {
+        parent == nil || PlaceImport.preservesRawLegacyValues(id)
+    }
+
+    var neighborhoodDisplayName: String {
+        PlaceImport.preservesRawLegacyValues(id) && parent != nil ? pathDisplay : displayName
+    }
+
     var sortedChildren: [ListSection] {
         let values = children as? Set<ListSection> ?? []
         return values.sorted { lhs, rhs in

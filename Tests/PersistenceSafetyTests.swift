@@ -243,6 +243,7 @@ final class FailingContext: NSManagedObjectContext, @unchecked Sendable {
         let reopenedEmpty = try emptyCoordinator.addPersistentStore(ofType: NSSQLiteStoreType, configurationName: nil, at: emptyURL)
         precondition((emptyCoordinator.metadata(for: reopenedEmpty)["FeastSafeStartupMigrationVersion"] as? Int) == 1)
         print("PASS durable migration data and completion marker survive store close/reopen")
+        try await LibraryArchiveTests.run(model: model, directory: URL(fileURLWithPath: CommandLine.arguments[2]))
         try await BrowsingConsistencyTests.run(model: model)
         await InstagramAutofillTests.run()
         await NearbyLocationTests.run()

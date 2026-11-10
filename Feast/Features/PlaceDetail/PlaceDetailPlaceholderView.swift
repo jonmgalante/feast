@@ -172,7 +172,7 @@ struct SavedPlaceDetailView: View {
 
     private var selectedNeighborhoodName: String? {
         if let selectedNeighborhood {
-            return selectedNeighborhood.displayName
+            return selectedNeighborhood.neighborhoodDisplayName
         }
 
         guard case let .create(neighborhoodName) = selectedNeighborhoodSelection else {
@@ -209,7 +209,7 @@ struct SavedPlaceDetailView: View {
 
 
     private var allNeighborhoods: [ListSection] {
-        savedPlace.feastList?.neighborhoodSections ?? []
+        savedPlace.feastList?.visibleNeighborhoodSections ?? []
     }
 
     private var selectedNeighborhood: ListSection? {
@@ -222,7 +222,7 @@ struct SavedPlaceDetailView: View {
             return allNeighborhoods.first { $0.objectID == objectID }
         case let .create(neighborhoodName):
             return allNeighborhoods.first { neighborhood in
-                FeastNeighborhoodName.matches(
+                neighborhood.parent == nil && FeastNeighborhoodName.matches(
                     neighborhood.displayName,
                     neighborhoodName
                 )
@@ -440,6 +440,13 @@ struct SavedPlaceDetailView: View {
 
                 FeastFormDivider()
 
+                if let guidance = savedPlace.restoredLegacyGuidance {
+                    FeastFormField(title: "Restored legacy guidance", helper: "Preserved separately from your note.") {
+                        Text(guidance).textSelection(.enabled)
+                    }
+                    FeastFormDivider()
+                }
+
                 FeastFormField(title: "Website") {
                     VStack(alignment: .leading, spacing: FeastTheme.Spacing.small) {
                         FeastSingleLineTextField(
@@ -526,7 +533,7 @@ struct SavedPlaceDetailView: View {
                             .tag(AddPlaceNeighborhoodSelection.manualEntry)
 
                         ForEach(allNeighborhoods) { neighborhood in
-                            Text(neighborhood.displayName)
+                            Text(neighborhood.neighborhoodDisplayName)
                                 .tag(AddPlaceNeighborhoodSelection.existing(neighborhood.objectID))
                         }
                     }
@@ -724,7 +731,7 @@ struct SavedPlaceDetailView: View {
         }
 
         if let existingNeighborhood = allNeighborhoods.first(where: { neighborhood in
-            FeastNeighborhoodName.matches(
+            neighborhood.parent == nil && FeastNeighborhoodName.matches(
                 neighborhood.displayName,
                 canonicalNeighborhoodName
             )

@@ -27,6 +27,13 @@ public final class SavedPlace: NSManagedObject {
 extension SavedPlace: Identifiable {}
 
 extension SavedPlace {
+    /// Legacy guidance retained by lossless restore remains readable, without folding
+    /// it into the note or mutating either raw field when the detail view opens.
+    var restoredLegacyGuidance: String? {
+        guard PlaceImport.preservesRawLegacyValues(id), let skipNote, !skipNote.isEmpty else { return nil }
+        return skipNote
+    }
+
     var applePlaceIDValue: String? {
         guard let applePlaceID, !applePlaceID.isEmpty else {
             return nil

@@ -435,7 +435,7 @@ private struct AddPlaceSaveView: View {
     }()
 
     private var allNeighborhoods: [ListSection] {
-        feastList.neighborhoodSections
+        feastList.visibleNeighborhoodSections
     }
 
     private var reviewDraft: PlaceReviewDraft {
@@ -457,7 +457,7 @@ private struct AddPlaceSaveView: View {
             return allNeighborhoods.first { $0.objectID == objectID }
         case let .create(neighborhoodName):
             return allNeighborhoods.first { neighborhood in
-                FeastNeighborhoodName.matches(
+                neighborhood.parent == nil && FeastNeighborhoodName.matches(
                     neighborhood.displayName,
                     neighborhoodName
                 )
@@ -762,7 +762,7 @@ private struct AddPlaceSaveView: View {
                             .tag(AddPlaceNeighborhoodSelection.manualEntry)
 
                         ForEach(allNeighborhoods) { neighborhood in
-                            Text(neighborhood.displayName)
+                            Text(neighborhood.neighborhoodDisplayName)
                                 .tag(AddPlaceNeighborhoodSelection.existing(neighborhood.objectID))
                         }
                     }
@@ -864,7 +864,7 @@ private struct AddPlaceSaveView: View {
         }
 
         if let existingNeighborhood = allNeighborhoods.first(where: { neighborhood in
-            FeastNeighborhoodName.matches(
+            neighborhood.parent == nil && FeastNeighborhoodName.matches(
                 neighborhood.displayName,
                 canonicalNeighborhoodName
             )

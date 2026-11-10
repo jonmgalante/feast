@@ -20,6 +20,7 @@ struct ListsRootView: View {
     @State private var pendingExportURL: URL?
     @State private var exportError: String?
     @State private var showingNotesImportFlow = false
+    @State private var showingLibraryImportFlow = false
     @State private var cityEditor: CityEditorState?
     @State private var listPendingDeletion: FeastList?
     private var searchText: String { browse.filters.queryText }
@@ -73,7 +74,7 @@ struct ListsRootView: View {
                 Button("Export library") { exportLibrary() }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("Export notes, links, categories, and city and neighborhood organization from the places currently available on this device. Shared or unsynced changes may be missing. Feast does not yet restore exports.")
+                Text("Export all saved-library details and relationships currently on this device, plus available sharing information. Shared or unsynced changes may be missing. Ask Feast conversations are not included. This file contains private notes and is not password-encrypted. Imports create independent private copies, not shared cities.")
             }
             .sheet(isPresented: Binding(get: { exportURL != nil }, set: { if !$0 { removeExport() } }), onDismiss: removeExport) {
                 if let exportURL { ExportShareSheet(url: exportURL) }
@@ -109,6 +110,9 @@ struct ListsRootView: View {
                         availableTags: FeastTag.catalog(from: savedPlaces.map(\.tags))
                     )
                 }
+            }
+            .sheet(isPresented: $showingLibraryImportFlow) {
+                NavigationStack { LibraryImportFlowView() }
             }
             .sheet(isPresented: $showingNotesImportFlow) {
                 NavigationStack {
@@ -412,6 +416,7 @@ struct ListsRootView: View {
 
                 Menu {
                     Button("Import from Notes", systemImage: "square.and.arrow.down") { presentImportFromNotes() }
+                    Button("Import library", systemImage: "doc.badge.arrow.up") { showingLibraryImportFlow = true }
                     Button("Export library", systemImage: "square.and.arrow.up") { confirmingExport = true }
                 } label: {
                     FeastToolbarSymbol(systemName: "ellipsis")
@@ -436,10 +441,10 @@ struct ListsRootView: View {
 
     private func exportLibrary() {
         do {
-            let data = try PlaceExport.capture(context: viewContext).validatedData()
+            let data = try PlaceExport.capture(context: viewContext, persistence: persistenceController).validatedData()
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent("Feast-Export-\(UUID().uuidString)", isDirectory: true)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            let url = directory.appendingPathComponent("Feast-places-v1.json")
+            let url = directory.appendingPathComponent("Feast-places-v2.json")
             // Retain the URL for cleanup even if writing or verification fails.
             pendingExportURL = url
             try data.write(to: url, options: [.atomic, .completeFileProtection])

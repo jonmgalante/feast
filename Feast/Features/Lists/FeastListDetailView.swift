@@ -6,7 +6,8 @@ struct FeastListDetailView: View {
     @Environment(\.managedObjectContext) private var viewContext
     @Environment(\.persistenceController) private var persistenceController
     @ObservedObject var feastList: FeastList
-    @FetchRequest private var neighborhoodSections: FetchedResults<ListSection>
+    @FetchRequest private var fetchedNeighborhoodSections: FetchedResults<ListSection>
+    private var neighborhoodSections: [ListSection] { fetchedNeighborhoodSections.filter(\.isVisibleNeighborhood) }
     @FetchRequest private var savedPlaces: FetchedResults<SavedPlace>
     @State private var neighborhoodEditor: NeighborhoodEditorState?
     @State private var neighborhoodPendingDeletion: ListSection?
@@ -20,7 +21,7 @@ struct FeastListDetailView: View {
 
     init(feastList: FeastList) {
         self.feastList = feastList
-        _neighborhoodSections = FetchRequest(
+        _fetchedNeighborhoodSections = FetchRequest(
             fetchRequest: Self.neighborhoodSectionsFetchRequest(for: feastList),
             animation: .default
         )
@@ -159,10 +160,7 @@ struct FeastListDetailView: View {
             NSSortDescriptor(key: "name", ascending: true),
             NSSortDescriptor(key: "createdAt", ascending: true)
         ]
-        request.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
-            NSPredicate(format: "feastList == %@", feastList),
-            NSPredicate(format: "parent == nil")
-        ])
+        request.predicate = NSPredicate(format: "feastList == %@", feastList)
         return request
     }
 
@@ -349,7 +347,7 @@ struct FeastListDetailView: View {
             neighborhoodContent(neighborhood, matchingPlaces: matchingPlaces)
         } header: {
             NeighborhoodHeaderView(
-                title: neighborhood.displayName,
+                title: neighborhood.neighborhoodDisplayName,
                 kind: .neighborhood,
                 subtitle: matchingPlaces.map { matchingPlaceCount($0.count) }
             ) {
@@ -509,7 +507,10 @@ struct FeastListDetailView: View {
     }
 
     private func deleteMessage(for neighborhood: ListSection) -> String {
-        "Places in \(neighborhood.displayName) will stay in \(feastList.displayName) and move to Unsorted."
+        if PlaceImport.preservesRawLegacyValues(neighborhood.id), !neighborhood.sortedChildren.isEmpty {
+            return "This also deletes the nested neighborhoods restored beneath \(neighborhood.displayName). All their places will stay in \(feastList.displayName) and move to Unsorted."
+        }
+        return "Places in \(neighborhood.displayName) will stay in \(feastList.displayName) and move to Unsorted."
     }
 }
 

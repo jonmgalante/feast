@@ -37,8 +37,14 @@ extension FeastList {
         sortedSections.filter { $0.parent == nil }
     }
 
+    // Name-based import and suggestion behavior remains top-level-only.
     var neighborhoodSections: [ListSection] {
         topLevelSections
+    }
+
+    // Restored children are selectable by identity, not implicitly by an ambiguous leaf name.
+    var visibleNeighborhoodSections: [ListSection] {
+        sortedSections.filter(\.isVisibleNeighborhood)
     }
 
     var sortedSavedPlaces: [SavedPlace] {

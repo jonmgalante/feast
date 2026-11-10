@@ -842,7 +842,10 @@ final class FeastRepository {
     }
 
     private func migrateDeprecatedSkipNoteIfNeeded(for savedPlace: SavedPlace) -> Bool {
-        guard let skipNote = normalizedOptional(savedPlace.skipNote) else {
+        // Archive copies intentionally retain raw legacy fields across later migration
+        // replay. The marker is derived by the importer, never accepted from a file.
+        guard !PlaceImport.preservesRawLegacyValues(savedPlace.id),
+              let skipNote = normalizedOptional(savedPlace.skipNote) else {
             return false
         }
 
@@ -900,7 +903,7 @@ final class FeastRepository {
         // hierarchy is flattened without destructive name-based consolidation.
         let sections = feastList.sections as? Set<ListSection> ?? []
         var didChange = false
-        for section in sections where section.parent != nil {
+        for section in sections where section.parent != nil && !PlaceImport.preservesRawLegacyValues(section.id) {
             section.parent = nil
             didChange = true
         }

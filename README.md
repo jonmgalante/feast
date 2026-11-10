@@ -12,6 +12,10 @@ Feast is an iPhone app for saving, organizing, and sharing places. It uses Swift
 
 The existing bundle ID, CloudKit container, data model, stores, and sharing identities are preserved. AI access is separate from access to the saved collection. Provider credentials and device access secrets are supplied through secure runtime configuration, never through this repository. Nonsecret service names, endpoints, deployment identifiers, and signing identity metadata remain in source where required by the existing application and release tooling; they do not authorize access.
 
+## Library backup
+
+The saved-library export and additive private-copy restore format, safety boundaries, and test coverage are documented in [Library backup](docs/LIBRARY_BACKUP.md).
+
 ## Local verification
 
 Run the client suite on a Mac with Xcode:
