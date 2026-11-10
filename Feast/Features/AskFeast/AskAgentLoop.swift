@@ -44,6 +44,9 @@ struct AskAgentLoop:Sendable {
         var candidates=previous.candidates
         for candidate in next.candidates {if let i=candidates.firstIndex(where:{$0.id==candidate.id}) {candidates[i]=candidate}else{candidates.append(candidate)}}
         response.candidates=candidates
+        let native=Set(next.libraryContext?.ids ?? [])
+        let mentions=((previous.answerMentionIDs ?? [])+(next.answerMentionIDs ?? [])).reduce(into:[String]()) {if !native.contains($1),!$0.contains($1) {$0.append($1)}}
+        response.answerMentionIDs=mentions.isEmpty ? nil : mentions
         response.publicResearch=Array(((previous.publicResearch ?? [])+(next.publicResearch ?? [])).uniquedResearch().suffix(4))
         var operationRecords=previous.operationRecords ?? []
         for record in next.operationRecords ?? [] {operationRecords=AskOperationRecord.merged(operationRecords,record)}

@@ -193,10 +193,24 @@ private actor PlaceReferencePlanner: AskFeastProvider, AskAgentPlanning, AskBusi
         let extraPlanner=PlaceReferencePlanner(text:reordered+"\n4. [[place:\(extra)]]",calls:[query("list")])
         let extraExecutor=AskAgentExecutor(adapter:adapter,engine:engine,request:request,researcher:remote,searchMaps:{_ in []},fullCollectionContext:true)
         let extraAnswer=try await AskConversationLoop(planner:extraPlanner,availableCandidates:tools.localCandidates(Set(ids+[extra])),execute:{call in try await extraExecutor.executeConversation(call,planner:extraPlanner)}).answer(request,context:AskSemanticContext.make(request,catalog:snapshot,fullCollection:true),cities:[],findings:[])
+        _ = try tools.checked(extraAnswer)
+        precondition(extraAnswer.answerMentionIDs==[extra])
+        var unmarked=extraAnswer;unmarked.answerMentionIDs=nil
+        let finalValidation=AskPipelineTrace(id:UUID())
+        do {_ = try AskPipelineScope.$trace.withValue(finalValidation) {try tools.checked(unmarked)};preconditionFailure("Unmarked membership accepted")}catch AskError.invalidEvidence {}
+        precondition(finalValidation.snapshot().validationFailure==nil,"Intermediate checks must not seed final rejection diagnostics")
+        do {_ = try tools.checked(unmarked,validationTrace:finalValidation);preconditionFailure("Unmarked membership accepted")}catch AskError.invalidEvidence {}
+        precondition(finalValidation.snapshot().validationFailure == .queryMembership)
         precondition(extraAnswer.agentTask?.orderedIDs.count==3 && !extraAnswer.agentTask!.orderedIDs.contains(extra) && extraAnswer.agentTask?.referencesIncomplete==true && extraAnswer.collectionPage?.totalCount==3)
+        let legacyExtraExecutor=AskAgentExecutor(adapter:adapter,engine:engine,request:request,researcher:remote,searchMaps:{_ in []})
+        let legacyExtra=try await AskConversationLoop(planner:extraPlanner,availableCandidates:tools.localCandidates(Set(ids+[extra])),execute:{call in try await legacyExtraExecutor.executeConversation(call,planner:extraPlanner)}).answer(request,context:catalog,cities:[],findings:[])
+        _ = try tools.checked(legacyExtra)
+        precondition(legacyExtra.answerMentionIDs==[extra] && legacyExtra.agentTask?.referencesIncomplete==true && !legacyExtra.agentTask!.orderedIDs.contains(extra))
         let mention=try await nativeAnswer("list","Consider [[place:\(ids[2])]].")
         precondition(mention.agentTask?.orderedIDs==mention.libraryContext?.ids && mention.agentTask?.orderedIDs.count==3)
         let aggregate=try await nativeAnswer("count","There are three, including [[place:\(ids[2])]].")
+        _ = try tools.checked(aggregate)
+        precondition(aggregate.answerMentionIDs==[ids[2]])
         precondition(aggregate.agentTask?.orderedIDs==[] && Set(aggregate.agentTask?.selectionIDs ?? [])==Set(ids))
         let sameName=places.first {$0.id!.uuidString==ids[1]}!
         sameName.displayNameSnapshot=places.first {$0.id!.uuidString==ids[0]}!.displayNameSnapshot;try context.save()

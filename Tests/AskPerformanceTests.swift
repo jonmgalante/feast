@@ -18,8 +18,18 @@ import CoreData
         precondition(trace.snapshot().samples.count==112)
         trace.record(.taskExit,milliseconds:500);trace.record(.answerAvailable,milliseconds:400)
         precondition(trace.snapshot().samples.count==114 && trace.snapshot().droppedSamples==128)
+        trace.rejectAnswer(.queryMembership);trace.rejectAnswer(.candidateEvidence)
+        precondition(trace.snapshot().validationFailure == .queryMembership)
         let encoded=try JSONEncoder().encode(trace.snapshot())
         let restored=try JSONDecoder().decode(AskPipelineSnapshot.self,from:encoded)
+        precondition(restored.validationFailure == .queryMembership)
+        var legacy=try JSONSerialization.jsonObject(with:encoded) as! [String:Any]
+        legacy.removeValue(forKey:"validationFailure")
+        let old=try JSONDecoder().decode(AskPipelineSnapshot.self,from:JSONSerialization.data(withJSONObject:legacy))
+        precondition(old.validationFailure==nil)
+        legacy["validationFailure"]="PRIVATE_CONTENT_NOT_A_REASON"
+        do {_ = try JSONDecoder().decode(AskPipelineSnapshot.self,from:JSONSerialization.data(withJSONObject:legacy));preconditionFailure("Arbitrary diagnostic text accepted")}catch is DecodingError {}
+
         precondition(restored.traceID==trace.id && restored.samples.count==114 && restored.samples.contains {$0.counters==["inputTokens":25]} && restored.samples.last?.stage == .answerAvailable)
         let server:[String:Any] = ["version":1,"stages":["provider":["milliseconds":4.5,"calls":2],"SECRET_CONTENT":["milliseconds":1,"calls":1]],"counters":["inputTokens":10,"cachedInputTokens":4,"SECRET_CONTENT":"never retained"]]
         let parsed=AskBackendPerformance(try JSONSerialization.jsonObject(with:JSONSerialization.data(withJSONObject:server)))!

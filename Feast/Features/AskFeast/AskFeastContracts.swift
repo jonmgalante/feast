@@ -208,6 +208,10 @@ struct AskResponse: Codable, Equatable, Sendable {
     var listedCandidateIDs: [String]? = nil
     var usesLocalCatalog = false
     var libraryContext: AskLibraryContext? = nil
+    /// Verified references in answer prose outside the native query rows. These
+    /// are display evidence, never query membership or a follow-up write scope.
+    var answerMentionIDs: [String]? = nil
+    static let maximumAnswerMentions = 200
     var webPlaces: [AskWebPlace] = []
     var referenceWebPlaces: [AskWebPlace]? = nil
     var fieldActions: [AskFieldActionState]? = nil
@@ -388,83 +392,92 @@ struct AskReadTools: Sendable {
         response.listedCandidateIDs=response.listedCandidateIDs.map {$0.filter {available.contains($0)}}
         response.fieldActions=response.fieldActions.map {$0.filter {available.contains($0.finding.recordID)}}
         response.verifiedPublicFindings=response.verifiedPublicFindings.map {$0.filter {available.contains($0.recordID)}}
-        if response.libraryContext?.ids != response.candidates.map(\.id) {response.libraryContext=nil}
+        response.answerMentionIDs=response.answerMentionIDs.map {$0.filter {available.contains($0)}}
+        let mentions=Set(response.answerMentionIDs ?? [])
+        if response.libraryContext?.ids != response.candidates.map(\.id).filter({!mentions.contains($0)}) {response.libraryContext=nil}
         return response
     }
-    func checked(_ response: AskResponse) throws -> AskResponse {
+    func checked(_ response: AskResponse, validationTrace:AskPipelineTrace?=nil) throws -> AskResponse {
+        func rejected(_ reason:AskAnswerValidationReason)->AskError {validationTrace?.rejectAnswer(reason);return .invalidEvidence}
+        let mentions=response.answerMentionIDs ?? []
+        let mentionSet=Set(mentions)
+        let referenced=Set(response.paragraphs.flatMap(\.spans).compactMap {span->String? in if case .place(let id)=span {return id};return nil})
+        guard mentions.count<=AskResponse.maximumAnswerMentions,mentionSet.count==mentions.count,
+              mentionSet.isSubset(of:Set(response.candidates.map(\.id))),mentionSet.isSubset(of:referenced),
+              mentionSet.isDisjoint(with:Set(response.libraryContext?.ids ?? [])),mentions.isEmpty || response.usesLocalCatalog else {throw rejected(.answerMentions)}
         let listing = response.usesLocalCatalog ? AskCollectionListingPlan.make(request, places: index.personalCatalog) : nil
         let localTool = response.usesLocalCatalog && (response.libraryContext != nil || response.agentTask != nil)
         let localListing = listing != nil || localTool
-        guard response.summary.count <= 3_000, response.candidates.count <= (response.collectionPage != nil ? AskCollectionPage.maximumRenderedRecords : localListing ? 200 : 6),
-              Set(response.candidates.map(\.id)).count == response.candidates.count else { throw AskError.invalidEvidence }
+        guard response.summary.count <= 3_000, response.candidates.count - (response.libraryContext == nil ? 0 : mentions.count) <= (response.collectionPage != nil ? AskCollectionPage.maximumRenderedRecords : localListing ? 200 : 6),
+              Set(response.candidates.map(\.id)).count == response.candidates.count else { throw rejected(.responseBounds) }
         let available = response.usesLocalCatalog ? localEvidence : evidence
         let catalog = Dictionary(uniqueKeysWithValues: available.candidates.map { ($0.id, $0) })
         let sources = Set(available.sources.map(\.id))
         for candidate in response.candidates {
             guard catalog[candidate.id] == candidate, !candidate.sourceIDs.isEmpty,
                   Set(candidate.sourceIDs).isSubset(of: sources),
-                  candidate.facts.allSatisfy({ candidate.sourceIDs.contains($0.sourceID) }) else { throw AskError.invalidEvidence }
+                  candidate.facts.allSatisfy({ candidate.sourceIDs.contains($0.sourceID) }) else { throw rejected(.candidateEvidence) }
         }
         if let context = response.libraryContext {
-            guard context.ids.count <= (response.collectionPage != nil ? AskCollectionPage.maximumRenderedRecords : 200), Set(context.ids).count == context.ids.count, context.ids == response.candidates.map(\.id) else { throw AskError.invalidEvidence }
+            guard context.ids.count <= (response.collectionPage != nil ? AskCollectionPage.maximumRenderedRecords : 200), Set(context.ids).count == context.ids.count, context.ids == response.candidates.map(\.id).filter({!mentionSet.contains($0)}) else { throw rejected(.queryMembership) }
             if let selection=context.selectionIDs {
-                guard response.usesLocalCatalog,[AskLibraryPlan.Operation.count,.group].contains(context.filters.operation),Set(selection).count == selection.count,Set(selection).isSubset(of:Set(index.personalCatalog.map(\.id))) else { throw AskError.invalidEvidence }
+                guard response.usesLocalCatalog,[AskLibraryPlan.Operation.count,.group].contains(context.filters.operation),Set(selection).count == selection.count,Set(selection).isSubset(of:Set(index.personalCatalog.map(\.id))) else { throw rejected(.aggregateMembership) }
             }
         }
         if let listing, !localTool {
             let expected = Set(index.personalCatalog.filter(listing.matcher(all:index.personalCatalog)).map(\.id))
-            guard Set(response.candidates.map(\.id)) == expected else { throw AskError.invalidEvidence }
+            guard Set(response.candidates.map(\.id)) == expected else { throw rejected(.listingMembership) }
         }
         if response.requestsFieldSave == true {
             guard request.verifiedFindings.count <= 6,response.fieldActions?.count == 1,
-                  response.fieldActions?.allSatisfy({request.verifiedFindings.contains($0.finding)}) == true else {throw AskError.invalidEvidence}
+                  response.fieldActions?.allSatisfy({request.verifiedFindings.contains($0.finding)}) == true else {throw rejected(.fieldSave)}
         }
         if let choices=response.mapChoices {
-            guard choices.count<=6,Set(choices.map(\.id)).count==choices.count,choices.allSatisfy({UUID(uuidString:$0.id) != nil && !$0.applePlaceID.isEmpty && $0.applePlaceID.count<=300 && !$0.name.isEmpty && $0.name.count<=200 && $0.address.count<=500 && $0.city.count<=200 && $0.query.count<=300 && ($0.website==nil || InstagramWebsiteClient.websiteURL($0.website!) != nil)}) else{throw AskError.invalidEvidence}
+            guard choices.count<=6,Set(choices.map(\.id)).count==choices.count,choices.allSatisfy({UUID(uuidString:$0.id) != nil && !$0.applePlaceID.isEmpty && $0.applePlaceID.count<=300 && !$0.name.isEmpty && $0.name.count<=200 && $0.address.count<=500 && $0.city.count<=200 && $0.query.count<=300 && ($0.website==nil || InstagramWebsiteClient.websiteURL($0.website!) != nil)}) else{throw rejected(.mapChoices)}
         }
         if let research=response.publicResearch {
-            guard research.count<=4,research.allSatisfy({$0.query.count<=1500 && $0.result.text.count<=16000 && $0.result.citations.count<=20 && $0.result.citations.allSatisfy {$0.safeURL != nil}}) else{throw AskError.invalidEvidence}
+            guard research.count<=4,research.allSatisfy({$0.query.count<=1500 && $0.result.text.count<=16000 && $0.result.citations.count<=20 && $0.result.citations.allSatisfy {$0.safeURL != nil}}) else{throw rejected(.research)}
         }
-        for research in response.publicResearch ?? [] {_ = try research.result.nativeEvidence?.checked()}
+        do {for research in response.publicResearch ?? [] {_ = try research.result.nativeEvidence?.checked()}}catch {throw rejected(.nativeEvidence)}
         if let operations=response.operationRecords {
             let actionIDs=Set((response.collectionActions ?? []).map(\.id))
             guard operations.count<=24,Set(operations.map(\.id)).count==operations.count,
                   operations.allSatisfy({record in
                     record.id.count==64 && record.id.allSatisfy(\.isHexDigit) && ["place","city","neighborhood"].contains(record.entity) && ["create","update","append","move","delete","undo"].contains(record.operation) && record.targetIDs.count<=200 && record.targetIDs.allSatisfy {UUID(uuidString:$0) != nil} && Set(record.actionIDs).isSubset(of:actionIDs) && record.outcomes.count<=200
-                  }) else{throw AskError.invalidEvidence}
+                  }) else{throw rejected(.operationRecords)}
         }
         if let findings=response.verifiedPublicFindings {
-            guard findings.count<=24,Set(findings.map(\.id)).count==findings.count else {throw AskError.invalidEvidence}
-            for finding in findings {_ = try finding.validated();guard response.candidates.contains(where:{$0.id==finding.recordID}) else {throw AskError.invalidEvidence}}
+            guard findings.count<=24,Set(findings.map(\.id)).count==findings.count else {throw rejected(.findings)}
+            for finding in findings {do {_ = try finding.validated()}catch {throw rejected(.findings)};guard response.candidates.contains(where:{$0.id==finding.recordID}) else {throw rejected(.findings)}}
         }
         if let actions=response.fieldActions {
-            guard actions.count <= (localTool ? 24 : 6),Set(actions.map { $0.finding.id }).count == actions.count else {throw AskError.invalidEvidence}
-            for action in actions { _ = try action.finding.validated();guard action.finding.field=="instagram",response.candidates.contains(where:{$0.id == action.finding.recordID}) else {throw AskError.invalidEvidence} }
+            guard actions.count <= (localTool ? 24 : 6),Set(actions.map { $0.finding.id }).count == actions.count else {throw rejected(.fieldActions)}
+            for action in actions { do {_ = try action.finding.validated()}catch {throw rejected(.fieldActions)};guard action.finding.field=="instagram",response.candidates.contains(where:{$0.id == action.finding.recordID}) else {throw rejected(.fieldActions)} }
         }
-        if let page=response.collectionPage {guard page.snapshot.count==64,page.snapshot.allSatisfy(\.isHexDigit),page.offset>=0,page.returnedCount>=0,page.offset+page.returnedCount<=page.totalCount,page.nextOffset==nil ? page.offset+page.returnedCount==page.totalCount : page.nextOffset==page.offset+page.returnedCount && page.nextOffset!<page.totalCount else{throw AskError.invalidEvidence}}
+        if let page=response.collectionPage {guard page.snapshot.count==64,page.snapshot.allSatisfy(\.isHexDigit),page.offset>=0,page.returnedCount>=0,page.offset+page.returnedCount<=page.totalCount,page.nextOffset==nil ? page.offset+page.returnedCount==page.totalCount : page.nextOffset==page.offset+page.returnedCount && page.nextOffset!<page.totalCount else{throw rejected(.collectionPage)}}
         let returnedIDs = Set(response.candidates.map(\.id))
         if let rows = response.listedCandidateIDs {
-            guard rows.count <= 6, Set(rows).count == rows.count, Set(rows).isSubset(of: returnedIDs) else { throw AskError.invalidEvidence }
+            guard rows.count <= 6, Set(rows).count == rows.count, Set(rows).isSubset(of: returnedIDs) else { throw rejected(.listedCandidates) }
         }
-        guard response.paragraphs.count <= (localListing ? 4001 : 8), Set(response.paragraphs.map(\.id)).count == response.paragraphs.count else { throw AskError.invalidEvidence }
+        guard response.paragraphs.count <= (localListing ? 4001 : 8), Set(response.paragraphs.map(\.id)).count == response.paragraphs.count else { throw rejected(.paragraphBounds) }
         let returnedSources = sources // Every cited source must be in the approved request evidence.
         var characters = 0
         for paragraph in response.paragraphs {
-            guard paragraph.citations.count <= (localTool ? 20 : 6), paragraph.citations.allSatisfy({ $0.safeURL != nil && $0.title.count <= 200 }) else { throw AskError.invalidEvidence }
+            guard paragraph.citations.count <= (localTool ? 20 : 6), paragraph.citations.allSatisfy({ $0.safeURL != nil && $0.title.count <= 200 }) else { throw rejected(.citations) }
             guard !paragraph.id.isEmpty, paragraph.id.count <= 80, (1...(response.collectionPage != nil ? 4801 : localTool ? 401 : 24)).contains(paragraph.spans.count),
                   Set(paragraph.sourceIDs).count == paragraph.sourceIDs.count,
-                  Set(paragraph.sourceIDs).isSubset(of: returnedSources) else { throw AskError.invalidEvidence }
+                  Set(paragraph.sourceIDs).isSubset(of: returnedSources) else { throw rejected(.paragraphEvidence) }
             for span in paragraph.spans {
                 switch span {
                 case .text(let text): characters += text.count
                 case .place(let id):
                     guard let candidate = response.candidates.first(where: { $0.id == id }),
-                          !Set(candidate.sourceIDs).isDisjoint(with: paragraph.sourceIDs) else { throw AskError.invalidEvidence }
+                          !Set(candidate.sourceIDs).isDisjoint(with: paragraph.sourceIDs) else { throw rejected(.placeReference) }
                     characters += candidate.name.count
                 }
             }
         }
-        guard characters <= (response.collectionPage != nil ? 720_000 : localListing ? 60_000 : 3_000) else { throw AskError.invalidEvidence }
+        guard characters <= (response.collectionPage != nil ? 720_000 : localListing ? 60_000 : 3_000) else { throw rejected(.answerLength) }
         return response
     }
     private var localEvidence: AskEvidence {
@@ -615,8 +628,9 @@ struct AskTurn: Identifiable, Equatable {
         let followUp = AskQueryPlan.isFollowUp(input) || namedPublicReference
         let knownWeb = completed?.response?.referenceWebPlaces ?? completed?.response?.webPlaces ?? []
         let criterionText = knownWeb.sorted { $0.name.count > $1.name.count }.reduce(input) { $0.replacingOccurrences(of: $1.name, with: "", options: .caseInsensitive) }
-        let referenced = completed?.response?.paragraphs.flatMap(\.spans).compactMap { span -> String? in if case .place(let id) = span { return id }; return nil } ?? []
-        let references = followUp ? Array(Set(referenced.isEmpty ? completed?.response?.candidates.map(\.id) ?? [] : referenced).sorted().prefix(6)) : []
+        let mentions=Set(completed?.response?.answerMentionIDs ?? [])
+        let referenced = completed?.response?.paragraphs.flatMap(\.spans).compactMap { span -> String? in if case .place(let id) = span, !mentions.contains(id) { return id }; return nil } ?? []
+        let references = followUp ? Array(Set(referenced.isEmpty ? (completed?.response?.candidates.map(\.id) ?? []).filter {!mentions.contains($0)} : referenced).sorted().prefix(6)) : []
         let priorContext = index.scope == .savedMetadata && mode == .discovery ? completed.flatMap { AskPublicCriteria.make($0.request.retrievalText)?.contextText } : completed?.request.text
         let previous = mode == .importText || (index.scope == .savedMetadata && !followUp) ? nil : priorContext
         let id = UUID()
@@ -718,11 +732,18 @@ struct AskTurn: Identifiable, Equatable {
                 }
                 let validationStarted = DispatchTime.now().uptimeNanoseconds
                 let currentTools:AskReadTools
-                if let fresh=try self?.refreshIndex?() {self?.index=fresh;currentTools=try AskReadTools(request:request,index:fresh)}else{currentTools=tools}
-                var checked = try currentTools.checked(currentTools.rebasedCatalogResponse(result))
-                if let self {checked.fieldActions=checked.fieldActions?.map {self.currentFieldAction($0)};checked=self.currentCollectionActions(checked)}
+                var checked:AskResponse
+                do {
+                    // Failed final checks must be observable too, without retaining
+                    // the rejected content or changing acceptance/error behavior.
+                    defer {trace.elapsed(.validation,since:validationStarted)}
+                    do {
+                        if let fresh=try self?.refreshIndex?() {self?.index=fresh;currentTools=try AskReadTools(request:request,index:fresh)}else{currentTools=tools}
+                    }catch {trace.rejectAnswer(.catalogRefresh);throw error}
+                    checked = try currentTools.checked(currentTools.rebasedCatalogResponse(result),validationTrace:trace)
+                    if let self {checked.fieldActions=checked.fieldActions?.map {self.currentFieldAction($0)};checked=self.currentCollectionActions(checked)}
+                }
                 let validationMS = AskPerformanceRecorder.milliseconds(since: validationStarted)
-                trace.record(.validation,milliseconds:validationMS)
                 guard let self else{return}
                 if recoveryStore != nil,let origin=request.conversationID,origin != activeChatID {
                     let sources=(checked.candidates.flatMap(\.sourceIDs)+checked.paragraphs.flatMap(\.sourceIDs)).reduce(into:[AskSource]()) {all,id in if !all.contains(where:{$0.id==id}),let source=currentTools.source(id) {all.append(source)}}

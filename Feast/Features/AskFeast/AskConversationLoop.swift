@@ -394,7 +394,15 @@ struct AskConversationLoop:Sendable {
                             var merged=AskAgentLoop.merged(visiblePrevious,response)
                             merged.paragraphs.removeAll {paragraph in paragraph.spans.count==1 && {if case .text(let value)=paragraph.spans[0] {return value.hasPrefix("Showing ") && value.contains("matching saved")};return false}()}
                             merged.collectionPage = .init(snapshot:page.snapshot,totalCount:page.totalCount,offset:prior.offset,returnedCount:prior.returnedCount+page.returnedCount,nextOffset:page.nextOffset)
-                            if let context=merged.libraryContext {merged.libraryContext = .init(ids:merged.candidates.map(\.id),filters:context.filters,excludesExternalReferences:true)}
+                            if let context=merged.libraryContext {
+                                // Prior answers may also reference places outside these pages.
+                                // Only native row IDs participate in the continued query.
+                                let ids=((previous.libraryContext?.ids ?? [])+context.ids).reduce(into:[String]()) {if !$0.contains($1) {$0.append($1)}}
+                                merged.libraryContext = .init(ids:ids,filters:context.filters,excludesExternalReferences:true)
+                                merged.answerMentionIDs=merged.answerMentionIDs.map {$0.filter {!ids.contains($0)}}
+                                let byID=Dictionary(uniqueKeysWithValues:merged.candidates.map {($0.id,$0)})
+                                merged.candidates=ids.compactMap {byID[$0]}+merged.candidates.filter {!ids.contains($0.id)}
+                            }
                             if let remaining=page.nextOffset {merged.paragraphs.append(.init(id:"collection-page",spans:[.text("Showing \(remaining) of \(page.totalCount) matching saved places. More results remain.")],sourceIDs:[]))}
                             state.latest=merged
                         } else {state.latest=value.appendPreviousResults ? AskAgentLoop.merged(state.latest,response) : response}
@@ -443,20 +451,39 @@ struct AskConversationLoop:Sendable {
             let aggregate=nativeOperation.map {[AskLibraryPlan.Operation.count,.group,.catalog].contains($0)} ?? false
             // Compare with the original native rows, before paragraph rendering
             // adds references. An incidental extra place is not another result.
-            let nativeIDs=state.latest?.candidates.map(\.id) ?? []
+            let nativeIDs=state.latest?.libraryContext?.ids ?? state.latest?.candidates.map(\.id) ?? []
             let completeReplacement:Bool
-            if fullCollection,!aggregate,let page=response.collectionPage,page.offset==0,page.nextOffset==nil,!incomplete,!references.isEmpty,references.count==nativeIDs.count,Set(references)==Set(nativeIDs) {completeReplacement=true}else{completeReplacement=false}
+            if fullCollection,!aggregate,sequence.explicitList,let page=response.collectionPage,page.offset==0,page.nextOffset==nil,!incomplete,!references.isEmpty,references.count==nativeIDs.count,Set(references)==Set(nativeIDs) {completeReplacement=true}else{completeReplacement=false}
+            // Synthesized-answer queries do not show native rows. A verified
+            // explicit subset may own the follow-up order without changing the
+            // authoritative query membership or adding out-of-query targets.
+            let explicitAnswerSelection=fullCollection && nativeOperation == .answer && sequence.explicitList && !incomplete && !references.isEmpty && Set(references).isSubset(of:Set(nativeIDs))
             if completeReplacement {
                 response.paragraphs=[rendered]
                 let byID=Dictionary(uniqueKeysWithValues:response.candidates.map {($0.id,$0)})
-                response.candidates=references.compactMap {byID[$0]}
+                let mentioned=Set(rendered.spans.compactMap {span->String? in if case .place(let id)=span {return id};return nil})
+                response.candidates=references.compactMap {byID[$0]}+response.candidates.filter {!references.contains($0.id) && mentioned.contains($0.id)}
                 if let previous=response.libraryContext {response.libraryContext = .init(ids:references,filters:previous.filters,excludesExternalReferences:true)}
                 state.selectionIsOrdered=true;state.ordered=references;state.referencesIncomplete=nil
-            } else if !aggregate && !(fullCollection && nativeOperation == .list) && !references.isEmpty {
+            } else if explicitAnswerSelection {
+                state.selectionIsOrdered=true;state.ordered=references;state.referencesIncomplete=nil
+            } else if nativeOperation == nil && !references.isEmpty {
                 state.selectionIsOrdered=true;state.ordered=references;state.referencesIncomplete=incomplete ? true : nil
             }
             // Two conflicting displayed lists must not silently select one order.
-            if incomplete || (fullCollection && nativeOperation == .list && sequence.explicitList && !references.isEmpty && !completeReplacement) {state.referencesIncomplete=true}
+            let aggregateListConflict=aggregate && sequence.explicitList && Set(references) != Set(state.ordered)
+            let nativeListConflict=nativeOperation != nil && !aggregate && sequence.explicitList && !references.isEmpty && !completeReplacement && !explicitAnswerSelection && (fullCollection || references != state.ordered)
+            // With no native rows and no unambiguous explicit list, query input
+            // order is not a displayed recommendation order. Ask which place(s)
+            // before a previous-selection save, while named saves stay available.
+            let ambiguousAnswerSelection=fullCollection && nativeOperation == .answer && !completeReplacement && !explicitAnswerSelection
+            if incomplete || aggregateListConflict || nativeListConflict || ambiguousAnswerSelection {state.referencesIncomplete=true}
+            if let context=response.libraryContext {
+                let native=Set(context.ids)
+                let mentioned=Set(response.paragraphs.flatMap(\.spans).compactMap {span->String? in if case .place(let id)=span {return id};return nil})
+                let extras=response.candidates.map(\.id).filter {!native.contains($0) && mentioned.contains($0)}
+                response.answerMentionIDs=extras.isEmpty ? nil : extras
+            }
             response.agentTask = .init(action:state.attemptedChange || !state.durableActions.isEmpty ? "change" : "query",fields:state.taskFields,orderedIDs:state.selectionIsOrdered ? state.ordered : [],sourcePolicy:"public_if_missing",privateSelection:state.privateScope || state.privateHistory,outcomes:state.durableOutcomes.isEmpty ? nil : state.durableOutcomes,selectionIDs:state.selectionIsOrdered ? nil : state.ordered,referencesIncomplete:state.referencesIncomplete)
             let acknowledgements=state.durableActions.map {"action \($0.id.uuidString) \($0.entity) \($0.operation) \($0.state.rawValue) targets \($0.targetIDs.joined(separator:","))"}.joined(separator:"; ")
             response.publicConversationText=state.privateHistory || state.privateScope ? nil : (!state.unresolvedChanges.isEmpty ? "The requested change was not completed. Check its execution result before retrying." : reply.text)+(acknowledgements.isEmpty ? "" : "\nApp outcomes: "+acknowledgements)

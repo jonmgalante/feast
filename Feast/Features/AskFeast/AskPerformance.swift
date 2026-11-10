@@ -61,6 +61,13 @@ struct AskPipelineSample: Codable, Sendable {
     let counters: [String:Int]
     var calls:Int = 1
 }
+/// Closed local acceptance reasons only. Never include model text, IDs, URLs,
+/// stored fields or arbitrary error descriptions in diagnostics.
+enum AskAnswerValidationReason:String,Codable,Sendable {
+    case catalogRefresh, responseBounds, candidateEvidence, answerMentions, queryMembership, aggregateMembership, listingMembership
+    case fieldSave, mapChoices, research, nativeEvidence, operationRecords, findings, fieldActions, collectionPage
+    case listedCandidates, paragraphBounds, citations, paragraphEvidence, placeReference, answerLength
+}
 struct AskPipelineSnapshot: Codable, Sendable {
     let version: Int
     let traceID: UUID
@@ -69,6 +76,7 @@ struct AskPipelineSnapshot: Codable, Sendable {
     let droppedSamples: Int
     let outcome: AskPipelineOutcome
     let samples: [AskPipelineSample]
+    var validationFailure: AskAnswerValidationReason? = nil
 }
 enum AskPipelineOutcome:String,Codable,Sendable {case running,completed,failed,cancelled}
 /// One trace per attempt, inherited by child async calls. No global result cache.
@@ -81,6 +89,8 @@ final class AskPipelineTrace: @unchecked Sendable {
     private var revision=0,dropped=0,ordinarySamples=0
     private static let terminalStages:Set<AskPipelineStage> = [.validation,.taskExit,.answerAvailable,.answerViewObserved,.stopRequested,.persistence]
     private var outcome:AskPipelineOutcome = .running
+    private var validationFailure:AskAnswerValidationReason?
+    func rejectAnswer(_ reason:AskAnswerValidationReason) {lock.withLock {if validationFailure==nil {validationFailure=reason;revision+=1}}}
     init(id: UUID, turnID:UUID? = nil) { self.id=id;self.turnID=turnID ?? id }
     func finish(_ state:AskPipelineOutcome) {lock.withLock {outcome=state;revision+=1}}
     func record(_ stage: AskPipelineStage, milliseconds: Double, counters: [AskPipelineCounter:Int] = [:], calls:Int = 1) {
@@ -103,7 +113,7 @@ final class AskPipelineTrace: @unchecked Sendable {
     func elapsed(_ stage: AskPipelineStage, since start: UInt64, counters: [AskPipelineCounter:Int] = [:]) {
         record(stage,milliseconds:AskPerformanceRecorder.milliseconds(since:start),counters:counters)
     }
-    func snapshot() -> AskPipelineSnapshot { lock.withLock {.init(version:1,traceID:id,turnID:turnID,revision:revision,droppedSamples:dropped,outcome:outcome,samples:samples)} }
+    func snapshot() -> AskPipelineSnapshot { lock.withLock {.init(version:1,traceID:id,turnID:turnID,revision:revision,droppedSamples:dropped,outcome:outcome,samples:samples,validationFailure:validationFailure)} }
 }
 enum AskPipelineScope {
     @TaskLocal static var trace: AskPipelineTrace?
