@@ -59,9 +59,11 @@ validation without relaxing ordered-selection, mutation or 8 MiB bounds.
 The exact immutable milestone passed 251 default and 252 recovery-compiled
 checkpoints with serialized runtimes. Independent source/evidence review approved
 this bounded scope. Production and retention-test hashes match after integration;
-only test-runner entry points were combined with the journal suite. Combined
-journal/answer suites are in progress; the final full combined build/review gate
-still follows the remaining implementation below.
+only test-runner entry points were combined with the journal suite. An interim
+immutable combined gate at `17d140e` passed **554 default / 555 recovery** checkpoints,
+both exit 0 with serialized runtimes and a verified post-run source manifest.
+Evidence is `/tmp/feast-integration-journal-answers.f6FEhZ`. The final full combined
+build/review gate still follows the remaining implementation below.
 
 ## Continuing implementation, not yet integrated or verified
 
