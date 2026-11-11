@@ -19,6 +19,7 @@ final class FailingContext: NSManagedObjectContext, @unchecked Sendable {
         if let selected=ProcessInfo.processInfo.environment["FEAST_AUDIT_ANSWER_CASE"] {
             try await AskAnswerRetentionTests.run(model:model,directory:URL(fileURLWithPath:CommandLine.arguments[2]),selection:selected);return
         }
+        if ProcessInfo.processInfo.environment["FEAST_DELETED_PROOF_ONLY"]=="1" {try AskDeletedRecordProofTests.run(model:model,directory:URL(fileURLWithPath:CommandLine.arguments[2]));return}
         let url = URL(fileURLWithPath: CommandLine.arguments[2]).appendingPathComponent("synthetic.sqlite")
         func coordinator() throws -> NSPersistentStoreCoordinator {
             let coordinator = NSPersistentStoreCoordinator(managedObjectModel: model)
@@ -274,6 +275,7 @@ final class FailingContext: NSManagedObjectContext, @unchecked Sendable {
         try await AskConversationPersistenceTests.run(model:model,directory:URL(fileURLWithPath:CommandLine.arguments[2]))
         try AskJournalCapacityTests.run(model:model,directory:URL(fileURLWithPath:CommandLine.arguments[2]))
         try AskJournalFailureTests.run(model:model,directory:URL(fileURLWithPath:CommandLine.arguments[2]))
+        try AskDeletedRecordProofTests.run(model:model,directory:URL(fileURLWithPath:CommandLine.arguments[2]))
         try AskCollectionChangeTests.run(model:model,temporaryDirectory:URL(fileURLWithPath:CommandLine.arguments[2]))
         try await AskFieldActionTests.run(model:model,temporaryDirectory:URL(fileURLWithPath:CommandLine.arguments[2]))
         try await AskBusinessLookupTests.run()

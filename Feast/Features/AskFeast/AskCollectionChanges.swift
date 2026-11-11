@@ -324,8 +324,11 @@ enum AskChangeError:LocalizedError {
             else {return}
             let context=try adapter.makeSaveContext()
             guard same(try current(entry,context),expected) else{return}
-            let surviving=Set(expected.map(\.id))
-            ids.formUnion(removed.map(\.id).filter {!surviving.contains($0)})
+            let surviving=Set(expected.map(\.id)),deleted=removed.filter {!surviving.contains($0.id)}
+            // Outcome proof is necessary, but absence is not current read
+            // authority. After the exact whole-graph outcome is proved, filter
+            // each independent fragment by its original parent/store authority.
+            ids.formUnion(try readableDeletedRecordIDs(entry,deleted:deleted,expected:expected,context:context))
         }
         try journal.visit(.turn(turn)) {id in try include(id);return true}
         // Extra IDs are local executor receipts, never model arguments.
@@ -334,6 +337,65 @@ enum AskChangeError:LocalizedError {
         }
         return ids
         }
+    }
+    /// Read proof only. This does not authorize a mutation or change the
+    /// durable receipt, replay binding, generic receipt display, or Undo grant.
+    private func readableDeletedRecordIDs(_ entry:AskChangeEntry,deleted:[AskChangeSnapshot],expected:[AskChangeSnapshot],context:NSManagedObjectContext)throws->Set<String> {
+        guard !deleted.isEmpty else {return []}
+        let visible=try adapter.visibleCities(),byKey=Dictionary(uniqueKeysWithValues:deleted.map {($0.entity+":"+$0.id,$0)})
+        let wholeCity=entry.proposal.entity=="city" && expected.isEmpty &&
+            (entry.proposal.operation=="delete" && entry.phase=="committed" || entry.proposal.operation=="create" && entry.phase=="undone")
+        let cityTargets=Set(entry.proposal.operation=="create" ? entry.action.targetIDs : entry.proposal.targetIDs)
+        @MainActor func originalSection(_ id:String,city:String,store:String)->Bool {
+            var next:String?=id,seen=Set<String>()
+            while let current=next {
+                guard seen.insert(current).inserted,let section=byKey["ListSection:"+current],section.store==store,section.links["feastList"]==city,
+                      Set(section.links.keys).isSubset(of:["feastList","parent"]) else {return false}
+                next=section.links["parent"]
+            }
+            return true
+        }
+        @MainActor func survivingSection(_ id:String,city:UUID,store:String)throws->Bool {
+            guard let uuid=UUID(uuidString:id) else {return false}
+            let request=ListSection.fetchRequest();request.predicate=NSPredicate(format:"id == %@",uuid as NSUUID);request.fetchLimit=2
+            let found=try context.fetch(request);guard found.count==1 else {return false}
+            var next:ListSection?=found[0],seen=Set<NSManagedObjectID>()
+            while let section=next {
+                guard seen.insert(section.objectID).inserted,!section.isDeleted,section.feastList?.id==city,
+                      section.objectID.persistentStore?.identifier==store,adapter.canMutate("neighborhood",section.objectID,"update") else {return false}
+                next=section.parent
+            }
+            return true
+        }
+        @MainActor func canRead(_ image:AskChangeSnapshot)throws->Bool {
+            let kind=image.entity=="FeastList" ? "city" : image.entity=="ListSection" ? "neighborhood" : "place"
+            let allowedLinks:Set<String>=image.entity=="FeastList" ? [] : image.entity=="ListSection" ? ["feastList","parent"] : ["feastList","listSection"]
+            guard Set(image.links.keys).isSubset(of:allowedLinks),let store=image.store,
+                  adapter.canRecoverStore(store),context.persistentStoreCoordinator?.persistentStores.contains(where:{$0.identifier==store && !$0.isReadOnly})==true,
+                  let cityID=image.entity=="FeastList" ? image.id : image.links["feastList"],let cityUUID=UUID(uuidString:cityID) else {return false}
+            let query=FeastList.fetchRequest();query.predicate=NSPredicate(format:"id == %@",cityUUID as NSUUID);query.fetchLimit=2
+            let cities=try context.fetch(query);guard cities.count<=1 else {return false}
+            if let city=cities.first {
+                guard visible.contains(cityUUID),!city.isDeleted,city.objectID.persistentStore?.identifier==store,
+                      adapter.canMutate("city",city.objectID,"update") else {return false}
+                // Applicable surviving neighborhood ancestry must still belong
+                // to that same permitted city/store, not a moved/revoked parent.
+                if let section=image.links[image.entity=="ListSection" ? "parent" : "listSection"],
+                   try !survivingSection(section,city:cityUUID,store:store) {return false}
+            } else {
+                // A whole owned-city deletion has no surviving parent by design.
+                // Its own complete same-store graph plus CURRENT recovery/create
+                // authority is the narrow exception, never absence by itself.
+                guard wholeCity,cityTargets.contains(cityID),let root=byKey["FeastList:"+cityID],root.store==store,root.links.isEmpty,
+                      adapter.canMutate("city",nil,"create"),adapter.canMutate(kind,nil,"create") else {return false}
+                if image.entity=="ListSection",!originalSection(image.id,city:cityID,store:store) {return false}
+                if let section=image.links["listSection"],!originalSection(section,city:cityID,store:store) {return false}
+            }
+            return true
+        }
+        var allowed=Set<String>()
+        for image in deleted where try canRead(image) {allowed.insert(image.id)}
+        return allowed
     }
     func receipts(forTurn turn:UUID)throws->[AskCollectionAction] {
         return try journal.withLock {
