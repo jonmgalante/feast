@@ -76,7 +76,7 @@ struct AskRecoveredActionTurn:Sendable {let id:UUID,question:String,actions:[Ask
 enum AskChangeError:LocalizedError {
     case invalid,missing,conflict,permission,recoveryUnavailable,journal
     var errorDescription:String? {
-        switch self {case .invalid:"This change needs clearer details.";case .missing:"A selected item is no longer available.";case .conflict:"This item changed. Review it before applying the change.";case .permission:"You don’t have permission to make this change.";case .recoveryUnavailable:"This change needs the existing app review flow.";case .journal:"The change couldn’t be safely recorded. Nothing was changed."}
+        switch self {case .invalid:"This change needs clearer details.";case .missing:"A selected item is no longer available.";case .conflict:"This item changed. Review it before applying the change.";case .permission:"You don’t have permission to make this change.";case .recoveryUnavailable:"This change needs the existing app review flow.";case .journal:"The change couldn’t be safely recorded or verified. Check your collection before trying again."}
     }
 }
 /// Local-only before/after journal. Never included in AI context or copied into chats.

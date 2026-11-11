@@ -4,6 +4,7 @@ import Darwin
 
 @MainActor enum AskJournalFailureTests {
     private static func injected()->NSError {NSError(domain:"JournalInjectedFault",code:1)}
+    private static let verificationFailure="The change couldn’t be safely recorded or verified. Check your collection before trying again."
     static func run(model:NSManagedObjectModel,directory:URL)throws {
         var failures:[String]=[]
         func check(_ value:Bool,_ label:String) {print("\(value ? "PASS" : "FAIL") journal safety: \(label)");if !value {failures.append(label)}}
@@ -149,6 +150,9 @@ import Darwin
             let oldValue=p.displayName,revision=p.updatedAt
             try AskJournalTestSupport.sql(f.engine.journal.databaseURL,sql)
             for engine in [f.engine,AskCollectionChangeEngine(adapter:f.adapter,journalURL:f.url)] {
+                do {_ = try engine.actionStatus(action.id);check(false,"\(name) corrupt status is unavailable")}catch {
+                    check(error.localizedDescription==verificationFailure && !error.localizedDescription.contains("Nothing was changed"),"\(name) corrupt status never denies the prior committed change")
+                }
                 rejected("\(name) corruption cannot hide/replay recovery authority") {_ = try engine.prepare(proposal,question:proposal.instructionQuote,authorization:f.grant(proposal),findings:[],turnID:turn,chatID:chat,recoveryOperationID:key)}
                 rejected("\(name) corruption does not produce an empty turn") {_ = try engine.receipts(forTurn:turn)}
                 rejected("\(name) corruption does not hide indexed Undo") {_ = try engine.latestAction(for:p.id!.uuidString)}
@@ -192,13 +196,27 @@ import Darwin
             let signal=pipe.fileHandleForReading.readData(ofLength:7)
             guard String(data:signal,encoding:.utf8)=="LOCKED\n" else {process.terminate();process.waitUntilExit();throw injected()}
             let started=Date()
-            rejected("second process cannot reconcile an in-flight \(point)") {_ = try f.engine.actionStatus(ready.id)}
+            do {_ = try f.engine.actionStatus(ready.id);check(false,"second process cannot reconcile an in-flight \(point)")}catch {
+                check(error.localizedDescription==verificationFailure && !error.localizedDescription.contains("Nothing was changed"),"contended \(point) status truthfully reports an unverified outcome")
+            }
             check(Date().timeIntervalSince(started)<1,"contended process lock fails promptly without hanging UI")
+            if point=="apply-after-collection" {
+                let response=AskResponse(summary:"Review change",candidates:[],listedCandidateIDs:[],usesLocalCatalog:true,collectionActions:[ready])
+                let archived=AskArchivedTurn(.init(id:UUID(),request:.init(mode:.collection,text:cp.instructionQuote,fromOCR:false),response:response,status:.complete))
+                let history=AskConversationStore(url:directory.appendingPathComponent("contended-action-history.json"))
+                check(history.save(.init(turns:[archived])),"contended action session fixture is persisted")
+                let session=AskSession(index:try f.adapter.index(),provider:AskUnavailableProvider())
+                session.restoreHistory(from:history)
+                session.collectionExecutor={id,undo in try f.engine.performExplicitAction(id,undo:undo)}
+                session.applyCollectionAction(turn:archived.id,actionID:ready.id,undo:false)
+                check(session.error==verificationFailure && session.turns.first?.response?.collectionActions?.first==ready,"session preserves its existing receipt and displays the truthful verification failure")
+            }
             process.terminate();process.waitUntilExit();f.context.refreshAllObjects()
             let restart=AskCollectionChangeEngine(adapter:f.adapter,journalURL:f.url),status=try restart.actionStatus(ready.id)
             check(status.state==(point=="apply-after-intent" ? .ready : .applied),"killed process releases lock and reconciles \(point)")
             _ = try restart.apply(ready.id,authorization:f.grant(cp))
             check(childPlace.displayName=="Child changed","process-death recovery applies once")
+            check((try restart.actionStatus(action.id)).state == .applied && p.displayName=="Changed","contended verification retains the prior receipt and committed collection values")
         }
     }
     private static func metadataLifecycle(model:NSManagedObjectModel,directory:URL,check:(Bool,String)->Void,rejected:(String,()throws->Void)->Void)throws {
