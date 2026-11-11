@@ -98,9 +98,19 @@ enum AskMarkdownPresentation {
         for run in value.runs {if let url=run.link,AskWebCitation(title:"Link",url:url.absoluteString).safeURL==nil {value[run.range].link=nil}}
         return value
     }
-    static func inline(_ paragraph:AskAnswerParagraph,candidates:[AskCandidate])->AttributedString {
+    static func inline(_ paragraph:AskAnswerParagraph,candidates:[AskCandidate],citations:[AskWebCitation]?=nil)->AttributedString {
+        // Styling and tap handling use the same evidence boundary. Safe syntax
+        // alone does not make an uncited model/stored URL an approved destination.
+        func supportedLinks(_ original:AttributedString)->AttributedString {
+            var value=original
+            for run in value.runs {
+                guard let url=run.link else{continue}
+                if AskPlaceReference.candidate(for:url,in:candidates)==nil && AskCitationLink.acceptedURL(for:url,citations:citations ?? paragraph.citations)==nil {value[run.range].link=nil}
+            }
+            return value
+        }
         let text=paragraph.spans.compactMap {span->String? in if case .text(let value)=span {return value};return nil}.joined()
-        guard paragraph.spans.contains(where:{if case .place = $0 {return true};return false}) else{return inline(text)}
+        guard paragraph.spans.contains(where:{if case .place = $0 {return true};return false}) else{return supportedLinks(inline(text))}
         // Opaque, per-occurrence placeholders let Markdown span saved references.
         // Names are inserted literally after parsing, never as Markdown or URLs.
         var prefix:String
@@ -127,7 +137,7 @@ enum AskMarkdownPresentation {
                 value.replaceSubrange(range,with:name)
             }
         }
-        return value
+        return supportedLinks(value)
     }
 }
 enum AskConversationProjection {
@@ -446,6 +456,20 @@ struct AskConversationLoop:Sendable {
                 }
                 try await saveBoundary(nextStep:step+1,phase:.ready)
                 continue
+            }
+            // An answer-mode read deliberately renders no rows. A blank final
+            // must not turn its bookkeeping count into a completed explanation.
+            // Native lists/counts and durable action-only replies remain valid.
+            if String(AskMarkdownPresentation.inline(reply.text).characters).trimmingCharacters(in:.whitespacesAndNewlines).isEmpty {
+                let visible=state.latest.map { response in
+                    response.paragraphs.contains {paragraph in paragraph.spans.contains {span in
+                        switch span {case .text(let text):return !String(AskMarkdownPresentation.inline(text).characters).trimmingCharacters(in:.whitespacesAndNewlines).isEmpty;case .place:return true}
+                    }} || !(response.collectionActions ?? []).isEmpty || !(response.fieldActions ?? []).isEmpty || !(response.listedCandidateIDs ?? []).isEmpty
+                } ?? false
+                if !visible {
+                    if !state.publicResearch.isEmpty || !state.durableActions.isEmpty || state.latest?.verifiedPublicFindings?.isEmpty==false,let response=interrupted(AskHostedError.answerRejected) {return response}
+                    throw AskHostedError.answerRejected
+                }
             }
             let assemblyStarted=DispatchTime.now().uptimeNanoseconds
             defer {AskPipelineScope.record(.assembly,since:assemblyStarted)}

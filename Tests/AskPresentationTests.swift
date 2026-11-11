@@ -180,7 +180,9 @@ private actor PresentationGateProvider:AskFeastProvider {
         let links=AskAnswerParagraph(id:"links",spans:[.text("[Forged](\(forgedURL)) [File](file:///private) [Relative](/local) [Source](\(safeURL)) ["),.place(a),.text("](https://evil.example) ["),.place(b),.text("](https://evil.example)")],sourceIDs:[])
         let linked=AskMarkdownPresentation.inline(links,candidates:candidates)
         precondition(linked[linked.range(of:"Forged")!].link==nil && linked[linked.range(of:"File")!].link==nil && linked[linked.range(of:"Relative")!].link==nil)
-        precondition(linked[linked.range(of:"Source")!].link?.absoluteString==safeURL)
+        precondition(linked[linked.range(of:"Source")!].link==nil) // Safe syntax without source evidence is not a working link.
+        let evidenced=AskMarkdownPresentation.inline(links,candidates:candidates,citations:[.init(title:"Source",url:safeURL)])
+        precondition(evidenced[evidenced.range(of:"Source")!].link?.absoluteString==safeURL)
         precondition(linked[linked.range(of:first.name)!].link==AskPlaceReference.url(for:first))
         precondition(linked[linked.range(of:literalName)!].link==nil)
         let ordinary="👩🏽‍🍳 🥐 e\u{301} \u{E000} \u{F0000} turn0search0 FEASTPLACE0"

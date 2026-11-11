@@ -111,17 +111,28 @@ enum AskRecoveryOperationScope {
     }
     func recoverySnapshot()throws->Data {
         let value=RecoverySnapshot(requestDigest:try recoveryRequestDigest(),selection:selection,selectionIsOrdered:selectionIsOrdered,selectionIsPrivate:selectionIsPrivate,findings:findings,maps:maps.mapValues(RecoveryMap.init),mutationOrder:mutationOrder,mutationStates:mutationStates,completedLeaves:completedLeaves,frozenUndoActions:frozenUndoActions,mapsQuery:mapsQuery,researchCache:researchCache,researchOrder:researchOrder,researchResults:researchResults,researchFieldOrder:researchFieldOrder,retainedPublicKeys:retainedPublicKeys,createdCities:createdCities,collectionPageProgress:collectionPageProgress,displayOrder:displayOrder,collectionPageDisplayOrders:collectionPageDisplayOrders)
+        try validateRecoverySnapshot(value)
         let data=try JSONEncoder().encode(value)
         guard data.count<=8*1024*1024 else {throw AskChangeError.journal}
         return data
     }
+    private func validateRecoverySnapshot(_ value:RecoverySnapshot)throws {
+        // Full query membership and displayed ordinal rows have different limits.
+        // Aggregates (and unfinished pages) keep every selected ID locally. They
+        // do not gain a displayed order merely by surviving a restart.
+        guard value.version==1,value.requestDigest == (try recoveryRequestDigest()),
+              (!value.selectionIsOrdered || value.selection.count<=AskCollectionPage.maximumRenderedRecords),
+              Set(value.selection).count==value.selection.count,value.selection.allSatisfy({UUID(uuidString:$0) != nil}),
+              value.mutationOrder.count<=AskCollectionPage.maximumRenderedRecords,
+              value.collectionPageProgress.values.allSatisfy({$0>=0 && $0<=AskCollectionPage.maximumRenderedRecords}) else {throw AskChangeError.journal}
+        if let displayed=value.displayOrder {guard value.selectionIsOrdered,displayed.count<=value.selection.count*20,Set(displayed)==Set(value.selection) else{throw AskChangeError.journal}}
+        if let pages=value.collectionPageDisplayOrders {guard pages.allSatisfy({key,ids in ids.count<=(value.collectionPageProgress[key] ?? 0)*20 && ids.allSatisfy {UUID(uuidString:$0) != nil}}) else{throw AskChangeError.journal}}
+    }
     func restoreRecoverySnapshot(_ data:Data)throws {
         guard data.count<=8*1024*1024 else {throw AskChangeError.journal}
         let value=try JSONDecoder().decode(RecoverySnapshot.self,from:data)
-        guard value.version==1,value.requestDigest == (try recoveryRequestDigest()),value.selection.count<=2400,value.mutationOrder.count<=2400,value.collectionPageProgress.values.allSatisfy({$0>=0 && $0<=2400}) else {throw AskChangeError.journal}
+        try validateRecoverySnapshot(value)
         let restoredMaps=try value.maps.mapValues {try $0.restored()}
-        if let displayed=value.displayOrder {guard value.selectionIsOrdered,displayed.count<=value.selection.count*20,Set(displayed)==Set(value.selection) else{throw AskChangeError.journal}}
-        if let pages=value.collectionPageDisplayOrders {guard pages.allSatisfy({key,ids in ids.count<=(value.collectionPageProgress[key] ?? 0)*20 && ids.allSatisfy {UUID(uuidString:$0) != nil}}) else{throw AskChangeError.journal}}
         selection=value.selection;selectionIsOrdered=value.selectionIsOrdered;selectionIsPrivate=value.selectionIsPrivate;displayOrder=value.displayOrder
         collectionPageDisplayOrders=value.collectionPageDisplayOrders ?? [:]
         findings=value.findings;maps=restoredMaps;mutationOrder=value.mutationOrder;mutationStates=value.mutationStates

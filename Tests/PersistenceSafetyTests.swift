@@ -16,6 +16,9 @@ final class FailingContext: NSManagedObjectContext, @unchecked Sendable {
             try RealStoreUpgradeCheck.run(model:model,directory:URL(fileURLWithPath:CommandLine.arguments[2]));return
         }
         if ProcessInfo.processInfo.environment["FEAST_JOURNAL_ONLY"]=="1" {try AskJournalCapacityTests.run(model:model,directory:URL(fileURLWithPath:CommandLine.arguments[2]));try AskJournalFailureTests.run(model:model,directory:URL(fileURLWithPath:CommandLine.arguments[2]));return}
+        if let selected=ProcessInfo.processInfo.environment["FEAST_AUDIT_ANSWER_CASE"] {
+            try await AskAnswerRetentionTests.run(model:model,directory:URL(fileURLWithPath:CommandLine.arguments[2]),selection:selected);return
+        }
         let url = URL(fileURLWithPath: CommandLine.arguments[2]).appendingPathComponent("synthetic.sqlite")
         func coordinator() throws -> NSPersistentStoreCoordinator {
             let coordinator = NSPersistentStoreCoordinator(managedObjectModel: model)
@@ -265,6 +268,7 @@ final class FailingContext: NSManagedObjectContext, @unchecked Sendable {
         try await AskAnswerAcceptanceTests.run(model:model,temporaryDirectory:URL(fileURLWithPath:CommandLine.arguments[2]))
         try await AskAgentLoopTests.run()
         try await AskConversationLoopTests.run()
+        try await AskAnswerRetentionTests.run(model:model,directory:URL(fileURLWithPath:CommandLine.arguments[2]))
         try await AskRetryStorageTests.run(directory:URL(fileURLWithPath:CommandLine.arguments[2]))
         try await AskLifecycleAdmissionTests.run(model:model,directory:URL(fileURLWithPath:CommandLine.arguments[2]))
         try await AskConversationPersistenceTests.run(model:model,directory:URL(fileURLWithPath:CommandLine.arguments[2]))

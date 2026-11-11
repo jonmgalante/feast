@@ -312,7 +312,7 @@ struct AskConversationAnswer: View {
         return ids.compactMap { id in response.candidates.first { $0.id == id } }
     }
     private func attributed(_ paragraph: AskAnswerParagraph) -> AttributedString {
-        var result = AskMarkdownPresentation.inline(paragraph,candidates:response.candidates)
+        var result = AskMarkdownPresentation.inline(paragraph,candidates:response.candidates,citations:response.paragraphs.flatMap(\.citations))
         let allCitations = response.paragraphs.flatMap(\.citations).reduce(into: [AskWebCitation]()) { result, citation in
             if !result.contains(where: { $0.url == citation.url }) { result.append(citation) }
         }
