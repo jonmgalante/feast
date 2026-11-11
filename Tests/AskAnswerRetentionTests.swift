@@ -124,6 +124,37 @@ private struct RetentionProvider:AskFeastProvider {
             precondition(reads==2 && denied.map(\.id)==AskHistoryPresentation.ordered(library.chats).map(\.id) && unchanged==bytes,"Permission projection must fetch access once, not reorder or rewrite stored chats")
             visible=[city.id!]
             print("PASS whole-library History rows redact revoked native previews/AX, share a safe Rename title, preserve manual names/order/archive bytes, and fetch access once")
+            // Combined navigation/privacy gate: keep raw RAM lossless while every
+            // History/Copy presentation still performs fresh permission filtering.
+            let navigationFolder=directory.appendingPathComponent("row-navigation-privacy")
+            let priorFolder=directory.appendingPathComponent("row-navigation-prior")
+            let navigationStore=AskConversationStore(url:navigationFolder.appendingPathComponent("history.json"))
+            precondition(navigationStore.saveLibrary(library))
+            let priorBytes=try Data(contentsOf:navigationStore.url)
+            let navigation=AskSession(index:try adapter.index(),provider:provider)
+            navigation.restoreHistory(from:navigationStore);navigation.refreshIndex={try adapter.index()}
+            // Induce an actual failure only in this disposable history directory.
+            try FileManager.default.moveItem(at:navigationFolder,to:priorFolder)
+            try Data("not a history directory".utf8).write(to:navigationFolder)
+            precondition(navigation.openChat(hidden.id),"Storage failure must not trap an existing chat")
+            let exactDraft="Exact unsaved draft 🧭 e\u{301}\n trailing  "
+            navigation.input=exactDraft;navigation.flushHistory()
+            let rawTurns=navigation.turns
+            precondition(AskAnswerCopy.text(rawTurns[0].response!).contains("Retention Cafe"),"The retained raw answer must contain the value later removed from Copy")
+            visible=[]
+            let unsavedRows=navigation.historyRows()
+            let unsavedPrivate=unsavedRows.first {$0.id==hidden.id}!
+            precondition(navigation.unsavedHistoryChatIDs.contains(hidden.id),"The permission-filtered row must keep its UUID-keyed unsaved status")
+            precondition(!unsavedPrivate.accessibilityLabel.contains("PRIVATE_RENAME_NOTE") && !unsavedPrivate.accessibilityLabel.contains("Retention Cafe"),"RAM-only History rows must not bypass permission projection")
+            precondition(navigation.historyError?.contains("not saved")==true && navigation.historyError?.contains("PRIVATE_") != true,"Unsaved status must remain visible without raw private titles")
+            precondition(!AskAnswerCopy.text(navigation.presentedTurn(rawTurns[0]).response!).contains("Retention Cafe"),"RAM-only Copy must use fresh permission filtering")
+            precondition(navigation.newChat() && navigation.openChat(hidden.id),"Revocation must not remove the non-destructive RAM navigation escape")
+            precondition(navigation.turns==rawTurns && Array(navigation.input.utf8)==Array(exactDraft.utf8),"Privacy projection and New/Open must preserve the exact raw answer and UTF-8 draft")
+            precondition(!navigation.historyRows().first(where:{$0.id==hidden.id})!.title.contains("PRIVATE_RENAME_NOTE"),"Rename prefill stays permission-filtered after RAM navigation")
+            let unchangedPrior=try Data(contentsOf:priorFolder.appendingPathComponent("history.json"))
+            precondition(unchangedPrior==priorBytes,"RAM navigation and projection cannot rewrite the saved archive")
+            navigation.suspend();visible=[city.id!]
+            print("PASS integrated RAM-only History preserves exact answer/draft and unsaved status while revocation filters row/AX/Rename/Copy without rewriting saved bytes")
         }
         if selection==nil || selection=="blank" {
             for (calls,text) in [([]," \n "),([query("answer")]," \n "),([],"\u{E200}cite\u{E202}turn0search0\u{E201}"),([query("answer")],"\u{E200}cite\u{E202}turn0search0\u{E201}")] {

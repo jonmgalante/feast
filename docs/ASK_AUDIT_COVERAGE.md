@@ -240,9 +240,25 @@ not a production latency guarantee. Evidence:
 `/tmp/feast-legacy-protocol-final-fdmrf43l`. No service, data, flag or deployment
 was changed.
 
-## Continuing implementation, not yet integrated or verified
+## Reviewed app candidates integrated locally
 
-### Answer/history branch: `fix/ask-audit-answers`
+Navigation/durability source `7b000b8` is integrated as `64f1961`. History/sections
+source `38eeea9` is integrated as `2e3ca4f`. Both source trees were independently
+reviewed and checked against their frozen manifests before integration. The two
+expected conflicts preserve fresh permission-filtered History row/Rename text
+alongside UUID-keyed unsaved indicators and composed History errors, and include
+both complete test lists. Backend and app identity/model/project files are
+unchanged by these integrations.
+
+Navigation's final standalone suites passed 955 default and 1,030 recovery
+checkpoints. History/sections passed 643 default, 644 recovery and all 16 focused
+regressions. These are source-lane results, not the final combined gate. The
+combined source adds a regression covering storage-failed RAM navigation,
+permission revocation, History/AX/Rename/Copy filtering, exact answer/draft retention
+and unchanged saved bytes. Full combined suites, builds and privacy parity remain
+pending until their exact frozen results are recorded below.
+
+### Implemented answer/history scope
 
 - Retain independent native list sections with separate query/page/membership and
   occurrence provenance. Do not merge unrelated lists into the last query scope.
@@ -250,12 +266,12 @@ was changed.
   never return revoked/private content through remaining fragments.
 - Make retained long-answer tails retrievable through bounded, truthful context.
 
-### History navigation branch: `fix/ask-audit-navigation`
+### Implemented history navigation scope
 
 - Permit non-destructive navigation when current in-memory history cannot save,
   preserving the full chat and draft rather than silently dropping/truncating them.
 - One authoritative pending library, exact-revision reconciliation and explicit
-  Clear/Delete recovery barriers remain under implementation review and fault tests.
+  Clear/Delete recovery barriers are covered by the reviewed offline fault tests.
 - The pending materialized library has an explicit 16 MiB total resource budget.
   Above that budget or on actual storage failure, exact RAM navigation remains
   available with a persistent unsaved warning, not a restart-durability promise.
