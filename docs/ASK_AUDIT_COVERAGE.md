@@ -192,23 +192,55 @@ proofs. Arbitrary untouched/out-of-band corruption requires the independent full
 immutable audit; hashes do not prove operational inventory completeness or writer
 quiescence. See `Backend/feast-production/ACCOUNTING_INDEX.md`.
 
-The separately discovered legacy direct-ID compatibility boundary below is **not**
-closed by this index acceptance. No live index, migration, ledger or provider was
-used or activated.
+The separate historical direct-ID correction below closes the identity boundary
+found during index review. No live index, migration, ledger or provider was used
+or activated.
+
+## Reviewed historical direct accounting compatibility
+
+Integrated as `f6a100ac3bb4ceaae037758bb5af1cc4fe9c6f00` (source
+`57350b715bdeee048d08a24519108a216164f950`). Authentic old V1/V2 direct producers
+accepted 36-character IDs outside strict UUID syntax. The compatibility reader
+recognizes only their exact historical grammar, profiles, owner/fingerprint and
+truly absent managed linkage. Current native/staged/managed admission remains
+strict; canonical physical keys, per-record holds, charges and exact-key replay
+are never merged or rewritten. Only the secondary ownership index groups case
+aliases, using 72-hex ASCII paths that preserve distinct hyphen positions.
+
+The versioned offline policy rejects stale plans and refuses reinterpretation of
+an already active incompatible index, even with flags OFF. Complete inventory,
+writer quiescence and source-deployment preflight remain operational requirements,
+not facts established by local hashes. See
+`Backend/feast-production/HISTORICAL_ACCOUNTING_IDENTITY.md`.
+
+All eight committed files matched the independently reviewed freeze. Standalone
+verification passed 429 Node tests, 65/27 Python tests, four mock-only lifecycle/
+recovery runtimes and both resource-bound runs. Independent review passed 39
+focused tests and additional physical-case, ownership, sidecar and active-policy
+probes. Evidence: `/tmp/feast-legacy-id-freeze-UNPfN5`.
+
+The first combined gate passed 435/436 Node tests. The remaining old Stop race
+oracle inferred authenticated response completion from 15 event-loop turns.
+Controlled authentication delay and parallel traces reproduced false failures
+before the local transaction, or after cancellation was already committed. This
+was a test synchronization defect, not a reproduced production lock regression.
+A separately reviewed one-hunk test correction, integrated as `8e63a14` (source
+`d6357f6`), requires actual Stop/status completion, persisted cancellation and zero
+provider/count calls while the unrelated RPC is still held. Its deadlock guard
+fails when the original transaction-lock defect is deliberately reintroduced.
+No production code changed in that correction; the original failed log remains.
+
+The immutable combined **protocol + lifecycle + index + legacy compatibility**
+gate at `8e63a147154a7585f7c9a4ed91b7815ae1454784` then passed **436 Node tests,
+65/27 Python tests and all six mocked SQLite/workerd runtime/resource gates**,
+with source hashes unchanged. The 10,000-row run used 934 resumable steps, at most
+111 ms per measured step, 1,570,601 bytes read, 1,594,840 bytes written and 982 value
+operations. The near-128-KiB-row case passed too. These are local measurements,
+not a production latency guarantee. Evidence:
+`/tmp/feast-legacy-protocol-final-fdmrf43l`. No service, data, flag or deployment
+was changed.
 
 ## Continuing implementation, not yet integrated or verified
-
-### Legacy accounting identity compatibility: `fix/ask-audit-accounting`
-
-- Authentic old V1/V2 direct producers accepted certain 36-character IDs that are
-  not UUIDs. The current migration inventory rejects those valid old records.
-  Complete preflight must block rather than omit them or assume none exist.
-- A separate reviewed design will recognize only authentic legacy-direct record
-  shapes, keep native/staged/managed UUID admission strict, preserve every original
-  physical key/value and charge/hold, and keep case-alias ownership separate from
-  per-record accounting/replay. Hyphen-position variants must remain distinct.
-- New ownership proof bounds and a versioned offline-plan policy need exact
-  positive/negative fixtures, independent implementation review and combined gates.
 
 ### Answer/history branch: `fix/ask-audit-answers`
 
