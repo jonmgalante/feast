@@ -110,6 +110,26 @@ See `Backend/feast-production/EXECUTION_LIFECYCLE.md` for the offline contract.
 Historical-scan scaling is deliberately **not** claimed by this milestone. No live
 ledger, queued job, provider, migration, deployment or recovery flag was touched.
 
+## Reviewed retained-history protocol integration
+
+Integrated as `c8c0af8` and `9571933` (candidate `d649c40` / `a6288a6`, based on
+answer-protocol source `342a418`). Negotiated `retainedHistoryVersion=1` adds a
+bounded single-message UTF-16 `textOffset` option. Direct and durable capabilities
+are advertised separately. Absent-marker schemas and Astra/Sol bodies/fingerprints
+remain unchanged; changing the marker cannot dispatch the same root/step again.
+
+The combined protocol/lifecycle freeze passed 395 Node tests, 65/27 Python tests
+and four real mock-only SQLite/workerd runs. A negotiated reserved job resumed
+its exact original provider/count material across runtime restart, midnight and
+a changed tool-description implementation. Independent review reran 97 focused
+tests and four recovery probes, including malformed marker and privacy-latch
+checks. The entire integrated tree matched the frozen manifest before this
+status-only documentation update. Evidence: `/tmp/feast-protocol-managed-final.IRqSb8`.
+
+This approves backend integration only. App-side permission projection, legacy
+history compatibility, independent sections and navigation remain below. No live
+capability or deployment was activated.
+
 ## Continuing implementation, not yet integrated or verified
 
 ### Accounting scaling branch: `fix/ask-audit-accounting`
