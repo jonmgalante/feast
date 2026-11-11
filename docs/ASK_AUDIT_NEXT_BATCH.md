@@ -1,8 +1,11 @@
-# Ask audit next batches: proposed designs, not implemented
+# Ask audit follow-on design record
 
-These are read-only follow-on plans to `ASK_AUDIT_REMEDIATION.md`. They do not
+This records the original follow-on plans to `ASK_AUDIT_REMEDIATION.md`. It does not
 activate recovery, change live accounting, migrate user data or authorize release.
-The first prepared batch leaves these blockers open.
+For current verified status, use `ASK_AUDIT_COVERAGE.md`: the local journal repair
+is now implemented and reviewed in `ASK_JOURNAL_V2.md`; accounting and answer/history
+work is still being prepared. The historical proposals below are not deployment
+instructions.
 
 ## 1. Lossless action journal storage
 

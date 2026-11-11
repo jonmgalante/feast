@@ -26,19 +26,27 @@ Final first-batch gate: 247/248 Swift checkpoints, 335 Node tests, 65+27 Python
 tests, mock-only SQLite/workerd restart, three unsigned builds and built privacy
 parity. See the remediation document for compatibility and review limits.
 
+## Verified additional journal milestone
+
+Integrated as `bddb81c` (reviewed source commit `e3bf9e04f86bb31bcb366ad866318c7990cfac50`).
+The indexed local journal removes the artificial 200-entry/8 MiB whole-history
+lifetime ceiling without deleting receipts, Undo or replay evidence. Segmented
+snapshots preserve near-limit inverse writes; transactional admission, phase CAS,
+nonblocking process locking and v1 migration retain the existing authority.
+
+Final source passed 303 focused journal checkpoints, 550 default and 551
+recovery-compiled checkpoints, three unsigned builds and privacy parity. The
+independent reviewer reran the last two corruption/capacity probes against the
+exact final hashes. Integration changed no production bytes from that snapshot.
+See `ASK_JOURNAL_V2.md` for migration, backup, rollback, evidence and limitations.
+
+This is a scoped code milestone, not a live migration or release approval.
+Physical-device protection/backup restore and actual power-loss behavior remain
+separate acceptance checks. A forthcoming history-permission proof is a separate
+reviewed engine change, not covered by this journal signoff. Retention versus
+erasure remains a product decision; existing retention semantics are unchanged.
+
 ## Continuing implementation, not yet integrated or verified
-
-### Lossless journal branch: `fix/ask-audit-journal`
-
-- Remove the artificial 200-entry/8 MiB *whole-history* lifetime limit via indexed,
-  bounded-loading storage, not a larger cap or deleted receipts.
-- Make failed preparation/phase persistence transactional and recoverable.
-- Ensure a near-limit action advertised as Undoable remains representable when
-  its undo-after proof is recorded; avoid a new per-entry duplication ceiling.
-- Preserve every Undo/replay/deleted-record/intent identity through v1 migration,
-  interruption and compatible rollback.
-- Make file protection and backup/restore behavior explicit without silently
-  reducing existing recoverability. Retention policy is separate from capacity.
 
 ### Accounting branch: `fix/ask-audit-accounting`
 

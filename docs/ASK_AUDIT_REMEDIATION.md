@@ -2,6 +2,9 @@
 
 Baseline: `41229acfabb080559904c41a07f1db25f0b082f6`.
 
+This document describes the first batch only. Current accepted follow-on milestones
+and remaining integration gates are tracked in `ASK_AUDIT_COVERAGE.md`.
+
 This is local source preparation, not a release approval. Build 22 remains held.
 No live collection, ledger, credentials, provider calls, service configuration,
 recovery activation, TestFlight upload, or deployment is part of this batch.
