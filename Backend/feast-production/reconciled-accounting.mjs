@@ -41,6 +41,7 @@ export function usageCost(calls,profile){
 }
 async function rows(tx,prefix){let startAfter;const values=[];for(;;){const m=await tx.list({prefix,limit:1000,...(startAfter?{startAfter}:{})});if(!(m instanceof Map))throw Error('accounting_incomplete');if(!m.size)return values;const last=[...m.keys()].at(-1);if(startAfter&&last<=startAfter)throw Error('accounting_incomplete');values.push(...m.values());if(m.size<1000)return values;startAfter=last;}}
 export async function accountingView(tx,reconcileLegacy){
+ if(tx.accountingIndex){const legacyHalt=await effectiveHalt(tx,V1),modernHalt=await effectiveHalt(tx,V2);return tx.accountingIndex.budget(reconcileLegacy,legacyHalt||modernHalt)}
  await validateExecutions(tx);
  const legacyTotal=(await tx.get(V1+'total'))??0,oldHalted=(await tx.get(V1+'halted'))??false;
  if(!integer(legacyTotal)||typeof oldHalted!=='boolean')throw Error('accounting_corrupt');

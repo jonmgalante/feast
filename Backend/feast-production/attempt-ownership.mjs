@@ -4,6 +4,7 @@
 // does not authorize settling a pending/uncertain accounting hold.
 export async function attemptOwnership(tx,root,userHash){return (await attemptOwnershipBatch(tx,[root],userHash)).get(root.toLowerCase())}
 export async function attemptOwnershipBatch(tx,roots,userHash){
+ if(tx.accountingIndex){if(userHash instanceof Map)throw Error('ownership_binding_scan_requires_raw_snapshot');return tx.accountingIndex.owners(roots,userHash)}
  const result=new Map(roots.map(root=>[root.toLowerCase(),{owned:true,accounting:[]}]));
  for(const prefix of ['production-validation-v2:native-root:','production-validation-v2:stage-root:','production-validation-v2:closed-root:','production-validation-v2:request:','production-validation-v1:request:']){
   let startAfter;
@@ -17,7 +18,7 @@ export async function attemptOwnershipBatch(tx,roots,userHash){
     const matching=new Set([key.slice(prefix.length).toLowerCase(),record?.rootRequestID?.toLowerCase()]);
     for(const root of matching){
      const ownership=result.get(root);if(!ownership)continue;
-     if(!record||record.userHash!==userHash)ownership.owned=false;
+     if(!record||record.userHash!==(userHash instanceof Map?userHash.get(root):userHash))ownership.owned=false;
      if(prefix.endsWith('request:'))ownership.accounting.push(record);
     }
    }

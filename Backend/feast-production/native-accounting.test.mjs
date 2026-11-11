@@ -69,7 +69,9 @@ test('Stop validates every cross-protocol owner and case alias before closing; p
  }
  const {a,data,ledger}=setup(),p=request();await reserve(a,p);const before=structuredClone(data);
  const response=await ledger.fetch(new Request('https://ledger/native-close-v2',{method:'POST',body:JSON.stringify(p)}));assert.equal(response.status,200);
- assert.deepEqual(new Map([...data].filter(([k])=>!k.startsWith(V2+'closed-root:'))),before);
+ const revisionKey=V2+'accounting-writer-revision:v1';
+ assert.equal(data.get(revisionKey).revision,before.get(revisionKey).revision+1,'new close fence must invalidate a staged snapshot');
+ assert.deepEqual(new Map([...data].filter(([k])=>!k.startsWith(V2+'closed-root:')&&k!==revisionKey)),new Map([...before].filter(([k])=>k!==revisionKey)));
  assert.equal((await(await ledger.fetch(new Request('https://ledger/status-v2'))).json()).pendingMicroUSD,NATIVE_ESTIMATE);
 });
 

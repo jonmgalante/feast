@@ -160,10 +160,11 @@ assertions were contract-absence reds, not 16 separately reproduced incidents.
 The old audit harness is untouched. Four compatible direct-envelope tests were
 also red before that implementation.
 
-This milestone does **not** claim to fix historical-scan scaling. The compatibility
-reader deliberately checks complete history, and currently adds scans. A separate
-versioned indexed-cutover milestone must bootstrap from a full revision-checked
-validation and update aggregates, active slots, root ownership and turn fences
-on every writer. It must prove equal accounting/replay outcomes and bounded
-hot-path work on large history before scan removal. No truncation, history cap
-or skipped legacy rows is an acceptable optimization.
+The accepted lifecycle milestone alone does **not** fix historical-scan scaling.
+Its complete compatibility reader remains the authority until a separately
+verified additive indexed checkpoint is installed. The offline index candidate
+is described in `ACCOUNTING_INDEX.md`: full immutable-snapshot semantic
+preparation/audit, bounded revision-pinned bootstrap, all-writer transactional
+proof/aggregate updates, and no history truncation or unknown-hold release.
+Index review and operational cutover authorization are separate from lifecycle
+signoff. No live migration or deployment is implied by either candidate.

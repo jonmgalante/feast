@@ -23,18 +23,20 @@ export async function readExecution(tx,id,record){
  return x;
 }
 export async function validateExecutions(tx){
+ if(tx.accountingIndex){await tx.accountingIndex.validate();return}
  if((await entries(tx,EXECUTION)).length||(await entries(tx,LEGACY_EXECUTION)).length||(await entries(tx,V2+'halt-ack:')).length||await tx.get(V2+'execution-cutover:v1'))await requireExecutionCutover(tx);
  for(const [key,record] of await entries(tx,V2+'request:'))if(record?.executionVersion!==undefined)await readExecution(tx,key.slice((V2+'request:').length),record);
  for(const [key] of await entries(tx,EXECUTION)){const id=key.slice(EXECUTION.length);await readExecution(tx,id,await tx.get(V2+'request:'+id))}
+ const migrationItems=new Map();
  for(const [key,m] of await entries(tx,LEGACY_EXECUTION)){
   const r=await tx.get(m?.recordKey);if(!m||!await tx.get(V2+'migration-receipt:'+m.receiptDigest)||m.version!==1||!['attributed-uncertain','retain-active'].includes(m.classification)||!jobHash(m.recordDigest)||!jobHash(m.receiptDigest)||!r||m.recordKey!==key.slice(LEGACY_EXECUTION.length))throw Error('legacy_execution_corrupt');
   // Settlement is permitted to replace a classified pending record, not its
   // owner/root/profile/hold. The classification never proves zero usage.
-  const plan=await readMigrationPlan(tx,m.receiptDigest);if(!plan.legacy.some(item=>item.key===m.recordKey&&item.recordDigest===m.recordDigest&&item.classification===m.classification))throw Error('legacy_execution_receipt_conflict');
+  let items=migrationItems.get(m.receiptDigest);if(!items){const plan=await readMigrationPlan(tx,m.receiptDigest);items=new Map(plan.legacy.map(item=>[item.key,item]));if(items.size!==plan.legacy.length)throw Error('legacy_execution_receipt_conflict');migrationItems.set(m.receiptDigest,items)}const item=items.get(m.recordKey);if(!item||item.recordDigest!==m.recordDigest||item.classification!==m.classification)throw Error('legacy_execution_receipt_conflict');
   if(r.userHash!==m.userHash||(r.rootRequestID??m.requestID)!==m.root||(r.profile??null)!==m.profile||r.reservedMicroUSD!==m.hold)throw Error('legacy_execution_conflict');
  }
 }
-export async function activeExecutionCount(tx){let active=0;for(const [key,r] of await entries(tx,V2+'request:'))if(r.state==='pending'){const m=await tx.get(LEGACY_EXECUTION+key);if(m?.classification!=='attributed-uncertain')active++}return active}
+export async function activeExecutionCount(tx){if(tx.accountingIndex)return tx.accountingIndex.activeCount();let active=0;for(const [key,r] of await entries(tx,V2+'request:'))if(r.state==='pending'){const m=await tx.get(LEGACY_EXECUTION+key);if(m?.classification!=='attributed-uncertain')active++}return active}
 export async function createExecution(tx,{requestID,protocol,record,intent,allocation,now}){
  if(!jobHash(intent.bodyDigest)||!integer(now)||Object.keys(intent).some(k=>!INTENT_KEYS.has(k)))throw Error('execution_intent_required');
  const x={version:1,requestID,protocol,userHash:record.userHash,root:record.rootRequestID,stageIndex:record.stageIndex,turnID:record.nativeTurnID??null,profile:record.profile,originalHoldMicroUSD:record.reservedMicroUSD,reservationDigest:await jobDigest(intent),intentKeys:Object.keys(intent).sort(),bodyDigest:intent.bodyDigest,allocationDigest:await jobDigest(allocation),reservedAt:now,deadlineAt:now+(protocol==='direct'?2:1)*EXECUTION_WINDOW_MS,...(protocol==='direct'?{claims:[]}:{}),phase:'reserved',claimedAt:null,settlementDigest:null,terminalReason:null,revision:1};
@@ -57,7 +59,7 @@ export async function uncertainExecution(tx,x,record,reason='uncertain'){
 export async function expireExecution(tx,x,record,now){return x&&['reserved','claimed'].includes(x.phase)&&now>=x.deadlineAt?uncertainExecution(tx,x,record,'deadline'):x}
 export async function executionIdentityMatches(x,intent){return intent.executionDigest===x.reservationDigest&&x.intentKeys.every(k=>Object.hasOwn(intent,k))&&await jobDigest(Object.fromEntries(x.intentKeys.map(k=>[k,intent[k]])))===x.reservationDigest}
 export async function readMigrationPlan(tx,digest){const receipt=await tx.get(V2+'migration-receipt:'+digest);if(!receipt||receipt.version!==1||receipt.planDigest!==digest||!integer(receipt.planChunks)||receipt.planChunks<1)throw Error('migration_receipt_corrupt');const chunks=await entries(tx,V2+'migration-plan:'+digest+':');if(chunks.length!==receipt.planChunks||chunks.some(([k,v],i)=>k!==V2+'migration-plan:'+digest+':'+String(i).padStart(6,'0')||typeof v!=='string'||v.length>24000))throw Error('migration_receipt_corrupt');const plan=JSON.parse(chunks.map(([,v])=>v).join(''));if(await jobDigest(plan)!==digest||plan.revision!==receipt.reviewedRevision)throw Error('migration_receipt_corrupt');await validateRecoveryDisposition(plan.recovery);return plan}
-export async function requireExecutionCutover(tx){const cutover=await tx.get(V2+'execution-cutover:v1');const receipt=cutover&&await tx.get(V2+'migration-receipt:'+cutover.receiptDigest);if(!cutover||cutover.version!==1||!jobHash(cutover.receiptDigest)||!receipt||receipt.reviewedRevision!==cutover.reviewedRevision||!await readMigrationPlan(tx,cutover.receiptDigest))throw Error('execution_migration_required')}
+export async function requireExecutionCutover(tx){if(tx.accountingIndex){await tx.accountingIndex.validate();return}const cutover=await tx.get(V2+'execution-cutover:v1');const receipt=cutover&&await tx.get(V2+'migration-receipt:'+cutover.receiptDigest);if(!cutover||cutover.version!==1||!jobHash(cutover.receiptDigest)||!receipt||receipt.reviewedRevision!==cutover.reviewedRevision||!await readMigrationPlan(tx,cutover.receiptDigest))throw Error('execution_migration_required')}
 export async function claimExecution(tx,x,record,intent,now){
  x=await expireExecution(tx,x,record,now);
  if(!x||!await executionIdentityMatches(x,intent)||x.userHash!==intent.userHash||x.bodyDigest!==intent.bodyDigest||x.phase!=='reserved'||x.claimedAt!==null||await tx.get(V2+'closed-root:'+x.root.toLowerCase()))return null;
@@ -66,8 +68,9 @@ export async function claimExecution(tx,x,record,intent,now){
 export async function executionAlarm(storage,now=Date.now()){
  return storage.transaction(async tx=>{
   await validateExecutions(tx);let earliest=Infinity;
-  for(const [key] of await entries(tx,EXECUTION)){
-   const id=key.slice(EXECUTION.length),record=await tx.get(V2+'request:'+id);let x=await readExecution(tx,id,record);x=await expireExecution(tx,x,record,now);if(['reserved','claimed'].includes(x.phase))earliest=Math.min(earliest,x.deadlineAt);
+  const ids=tx.accountingIndex?await tx.accountingIndex.activeIDs():(await entries(tx,EXECUTION)).map(([key])=>key.slice(EXECUTION.length));
+  for(const id of ids){
+   const record=await tx.get(V2+'request:'+id);let x=await readExecution(tx,id,record);x=await expireExecution(tx,x,record,now);if(['reserved','claimed'].includes(x.phase))earliest=Math.min(earliest,x.deadlineAt);
   }
   if(earliest===Infinity)await tx.deleteAlarm();else await tx.setAlarm(earliest);
  });
@@ -80,6 +83,7 @@ export async function effectiveHalt(tx,prefix){
  const halted=(await tx.get(prefix+'halted'))??false;if(typeof halted!=='boolean')throw Error('accounting_corrupt');if(!halted)return false;
  const generation=await tx.get(prefix+'halt-generation');if(generation!==undefined&&(!integer(generation.generation)||generation.generation<1||generation.version!==1))throw Error('halt_generation_corrupt');
  const ack=await tx.get(V2+'halt-ack:'+prefix);if(!ack)return true;
+ if(tx.accountingIndex){if(!await tx.accountingIndex.verifiedAck(prefix,ack))throw Error('halt_ack_corrupt');return ack.generation!==(generation?.generation??'legacy-unversioned')}
  const receipt=await tx.get(V2+'migration-receipt:'+ack.receiptDigest),plan=receipt&&await readMigrationPlan(tx,ack.receiptDigest);
  if(!jobHash(ack.receiptDigest)||!receipt||!plan.halts.some(h=>h.key===prefix+'halted'&&h.generation===ack.generation&&h.classification==='attributed-uncertainty'))throw Error('halt_ack_corrupt');
  return ack.generation!==(generation?.generation??'legacy-unversioned');

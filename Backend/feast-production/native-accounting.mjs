@@ -60,8 +60,8 @@ export async function nativeAccountingFetch(storage,request,view,rows,env={},now
    if(p.step===0 ? root!=null : !root||root.fingerprint!==p.fingerprint||root.turnID!==p.turnID||root.nextStep!==p.step||root.frameDigest!==p.priorDigest||root.state!=='complete')return json({error:'native_order_or_replay'},409);
    if(lifecycle&&p.step===0){const ownership=await attemptOwnership(tx,p.root,p.userHash);if(!ownership.owned||ownership.accounting.length)return json({error:'native_order_or_replay'},409)}
    if(!root&&p.step===0&&(p.priorDigest!==null||await tx.get(P+'stage-root:'+p.root)||await tx.get(P+'stage-root:'+p.root.toUpperCase())||await tx.get(P+'request:'+p.root)||await tx.get(P+'request:'+p.root.toUpperCase())||await tx.get('production-validation-v1:request:'+p.root)||await tx.get('production-validation-v1:request:'+p.root.toUpperCase())))return json({error:'native_order_or_replay'},409);
-   const records=await rows(tx,P+'request:');
-   if(records.some(r=>r.nativeTurnID===p.turnID&&r.userHash===p.userHash&&['pending','uncertain'].includes(r.state)))return json({error:'native_turn_unsettled'},409);
+   const unsettled=tx.accountingIndex?await tx.accountingIndex.turnUnsettled(p.userHash,p.turnID)>0:(await rows(tx,P+'request:')).some(r=>r.nativeTurnID===p.turnID&&r.userHash===p.userHash&&['pending','uncertain'].includes(r.state));
+   if(unsettled)return json({error:'native_turn_unsettled'},409);
    if(turn.responses>=12)return json({error:'native_response_limit'},409);
    const privateLatched=turn.privateLatched||p.privateLatched;
    const remainingWebActions=privateLatched?0:Math.min(p.requestedWebActions,12-turn.webActions);

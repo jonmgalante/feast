@@ -1,3 +1,4 @@
+import {indexedStorage} from './accounting-index.mjs';
 import {executionAlarm,recordGlobalHalt} from './execution-lifecycle.mjs';
 import {knownProviderRejection} from './provider-errors.mjs';
 import {VALIDATION_CAP_MICRO_USD} from './budget-policy.mjs';
@@ -9,7 +10,7 @@ const PREFIX='production-validation-v1:', MAX_INPUT=24576, MAX_OUTPUT=16384;
 const json=(value,status=200)=>Response.json(value,{status,headers:{'Cache-Control':'no-store'}});
 const integer=x=>Number.isSafeInteger(x)&&x>=0;
 export class ProductionLedger {
- constructor(state,env={},dependencies={}){this.storage=state.storage;this.env=env;this.now=dependencies.now??Date.now}
+ constructor(state,env={},dependencies={}){this.storage=indexedStorage(state.storage);this.env=env;this.now=dependencies.now??Date.now}
  async alarm(){return executionAlarm(this.storage,this.now())}
  async fetch(request){
   try {

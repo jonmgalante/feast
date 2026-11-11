@@ -1,6 +1,6 @@
 import {test} from 'node:test';import assert from 'node:assert/strict';
 import worker from './public-handler.mjs';import {ProductionLedger,VALIDATION_CAP,REQUEST_HOLD} from './production-ledger.mjs';
-function storage(){const values=new Map();let queue=Promise.resolve();return {values,transaction(fn){const run=queue.then(()=>fn({get:async k=>values.get(k),put:async(k,v)=>values.set(k,v)}));queue=run.catch(()=>{});return run}}}
+function storage(){const values=new Map();let queue=Promise.resolve();return {values,transaction(fn){const run=queue.then(()=>fn({get:async k=>values.get(k),put:async(k,v)=>values.set(k,v),list:async({prefix='',startAfter,limit=1000}={})=>new Map([...values].filter(([k])=>k.startsWith(prefix)&&(!startAfter||k>startAfter)).sort(([a],[b])=>a<b?-1:a>b?1:0).slice(0,limit))}));queue=run.catch(()=>{});return run}}}
 const request=(path,p)=>new Request('https://ledger.invalid'+path,p?{method:'POST',body:JSON.stringify(p)}:undefined);
 const payload=i=>({requestID:crypto.randomUUID(),userHash:i.toString(16).padStart(64,'0'),amountMicroUSD:REQUEST_HOLD,fingerprint:'f'.repeat(64)});
 test('staging has no provider/enrollment route and does not read secrets',async()=>{const env=new Proxy({},{get(_target,key){if(['OWNER_VALIDATION_ENABLED','PHONE_ACCESS_ENABLED'].includes(key))return 'false';throw Error('No secret access')}});assert.equal((await worker.fetch(request('/health'),env)).status,200);for(const p of ['/v1/answer','/v1/enroll','/admin'])assert.equal((await worker.fetch(request(p,{}),env)).status,503)});
