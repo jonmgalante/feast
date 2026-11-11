@@ -6,6 +6,8 @@ import {phoneStore,accessJSON} from './phone-access.mjs';
 import {boundedResponse} from '../feast-proxy/openai.mjs';
 import {providerFailure,knownProviderRejection} from './provider-errors.mjs';
 const META='job:',BLOB='content:',CANCEL_CLAIM='cancel-claim:';
+// Additive history paging keeps the original durable payload/frame/response limits.
+const retainedHistoryOptions={allowRetainedHistory:true};
 const json=(v,status=200)=>Response.json(v,{status,headers:{'Cache-Control':'no-store'}});
 const terminal=s=>['completed','failed','uncertain','cancelled','expired','acknowledged'].includes(s);
 const safeError=e=>/^[a-z_]{1,100}$/.test(e?.message??'')?e.message:'answer_job_unavailable';
@@ -136,8 +138,8 @@ export class AnswerJobs {
    if(!c||c.version!==1||!['submit','status','cancel','ack'].includes(c.op))return json({error:'invalid_answer_job'},400);
    if(c.op==='submit'){
     if(!answerJobsEnabled(this.env))return json({error:'answer_jobs_disabled'},503);
-    if(!sameKeys(c,['version','op','request'])||!validNativePayload(c.request)||new TextEncoder().encode(JSON.stringify(c.request)).length>LIMIT.maxPayloadBytes)return json({error:'invalid_answer_job'},400);
-    const payload=c.request,model=nativeRequestModel(payload);await nativeContinuation(payload,model);
+    if(!sameKeys(c,['version','op','request'])||!validNativePayload(c.request,retainedHistoryOptions)||new TextEncoder().encode(JSON.stringify(c.request)).length>LIMIT.maxPayloadBytes)return json({error:'invalid_answer_job'},400);
+    const payload=c.request,model=nativeRequestModel(payload,undefined,retainedHistoryOptions);await nativeContinuation(payload,model,retainedHistoryOptions);
     const key=jobKey(payload.requestID,payload.step),digest=await jobDigest(payload),now=this.now();
     const accepted=await this.storage.transaction(async tx=>{
      const prior=await tx.get(META+key);
@@ -387,7 +389,7 @@ export class AnswerJobs {
    if(!receipt)throw Error('answer_job_missing_receipt');
    const response=new Response(receipt.text,{status:receipt.status,headers:{'Content-Type':'application/json'}});
    if(!response.ok)throw await providerFailure(response,'provider');
-   const state=await nativeContinuation(payload,j.model);
+   const state=await nativeContinuation(payload,j.model,retainedHistoryOptions);
    state.privateLatched ||= j.allocation.privateLatched===true;
    state.webAllowed=j.reservation.webAllowed;state.allowedWebActions=j.reservation.maxWebActions;
    const {reply,bill}=await decodeNativeResult(payload,state,JSON.parse(receipt.text),{observedAt:j.observedAt,onVerifiedUsage:bill=>{verifiedBill=bill}});

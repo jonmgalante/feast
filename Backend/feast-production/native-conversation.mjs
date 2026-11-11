@@ -13,7 +13,7 @@ export const nativeResearchReady=(env={})=>env.NATIVE_RESEARCH_ENABLED==='true'&
 export async function nativeConversationAnswer(p,userHash,env,send=fetch,dependencies={}){
  if(env.NATIVE_RESEARCH_ENABLED!=='true'||env.ENVIRONMENT!=='production'||env.OWNER_VALIDATION_ENABLED!=='true'||env.LIVE_AI!=='true'||env.ALLOW_RECONCILED_BUDGET!=='true'||!/^[a-f0-9]{64}$/.test(userHash??'')||!env.OPENAI_API_KEY)return json({error:'native_research_disabled'},503);
  const direct=!dependencies.recovery&&!dependencies.pilotExecutionModel,limits=direct?DIRECT_NATIVE_LIMITS:NATIVE_RESEARCH;
- const nativeOptions={limits,allowCollectionQueryV2:direct};
+ const nativeOptions={limits,allowCollectionQueryV2:direct,allowRetainedHistory:true};
  let model;
  try{
   if(direct&&new TextEncoder().encode(JSON.stringify(p)).byteLength>limits.maxRequestBytes)throw Error('native_request_limit');
@@ -84,7 +84,7 @@ export async function decodeNativeResult(p,state,value,{limits=NATIVE_RESEARCH,m
   if(value.status!=='completed'||!validUsage||!Array.isArray(value.output))throw Error('native_response_unverified');
   if(value.output.length>NATIVE_RESEARCH.maxItems)throw Error(limits===DIRECT_NATIVE_LIMITS?'native_context_limit':'native_response_unverified');
   if(value.output.some(i=>i.type==='function_call_output'))throw Error('native_provider_tool_output');
-  const output=value.output.map(item=>checkedNativeItem(item,p.text,richCollection(p),p.collectionQueryVersion===2)),web=output.filter(i=>i.type==='web_search_call'),calls=output.filter(i=>i.type==='function_call');
+  const output=value.output.map(item=>checkedNativeItem(item,p.text,richCollection(p),p.collectionQueryVersion===2,p.retainedHistoryVersion===1)),web=output.filter(i=>i.type==='web_search_call'),calls=output.filter(i=>i.type==='function_call');
   if(calls.length>1||web.length>remaining||(!state.webAllowed&&web.length)||new Set(web.map(x=>x.id)).size!==web.length)throw Error('native_tool_limit');
   const oldWeb=new Set(state.frame.records.filter(r=>r.item.type==='web_search_call').map(r=>r.item.id));if(web.some(x=>oldWeb.has(x.id)))throw Error('native_duplicate_web_action');
   const at=observedAt??new Date().toISOString(),records=[...state.frame.records,...output.map(item=>({observedAt:at,item}))];if(records.length>NATIVE_RESEARCH.maxItems)throw Error('native_context_limit');
@@ -94,7 +94,7 @@ export async function decodeNativeResult(p,state,value,{limits=NATIVE_RESEARCH,m
   const text=selected.flatMap(i=>i.content.filter(c=>c.type==='output_text'||c.type==='refusal').map(c=>c.text??c.refusal)).join('\n');if(text.length>16000||!calls.length&&!text.trim()&&!state.frame.records.some(r=>r.item.type==='function_call_output'))throw Error('native_final_answer_shape');
   const finalCitations=[];for(const m of selected)for(const c of m.content)for(const a of c.annotations??[])if(!finalCitations.some(x=>x.url===a.url))finalCitations.push({title:a.title,url:a.url});
   if(finalCitations.length>20)throw Error('native_final_citation_limit');
-  const call=calls.length?checkedConversationCall(calls[0],p.text,richCollection(p),p.collectionQueryVersion===2):null;
+  const call=calls.length?checkedConversationCall(calls[0],p.text,richCollection(p),p.collectionQueryVersion===2,p.retainedHistoryVersion===1):null;
   const frameDigest=await nativeDigest(continuation);
  return {reply:{version:10,requestID:p.requestID,step:p.step,kind:call?'tool':'answer',call,text,continuation,model,finalCitations,nativeEvidence:evidence,performance:metrics.snapshot()},bill:{...verifiedBill,frameDigest,privateLatched:state.privateLatched,attemptWebActionsUsed:state.webActions+web.length}};
 }

@@ -26,9 +26,9 @@ export function decodeNativeFrame(encoded,limits=NATIVE_RESEARCH){
  if(data.byteLength>limits.maxRawContinuationBytes)throw Error('native_context_limit');
  try{return JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(data))}catch{throw Error('native_context_shape')}
 }
-export function validNativePayload(p,{limits=NATIVE_RESEARCH,allowCollectionQueryV2=false}={}){
- if(!p||p.version!==10||typeof p.webAllowed!=='boolean'||!uuid(p.turnID)||Object.hasOwn(p,'collectionQueryVersion')&&(!allowCollectionQueryV2||p.collectionQueryVersion!==2))return false;
- const {webAllowed,turnID,collectionQueryVersion,...old}=p;return validConversationPayload({...old,version:9},{maxContinuationBytes:limits.maxContinuationBytes});
+export function validNativePayload(p,{limits=NATIVE_RESEARCH,allowCollectionQueryV2=false,allowRetainedHistory=false}={}){
+ if(!p||p.version!==10||typeof p.webAllowed!=='boolean'||!uuid(p.turnID)||Object.hasOwn(p,'collectionQueryVersion')&&(!allowCollectionQueryV2||p.collectionQueryVersion!==2)||Object.hasOwn(p,'retainedHistoryVersion')&&(!allowRetainedHistory||p.retainedHistoryVersion!==1||!richCollection(p)))return false;
+ const {webAllowed,turnID,collectionQueryVersion,retainedHistoryVersion,...old}=p;return validConversationPayload({...old,version:9},{maxContinuationBytes:limits.maxContinuationBytes});
 }
 function checkedAnnotation(a,value){
  if(!optional(a,['type','url','title','start_index','end_index'])||a.type!=='url_citation'||!validSourceURL(a.url)||!text(a.title,200)||!Number.isSafeInteger(a.start_index)||!Number.isSafeInteger(a.end_index)||a.start_index<0||a.end_index<=a.start_index||a.end_index>new TextEncoder().encode(value).byteLength)throw Error('native_annotation_shape');
@@ -36,7 +36,7 @@ function checkedAnnotation(a,value){
  // Swift character offsets, or transfer them to rewritten/Markdown-rendered text.
  return {sourceURL:a.url,title:a.title,start:a.start_index,end:a.end_index,indexUnit:'provider_unmapped'};
 }
-export function checkedNativeItem(item,question,rich=false,queryV2=false){
+export function checkedNativeItem(item,question,rich=false,queryV2=false,retainedHistory=false){
  if(!item||typeof item!=='object')throw Error('native_item_shape');
  if(item.type==='reasoning'){
   if(!optional(item,['id','type','summary','content','encrypted_content','status'])||!id(item.id)||!Array.isArray(item.summary)||item.summary.length>20||!item.summary.every(x=>exact(x,['type','text'])&&x.type==='summary_text'&&text(x.text,4000))||!(item.content==null||Array.isArray(item.content)&&item.content.length<=20&&item.content.every(x=>exact(x,['type','text'])&&x.type==='reasoning_text'&&text(x.text,16000)))||!(item.encrypted_content==null||text(item.encrypted_content,100000))||!(item.status==null||item.status==='completed'))throw Error('native_reasoning_shape');
@@ -57,7 +57,7 @@ export function checkedNativeItem(item,question,rich=false,queryV2=false){
    c.annotations.forEach(a=>checkedAnnotation(a,c.text));
   }
  }else if(item.type==='function_call'){
-  if(!optional(item,['id','type','call_id','name','arguments','status'])||!id(item.call_id)||item.name==='search_web'||!['completed',undefined].includes(item.status))throw Error('native_function_shape');checkedConversationCall(item,question,rich,queryV2);if(item.name==='research_businesses'&&JSON.parse(item.arguments).sourcePolicy!=='stored_only')throw Error('native_legacy_research_forbidden');
+  if(!optional(item,['id','type','call_id','name','arguments','status'])||!id(item.call_id)||item.name==='search_web'||!['completed',undefined].includes(item.status))throw Error('native_function_shape');checkedConversationCall(item,question,rich,queryV2,retainedHistory);if(item.name==='research_businesses'&&JSON.parse(item.arguments).sourcePolicy!=='stored_only')throw Error('native_legacy_research_forbidden');
  }else if(item.type==='function_call_output'){
   if(!exact(item,['type','call_id','output'])||!id(item.call_id)||!text(item.output,100000))throw Error('native_function_output');
   const output=JSON.parse(item.output);if(!validConversationResult(output,rich))throw Error('native_function_output');
@@ -83,14 +83,14 @@ export async function nativeContinuation(p,model=NATIVE_RESEARCH.model,options={
  if(![NATIVE_RESEARCH.model,'gpt-6.1-sol'].includes(model))throw Error('native_model');
  const sol=model==='gpt-6.1-sol';
  if(!validNativePayload(p,options))throw Error('native_request_shape');
- const fingerprint=await nativeDigest(JSON.stringify({...sol?{model}:{},turnID:p.turnID,question:p.text,context:p.context,cities:p.cities,task:p.task,findings:p.findings,history:p.history,historyCount:p.historyCount,...Object.hasOwn(p,'collectionQueryVersion')?{collectionQueryVersion:p.collectionQueryVersion}:{}}));
+ const fingerprint=await nativeDigest(JSON.stringify({...sol?{model}:{},turnID:p.turnID,question:p.text,context:p.context,cities:p.cities,task:p.task,findings:p.findings,history:p.history,historyCount:p.historyCount,...Object.hasOwn(p,'collectionQueryVersion')?{collectionQueryVersion:p.collectionQueryVersion}:{},...Object.hasOwn(p,'retainedHistoryVersion')?{retainedHistoryVersion:p.retainedHistoryVersion}:{}}));
  let frame={version:sol?12:10,root:p.requestID,fingerprint,...sol?{model}:{},records:[]};
  if(p.step>0){frame=decodeNativeFrame(p.continuation,limits);if(!exact(frame,sol?['version','root','fingerprint','model','records']:['version','root','fingerprint','records'])||frame.version!==(sol?12:10)||(sol&&frame.model!==model)||frame.root!==p.requestID||frame.fingerprint!==fingerprint)throw Error('native_context_identity')}
  if(!Array.isArray(frame.records)||frame.records.length>NATIVE_RESEARCH.maxItems)throw Error('native_context_limit');
  let calls=0,outputs=0,last=null,privateLatched=false,webActions=0;const known=new Set(),answered=new Set(),webIDs=new Set();
  for(const record of frame.records){
   if(!exact(record,['observedAt','item'])||!text(record.observedAt,40)||!Number.isFinite(Date.parse(record.observedAt)))throw Error('native_observation_shape');
-  const item=checkedNativeItem(record.item,p.text,richCollection(p),p.collectionQueryVersion===2);
+  const item=checkedNativeItem(record.item,p.text,richCollection(p),p.collectionQueryVersion===2,p.retainedHistoryVersion===1);
   if(item.type==='function_call'){if(known.has(item.call_id)||last&&!answered.has(last.call_id))throw Error('native_call_order');known.add(item.call_id);last=item;calls++}
   if(item.type==='function_call_output'){if(item.call_id!==last?.call_id||answered.has(item.call_id))throw Error('native_output_order');answered.add(item.call_id);outputs++;privateLatched ||= JSON.parse(item.output).localOnly}
   if(item.type==='web_search_call'){if(privateLatched||webIDs.has(item.id))throw Error('native_web_forbidden');webIDs.add(item.id);webActions++}
@@ -110,7 +110,7 @@ export async function nativeContinuation(p,model=NATIVE_RESEARCH.model,options={
  return {frame,model,privateLatched,webActions,fingerprint,priorDigest:p.continuation?await nativeDigest(p.continuation):null,webAllowed:p.webAllowed&&!privateLatched};
 }
 export function nativeBody(p,state){
- const tools=conversationTools(richCollection(p),p.collectionQueryVersion===2).filter(t=>t.name!=='search_web');
+ const tools=conversationTools(richCollection(p),p.collectionQueryVersion===2,p.retainedHistoryVersion===1).filter(t=>t.name!=='search_web');
  const stored=tools.find(t=>t.name==='research_businesses');stored.parameters.properties.sourcePolicy.enum=['stored_only'];stored.description='Read stored public business fields only. Missing values can be researched with native web search; this tool does not start a separate hosted research chain.';
  const retain=tools.find(t=>t.name==='retain_findings');retain.description='Optionally associate source-supported public facts with exact saved record identities for Save controls or later saving; this does not write the collection and is not required to answer a lookup. Reuse existing provider-cited evidence, or emit concise provider-cited text supporting the finding alongside this call. quote must be an exact excerpt of that cited text containing the value; sourceURL must be a citation on the same evidence block. Consulted URLs, titles and this call\'s arguments alone are not evidence. Distinguish brand from branch; do not retain ambiguous or contradicted values. Evidence never authorizes an edit. Retain a validated finding before proposing a verified_finding edit unless one already exists.';
  const remaining=state.allowedWebActions??(NATIVE_RESEARCH.maxWebActions-state.webActions);
