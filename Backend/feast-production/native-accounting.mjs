@@ -1,3 +1,4 @@
+import {executionIdentityMatches,requireExecutionCutover,executionEnabled,readExecution,createExecution,activeExecutionCount,claimExecution,expireExecution,uncertainExecution,closeExecution,EXECUTION} from './execution-lifecycle.mjs';
 import {attemptOwnership} from './attempt-ownership.mjs';
 // Provider-controlled usage accounting. Allowances are estimates, NOT dollar ceilings.
 import {stageID} from './stage-accounting.mjs';
@@ -21,7 +22,7 @@ export function nativeUsageCost(calls,profile=NATIVE_PROFILE){
  // Preserve historical Astra rounding; new Sol profile uses integer-ratio rounding.
  const cost=profile===NATIVE_PROFILE?Math.ceil(base*1.1):Math.ceil(base*11/10);if(!integer(cost))throw Error('native_usage_shape');return cost;
 }
-export async function nativeAccountingFetch(storage,request,view,rows){
+export async function nativeAccountingFetch(storage,request,view,rows,env={},now=Date.now()){
  const path=new URL(request.url).pathname,p=await request.json();
  if(!p||!digest(p.userHash)||!uuid(p.root)||!uuid(p.turnID)||!Number.isInteger(p.step)||p.step<0||p.step>=12)return json({error:'native_accounting_request'},400);
  p.root=p.root.toLowerCase();p.turnID=p.turnID.toLowerCase();
@@ -30,7 +31,9 @@ export async function nativeAccountingFetch(storage,request,view,rows){
  return storage.transaction(async tx=>{
   const current=await view(tx),rootKey=P+'native-root:'+p.root,turnKey=P+'native-turn:'+p.userHash+':'+p.turnID;
   const root=await tx.get(rootKey),turn=(await tx.get(turnKey))??{responses:0,webActions:0,privateLatched:false,revision:0};
-  const id=await stageID(p.root,p.step),recordKey=P+'request:'+id,record=await tx.get(recordKey);
+  const id=await stageID(p.root,p.step),recordKey=P+'request:'+id;let record=await tx.get(recordKey),execution=await readExecution(tx,id,record);
+  const lifecycle=executionEnabled(env);
+  if(execution&&path==='/native-reserve-v2'){if(execution.reservationDigest!==await jobDigest(p))return json({error:'native_reservation_conflict'},409);return json({requestID:id,maxWebActions:record.maxWebActions,accountingPolicy:'provider_controlled',estimatedMicroUSD:execution.originalHoldMicroUSD,executionVersion:1,dispatchGranted:false,executionDigest:execution.reservationDigest,deadlineAt:execution.deadlineAt})}
   if(!integer(turn.responses)||turn.responses>12||!integer(turn.webActions)||turn.webActions>12||!integer(turn.revision)||typeof turn.privateLatched!=='boolean')return json({error:'native_accounting_corrupt'},503);
   if(root&&root.userHash!==p.userHash)return json({error:'native_identity'},403);
   if(path==='/native-close-v2'){
@@ -38,6 +41,7 @@ export async function nativeAccountingFetch(storage,request,view,rows){
    await tx.put(P+'closed-root:'+p.root,{userHash:p.userHash});
    return json({closed:true});
   }
+  if(execution&&(!await executionIdentityMatches(execution,p)||p.userHash!==execution.userHash||p.root!==execution.root||p.turnID!==execution.turnID||p.bodyDigest!==execution.bodyDigest))return json({error:'native_execution_identity'},409);
   if(root&&((root.model??'gpt-6-astra')!==policy.model))return json({error:'native_model_changed'},409);
   // Recovery retries only the identical reservation, never a new paid call.
   // Keep the original allocation revision so a lost response is recoverable.
@@ -45,11 +49,16 @@ export async function nativeAccountingFetch(storage,request,view,rows){
    if(record.userHash!==p.userHash||record.recoveryKey!==p.recoveryKey||canonicalJSON(record.recoveryReservation)!==canonicalJSON(p))return json({error:'native_recovery_conflict'},409);
    return json({requestID:id,maxWebActions:record.maxWebActions,accountingPolicy:'provider_controlled',estimatedMicroUSD:policy.estimate});
   }
+  if(path==='/native-claim-v2'){if(!execution){if(await tx.get(P+'execution-cutover:v1'))return json({error:'legacy_execution_not_dispatchable'},409);if(!record||record.userHash!==p.userHash||record.state!=='pending'||record.nativeTurnID!==p.turnID||record.rootRequestID!==p.root||await tx.get(P+'closed-root:'+p.root))return json({error:'native_claim_required'},409);return json({dispatchGranted:true,legacy:true})}if(current.halted||!lifecycle)return json({error:'validation_halted'},503);const grant=await claimExecution(tx,execution,record,p,now);return grant?json(grant):json({error:'native_dispatch_claim_denied'},409)}
   if(path==='/native-prepare-v2'||path==='/native-reserve-v2'){
+   if(await tx.get(P+'execution-cutover:v1')&&!lifecycle)return json({error:'execution_admission_disabled'},503);
+   if(lifecycle)await requireExecutionCutover(tx);
+   if(turn.closed===true)return json({error:'native_turn_closed'},409);
    if(current.halted)return json({error:'validation_halted'},503);
    if(!digest(p.fingerprint)||!(p.priorDigest===null||digest(p.priorDigest))||typeof p.privateLatched!=='boolean'||!integer(p.requestedWebActions)||p.requestedWebActions>12)return json({error:'native_accounting_request'},400);
    if(await tx.get(P+'closed-root:'+p.root.toLowerCase()))return json({error:'attempt_closed'},409);
    if(p.step===0 ? root!=null : !root||root.fingerprint!==p.fingerprint||root.turnID!==p.turnID||root.nextStep!==p.step||root.frameDigest!==p.priorDigest||root.state!=='complete')return json({error:'native_order_or_replay'},409);
+   if(lifecycle&&p.step===0){const ownership=await attemptOwnership(tx,p.root,p.userHash);if(!ownership.owned||ownership.accounting.length)return json({error:'native_order_or_replay'},409)}
    if(!root&&p.step===0&&(p.priorDigest!==null||await tx.get(P+'stage-root:'+p.root)||await tx.get(P+'stage-root:'+p.root.toUpperCase())||await tx.get(P+'request:'+p.root)||await tx.get(P+'request:'+p.root.toUpperCase())||await tx.get('production-validation-v1:request:'+p.root)||await tx.get('production-validation-v1:request:'+p.root.toUpperCase())))return json({error:'native_order_or_replay'},409);
    const records=await rows(tx,P+'request:');
    if(records.some(r=>r.nativeTurnID===p.turnID&&r.userHash===p.userHash&&['pending','uncertain'].includes(r.state)))return json({error:'native_turn_unsettled'},409);
@@ -59,36 +68,45 @@ export async function nativeAccountingFetch(storage,request,view,rows){
    const allocation={revision:turn.revision,privateLatched,webAllowed:!privateLatched,remainingWebActions};
    if(path==='/native-prepare-v2')return json(allocation);
    if(p.allocationRevision!==turn.revision||p.maxWebActions!==remainingWebActions||record)return json({error:'native_allocation_changed'},409);
-   if(records.filter(r=>r.state==='pending').length>=4)return json({error:'request_in_progress'},429);
-   await tx.put(recordKey,{userHash:p.userHash,fingerprint:p.fingerprint,profile,reservedMicroUSD:policy.estimate,state:'pending',rootRequestID:p.root,stageIndex:p.step,nativeTurnID:p.turnID,maxWebActions:remainingWebActions,...(p.recoveryKey?{recoveryKey:p.recoveryKey,recoveryReservation:p}:{})});
+   if(await activeExecutionCount(tx)>=4)return json({error:'request_in_progress'},429);
+   if(lifecycle&&!digest(p.bodyDigest))return json({error:'native_execution_intent_required'},400);
+   record={userHash:p.userHash,fingerprint:p.fingerprint,profile,reservedMicroUSD:policy.estimate,state:'pending',rootRequestID:p.root,stageIndex:p.step,nativeTurnID:p.turnID,maxWebActions:remainingWebActions,...(p.recoveryKey?{recoveryKey:p.recoveryKey,recoveryReservation:p}:{}),...(lifecycle?{executionVersion:1}:{})};await tx.put(recordKey,record);
+   if(lifecycle)execution=await createExecution(tx,{requestID:id,protocol:'native',record,intent:p,allocation,now});
    await tx.put(rootKey,{userHash:p.userHash,turnID:p.turnID,fingerprint:p.fingerprint,model:policy.model,nextStep:p.step+1,state:'pending',frameDigest:null});
    // Also fence rollback into the old staged implementation.
    for(const alias of [p.root,p.root.toUpperCase()])await tx.put(P+'stage-root:'+alias,{userHash:p.userHash,fingerprint:p.fingerprint,nextIndex:p.step+1});
    await tx.put(turnKey,{...turn,responses:turn.responses+1,privateLatched,revision:turn.revision+1});
    await tx.put(P+'adopted',true);
-   return json({requestID:id,maxWebActions:remainingWebActions,accountingPolicy:'provider_controlled',estimatedMicroUSD:policy.estimate});
+   return json({requestID:id,maxWebActions:remainingWebActions,accountingPolicy:'provider_controlled',estimatedMicroUSD:policy.estimate,...(execution?{executionVersion:1,dispatchGranted:false,executionDigest:execution.reservationDigest,deadlineAt:execution.deadlineAt}:{})});
   }
-  const settlement=p.recoveryKey?await jobDigest({path,usage:p.usage??null,undispatched:p.undispatched??false,diagnostic:p.diagnostic??null,frameDigest:p.frameDigest??null,closed:p.closed??false}):null;
+  if(execution){execution=await expireExecution(tx,execution,record,now);record=await tx.get(recordKey)}
+  const settlement=execution||p.recoveryKey?await jobDigest({path,usage:p.usage??null,undispatched:p.undispatched??false,diagnostic:p.diagnostic??null,frameDigest:p.frameDigest??null,closed:p.closed??false}):null;
+  if(execution?.settlementDigest){if(execution.settlementDigest!==settlement)return json({error:'native_settlement_conflict'},409);return json({...await view(tx),accountingPolicy:'provider_controlled',conservativeUsageMicroUSD:record.conservativeUsageMicroUSD??null})}
   if(p.recoveryKey&&record?.recoveryKey!==p.recoveryKey)return json({error:'native_recovery_conflict'},409);
   if(settlement&&record?.recoverySettlement===settlement&&record.userHash===p.userHash&&record.nativeTurnID===p.turnID&&record.rootRequestID===p.root)return json({...await view(tx),accountingPolicy:'provider_controlled',conservativeUsageMicroUSD:record.conservativeUsageMicroUSD??null});
-  if(!record||record.userHash!==p.userHash||record.state!=='pending'||record.nativeTurnID!==p.turnID||record.rootRequestID!==p.root||root?.state!=='pending')return json({error:'native_settlement_state'},409);
+  if(!record||record.userHash!==p.userHash||!(execution?['pending','uncertain'].includes(record.state):record.state==='pending')||record.nativeTurnID!==p.turnID||record.rootRequestID!==p.root||!execution&&root?.state!=='pending')return json({error:'native_settlement_state'},409);
   if(path==='/native-uncertain-v2'){
+   if(execution){await uncertainExecution(tx,execution,record);return json({...await view(tx),accountingPolicy:'provider_controlled'})}
    await tx.put(recordKey,{...record,state:'uncertain',...(settlement?{recoverySettlement:settlement}:{})});await tx.put(rootKey,{...root,state:'uncertain'});
    return json({...await view(tx),accountingPolicy:'provider_controlled'});
   }
   if(path!=='/native-complete-v2')return json({error:'not_available'},400);
+  if(execution&&p.undispatched===true&&execution.claimedAt!==null)return json({error:'native_dispatch_claim_exists'},409);
+  if(execution&&p.undispatched!==true&&execution.claimedAt===null)return json({error:'native_dispatch_claim_missing'},409);
   let cost=0,usage,state;
   if(p.undispatched===true||knownProviderRejection({diagnostic:p.diagnostic})){state='rejected'}
   else{usage=[p.usage];try{cost=nativeUsageCost(usage,record.profile)}catch{return json({error:'native_usage_unverified'},409)}if(p.usage.webCalls>record.maxWebActions)return json({error:'native_usage_unverified'},409);state='complete'}
   if(!(p.frameDigest===null||digest(p.frameDigest))||typeof p.closed!=='boolean')return json({error:'native_settlement_shape'},400);
   await tx.put(recordKey,{...record,state,...(usage?{usage}:p.undispatched===true?{undispatched:true}:{providerStatus:p.diagnostic.providerStatus,providerCode:p.diagnostic.providerCode}),conservativeUsageMicroUSD:cost,...(settlement?{recoverySettlement:settlement}:{})});
-  await tx.put(rootKey,{...root,state:p.closed?'closed':'complete',frameDigest:p.frameDigest});
-  await tx.put(turnKey,{...turn,webActions:turn.webActions+(usage?.[0].webCalls??0),revision:turn.revision+1});
+  const closed=p.closed||!!execution?.terminalReason||!!await tx.get(P+'closed-root:'+p.root);
+  await tx.put(rootKey,{...root,state:closed?'closed':'complete',frameDigest:p.frameDigest});
+  if(execution){if(closed)execution=await closeExecution(tx,execution,p.undispatched?'cancelled':state==='rejected'?'rejected':'stopped');await tx.put(EXECUTION+id,{...execution,phase:'settled',settlementDigest:settlement,revision:execution.revision+1})}
+  await tx.put(turnKey,{...turn,...(execution&&(['uncertain','deadline'].includes(execution.terminalReason)||turn.closed)?{closed:true}:{}),webActions:turn.webActions+(usage?.[0].webCalls??0),revision:turn.revision+1});
   return json({...await view(tx),accountingPolicy:'provider_controlled',conservativeUsageMicroUSD:cost});
  });
 }
 export function nativeAccountingAdapter(env,model='gpt-6-astra'){
  const ledger=env.PRODUCTION_STATE.get(env.PRODUCTION_STATE.idFromName('production-validation-v1'));
  const invoke=async(path,p)=>{const response=await ledger.fetch(new Request('https://ledger/native-'+path+'-v2',{method:'POST',body:JSON.stringify({...p,model})}));if(!response.ok){let error='native_accounting_unavailable';try{error=(await response.json()).error??error}catch{};throw Object.assign(Error(error),{accountingStatus:response.status})}return response.json()};
- return {policy:'provider_controlled',prepare:p=>invoke('prepare',p),reserve:async p=>({...p,...await invoke('reserve',{...p,requestedWebActions:p.maxWebActions})}),complete:(r,v)=>invoke('complete',{...r,usage:{model:v.model,inputTokens:v.inputTokens,outputTokens:v.outputTokens,webCalls:v.webCalls},frameDigest:v.frameDigest??null,closed:v.closed??false}),cancelUndispatched:r=>invoke('complete',{...r,undispatched:true,frameDigest:null,closed:true}),rejected:(r,diagnostic)=>invoke('complete',{...r,diagnostic,frameDigest:null,closed:true}),uncertain:r=>invoke('uncertain',r)};
+ return {policy:'provider_controlled',claim:r=>invoke('claim',r),prepare:p=>invoke('prepare',p),reserve:async p=>{const intent={...p,requestedWebActions:p.maxWebActions};return {...intent,model,...await invoke('reserve',intent)}},complete:(r,v)=>invoke('complete',{...r,usage:{model:v.model,inputTokens:v.inputTokens,outputTokens:v.outputTokens,webCalls:v.webCalls},frameDigest:v.frameDigest??null,closed:v.closed??false}),cancelUndispatched:r=>invoke('complete',{...r,undispatched:true,frameDigest:null,closed:true}),rejected:(r,diagnostic)=>invoke('complete',{...r,diagnostic,frameDigest:null,closed:true}),uncertain:r=>invoke('uncertain',r)};
 }

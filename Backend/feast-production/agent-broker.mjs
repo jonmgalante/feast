@@ -40,7 +40,7 @@ export async function agentStep(p,userHash,env,send=fetch){
  try{
   const count=await send('https://api.openai.com/v1/responses/input_tokens',{method:'POST',redirect:'manual',headers,body:JSON.stringify(productionInputCountBody(body)),signal:AbortSignal.timeout(20000)});
   if(!count.ok)throw await providerFailure(count,'agent_count');const counted=await boundedResponse(count);if(!Number.isSafeInteger(counted.input_tokens)||counted.input_tokens<0||counted.input_tokens>policy.maxInput)throw Error('agent_input_limit');
-  await accounting.begin(profile);
+  await accounting.begin(profile,body);
   const reply=await send('https://api.openai.com/v1/responses',{method:'POST',redirect:'manual',headers,body:JSON.stringify(body),signal:AbortSignal.timeout(90000)});
   if(!reply.ok)throw await providerFailure(reply,'agent_provider');const value=await boundedResponse(reply);
   if(!['completed','incomplete'].includes(value.status)||!(value.model===policy.model||value.model?.startsWith(policy.model+'-')))throw Error('agent_incomplete');

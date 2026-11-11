@@ -1,3 +1,6 @@
+import {executionDirectFetch} from './execution-direct.mjs';
+import {validateExecutions,effectiveHalt,recordGlobalHalt} from './execution-lifecycle.mjs';
+import {executionStageFetch} from './execution-stage.mjs';
 import {attemptOwnershipBatch} from './attempt-ownership.mjs';
 import {pilotAccountingFetch} from './pilot-accounting.mjs';
 import {nativeAccountingFetch,NATIVE_PROFILE,NATIVE_ESTIMATE,NATIVE_PROFILES,nativeUsageCost} from './native-accounting.mjs';
@@ -37,7 +40,8 @@ export function usageCost(calls,profile){
  const total=Math.ceil(publicPolicy!==undefined?cost*11/10:cost*1.1);if(total>PROFILES[profile])throw Error('usage_limit');return total;
 }
 async function rows(tx,prefix){let startAfter;const values=[];for(;;){const m=await tx.list({prefix,limit:1000,...(startAfter?{startAfter}:{})});if(!(m instanceof Map))throw Error('accounting_incomplete');if(!m.size)return values;const last=[...m.keys()].at(-1);if(startAfter&&last<=startAfter)throw Error('accounting_incomplete');values.push(...m.values());if(m.size<1000)return values;startAfter=last;}}
-async function view(tx,reconcileLegacy){
+export async function accountingView(tx,reconcileLegacy){
+ await validateExecutions(tx);
  const legacyTotal=(await tx.get(V1+'total'))??0,oldHalted=(await tx.get(V1+'halted'))??false;
  if(!integer(legacyTotal)||typeof oldHalted!=='boolean')throw Error('accounting_corrupt');
  const legacy=await rows(tx,V1+'request:');let historical=0,legacyCharged=0,legacyUncertain=0;
@@ -59,7 +63,7 @@ async function view(tx,reconcileLegacy){
    const cost=usageCost(r.usage,r.profile);if(cost!==r.conservativeUsageMicroUSD)throw Error('accounting_corrupt');charged+=cost;
   }else if(r.state==='cancelled'){if(r.undispatched!==true||r.conservativeUsageMicroUSD!==0)throw Error('accounting_corrupt');}else if(r.state==='rejected'){if(!(Object.hasOwn(NATIVE_PROFILES,r.profile)&&r.undispatched===true)&&!knownProviderRejection({diagnostic:r})||r.conservativeUsageMicroUSD!==0)throw Error('accounting_corrupt');}else if(['pending','uncertain'].includes(r.state))pending+=r.reservedMicroUSD;else throw Error('accounting_corrupt');
  }
- const halted=oldHalted||((await tx.get(V2+'halted'))??false);
+ const legacyHalt=await effectiveHalt(tx,V1),modernHalt=await effectiveHalt(tx,V2),halted=legacyHalt||modernHalt;
  if(typeof halted!=='boolean'||!integer(charged+pending))throw Error('accounting_corrupt');
  return {protocol:1,accountingVersion:2,capMicroUSD:CAP,reservedMicroUSD:charged+pending,chargedMicroUSD:charged,pendingMicroUSD:pending,remainingMicroUSD:null,historicalReservedMicroUSD:historical+newHistorical,legacyHistoricalReservedMicroUSD:legacyTotal,legacyVerifiedUsageMicroUSD:legacyCharged,legacyUncertainMicroUSD:legacyUncertain,legacyReconciliationEnabled:reconcileLegacy,halted};
 }
@@ -72,13 +76,13 @@ async function publicDiagnostics(tx){
   return /^[a-f0-9-]{36}$/i.test(requestID??'')&&validLookupDiagnostic(diagnostic);
  });
 }
-export async function reconciledFetch(storage,request,reconcileLegacy=false,env={}){
+export async function reconciledFetch(storage,request,reconcileLegacy=false,env={},now=Date.now()){
  try{
   const path=new URL(request.url).pathname;
   if(path.startsWith('/pilot-')&&path.endsWith('-v2')&&request.method==='POST')return await pilotAccountingFetch(storage,request,env);
-  if(path.startsWith('/native-')&&path.endsWith('-v2')&&request.method==='POST')return nativeAccountingFetch(storage,request,tx=>view(tx,reconcileLegacy),rows);
+  if(path.startsWith('/native-')&&path.endsWith('-v2')&&request.method==='POST')return nativeAccountingFetch(storage,request,tx=>accountingView(tx,reconcileLegacy),rows,env,now);
   if(path==='/status-v2'&&request.method==='GET'){
-   const budget=await storage.transaction(tx=>view(tx,reconcileLegacy));let diagnostics=[];
+   const budget=await storage.transaction(tx=>accountingView(tx,reconcileLegacy));let diagnostics=[];
    try{diagnostics=await storage.transaction(publicDiagnostics)}catch{}
    return json({...budget,publicLookupDiagnostics:diagnostics});
   }
@@ -96,8 +100,10 @@ export async function reconciledFetch(storage,request,reconcileLegacy=false,env=
     return json({version:9,state:'fenced',roots:p.roots});
    });
   }
-  if(request.method!=='POST'||!['/reserve-v2','/complete-v2','/uncertain-v2','/diagnostic-v2','/cancel-undispatched-v2'].includes(path))return json({error:'not_available'},503);
+  if(request.method!=='POST'||!['/reserve-v2','/complete-v2','/uncertain-v2','/diagnostic-v2','/cancel-undispatched-v2','/claim-v2'].includes(path))return json({error:'not_available'},503);
   const p=await request.json();if(!p||!/^[a-f0-9-]{36}$/i.test(p.requestID??'')||!/^[a-f0-9]{64}$/.test(p.userHash??''))return json({error:'invalid_accounting_request'},400);
+  const direct=await executionDirectFetch(storage,path,p,env,now,tx=>accountingView(tx,reconcileLegacy),usageCost);if(direct)return direct;
+  const lifecycle=await executionStageFetch(storage,path,p,env,now,tx=>accountingView(tx,reconcileLegacy),usageCost,PROFILES);if(lifecycle)return lifecycle;
   if(path==='/reserve-v2'&&Object.hasOwn(STAGE_POLICY,p.profile)){
    if(!/^[a-f0-9-]{36}$/i.test(p.rootRequestID??'')||!Number.isSafeInteger(p.stageIndex)||p.stageIndex<0||p.stageIndex>=12||await stageID(p.rootRequestID,p.stageIndex)!==p.requestID)return json({error:'invalid_stage_identity'},400);
   }
@@ -110,8 +116,9 @@ export async function reconciledFetch(storage,request,reconcileLegacy=false,env=
    });return json({accepted:true});
   }
   const outcome=await storage.transaction(async tx=>{
-   const current=await view(tx,reconcileLegacy),k=V2+'request:'+p.requestID,prior=await tx.get(k);
+   const current=await accountingView(tx,reconcileLegacy),k=V2+'request:'+p.requestID,prior=await tx.get(k);
    if(path==='/reserve-v2'){
+    if(await tx.get(V2+'execution-cutover:v1'))return json({error:'legacy_reservations_closed'},503);
     if(Object.hasOwn(NATIVE_PROFILES,p.profile))return json({error:'native_accounting_required'},400);
     if(current.halted)return json({error:'validation_halted'},503);
     if(prior||await tx.get(V1+'request:'+p.requestID))return json({error:'already_reserved'},409);
@@ -136,18 +143,18 @@ export async function reconciledFetch(storage,request,reconcileLegacy=false,env=
     await tx.put(k,{userHash:p.userHash,fingerprint:p.fingerprint,profile:p.profile,reservedMicroUSD:p.amountMicroUSD,state:'pending',...(staged?{rootRequestID:p.rootRequestID,stageIndex:p.stageIndex}:{})});if(!staged)await tx.put(V2+'inflight:'+p.userHash,p.requestID);
     // Append-only reconciliation audit. No reset/refund endpoint; v1 keys remain byte-for-byte untouched.
     await tx.put(V2+'audit:'+p.requestID,{legacyReconciliationEnabled:reconcileLegacy,legacyHistoricalReservedMicroUSD:current.legacyHistoricalReservedMicroUSD,legacyVerifiedUsageMicroUSD:current.legacyVerifiedUsageMicroUSD,legacyUncertainMicroUSD:current.legacyUncertainMicroUSD});
-    return json({...await view(tx,reconcileLegacy),requestID:p.requestID,reservedMicroUSD:p.amountMicroUSD});
+    return json({...await accountingView(tx,reconcileLegacy),requestID:p.requestID,reservedMicroUSD:p.amountMicroUSD});
    }
    if(prior&&Object.hasOwn(NATIVE_PROFILES,prior.profile))return json({error:'native_accounting_required'},400);
    if(!prior||prior.userHash!==p.userHash||prior.state!=='pending')return json({error:'invalid_accounting_state'},409);
-   if(path==='/cancel-undispatched-v2'){await tx.put(k,{...prior,state:'cancelled',undispatched:true,conservativeUsageMicroUSD:0});if(await tx.get(V2+'inflight:'+p.userHash)===p.requestID)await tx.put(V2+'inflight:'+p.userHash,null);return json({...await view(tx,reconcileLegacy),conservativeUsageMicroUSD:0});}
-   if(path==='/complete-v2'&&knownProviderRejection({diagnostic:{providerStatus:p.providerRejectedStatus,providerCode:p.providerRejectedCode}})){await tx.put(k,{...prior,state:'rejected',providerStatus:p.providerRejectedStatus,providerCode:p.providerRejectedCode,conservativeUsageMicroUSD:0});if(await tx.get(V2+'inflight:'+p.userHash)===p.requestID)await tx.put(V2+'inflight:'+p.userHash,null);return json({...await view(tx,reconcileLegacy),requestReservedMicroUSD:prior.reservedMicroUSD,conservativeUsageMicroUSD:0});}
+   if(path==='/cancel-undispatched-v2'){await tx.put(k,{...prior,state:'cancelled',undispatched:true,conservativeUsageMicroUSD:0});if(await tx.get(V2+'inflight:'+p.userHash)===p.requestID)await tx.put(V2+'inflight:'+p.userHash,null);return json({...await accountingView(tx,reconcileLegacy),conservativeUsageMicroUSD:0});}
+   if(path==='/complete-v2'&&knownProviderRejection({diagnostic:{providerStatus:p.providerRejectedStatus,providerCode:p.providerRejectedCode}})){await tx.put(k,{...prior,state:'rejected',providerStatus:p.providerRejectedStatus,providerCode:p.providerRejectedCode,conservativeUsageMicroUSD:0});if(await tx.get(V2+'inflight:'+p.userHash)===p.requestID)await tx.put(V2+'inflight:'+p.userHash,null);return json({...await accountingView(tx,reconcileLegacy),requestReservedMicroUSD:prior.reservedMicroUSD,conservativeUsageMicroUSD:0});}
    let cost;
    try{if(path!=='/complete-v2')throw Error('uncertain');cost=usageCost(p.usage,prior.profile)}catch{
-    await tx.put(k,{...prior,state:'uncertain'});await tx.put(V2+'halted',true);return json({error:'validation_halted'},503);
+    await tx.put(k,{...prior,state:'uncertain'});await recordGlobalHalt(tx,V2,'legacy_unverified_usage');return json({error:'validation_halted'},503);
    }
    await tx.put(k,{...prior,state:'complete',usage:p.usage,conservativeUsageMicroUSD:cost});if(await tx.get(V2+'inflight:'+p.userHash)===p.requestID)await tx.put(V2+'inflight:'+p.userHash,null);
-   return json({...await view(tx,reconcileLegacy),requestReservedMicroUSD:prior.reservedMicroUSD,conservativeUsageMicroUSD:cost});
+   return json({...await accountingView(tx,reconcileLegacy),requestReservedMicroUSD:prior.reservedMicroUSD,conservativeUsageMicroUSD:cost});
   });
   // Optional diagnostics are a separate transaction AFTER verified settlement.
   // Failure can lose diagnostic evidence, never change charges or the successful answer.

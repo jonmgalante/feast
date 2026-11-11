@@ -1,3 +1,4 @@
+import {jobDigest} from './answer-job-contract.mjs';
 import {ACTIVE_PROFILES} from './active-model.mjs';
 import {researchPilot} from './research-pilot.mjs';
 import {nativeConversationAnswer} from './native-conversation.mjs';
@@ -54,16 +55,20 @@ export async function brokerAnswer(p,userHash,env,send=fetch){
  const ledger=env.PRODUCTION_STATE.get(env.PRODUCTION_STATE.idFromName('production-validation-v1'));
  const reconcile=env.ALLOW_RECONCILED_BUDGET==='true';
  const invoke=(route,body)=>ledger.fetch(new Request('https://ledger'+route+(reconcile?'-v2':''),{method:'POST',body:JSON.stringify(body)}));
- const identity={requestID:p.requestID,userHash},budget=new ModelCallBudget();let reserved=false;
+ let identity={requestID:p.requestID,userHash};const budget=new ModelCallBudget();let reserved=false,managed=false,claimAttempted=false;
  try{
-  const reservation=await invoke('/reserve',{...identity,amountMicroUSD:REQUEST_HOLD,...(reconcile?{profile:'saved'}:{}),fingerprint:await digest(JSON.stringify(p))});
+  const fingerprint=await digest(JSON.stringify(p)),reservationIntent={...identity,amountMicroUSD:REQUEST_HOLD,...(reconcile?{profile:'saved',executionProtocol:'direct',bodyDigest:fingerprint}:{}),fingerprint};
+  const reservation=await invoke('/reserve',reservationIntent);
   if(!reservation.ok)return json({error:reservation.status===409?'already_reserved':'validation_limit_or_unavailable'},reservation.status);
   reserved=true;const proof=await reservation.json();if(proof.protocol!==1||proof.requestID!==p.requestID||proof.reservedMicroUSD!==REQUEST_HOLD)throw Error('reservation_unverified');
+  managed=proof.executionVersion===1;if(managed){if(proof.childClaims!==true)throw Error('reservation_unverified');identity={...reservationIntent,executionDigest:proof.executionDigest}}
   const headers={Authorization:'Bearer '+env.OPENAI_API_KEY,'Content-Type':'application/json','OpenAI-Project':'proj_si0dRO6qKPoVOas0he2frPLO'};
   async function model(body){
+   claimAttempted=false;
    // The complete input, including function schema, is counted before generation.
    const counted=await send('https://api.openai.com/v1/responses/input_tokens',{method:'POST',redirect:'manual',headers,body:JSON.stringify(productionInputCountBody(body)),signal:AbortSignal.timeout(20000)});
    if(!counted.ok)throw await providerFailure(counted,'input_count_unavailable');const count=await boundedResponse(counted);body.max_output_tokens=budget.begin(count.input_tokens);
+   if(managed){claimAttempted=true;const response=await invoke('/claim',{...identity,callIndex:budget.records.length,providerBodyDigest:await jobDigest(body),priorUsage:budget.records});if(!response.ok)throw Error('execution_claim_unavailable');const claim=await response.json();if(claim.dispatchGranted!==true||claim.callIndex!==budget.records.length)throw Error('execution_claim_unverified')}
    const r=await send('https://api.openai.com/v1/responses',{method:'POST',redirect:'manual',headers,body:JSON.stringify(body),signal:AbortSignal.timeout(90000)});
    if(!r.ok)throw await providerFailure(r,'provider_unavailable');const response=await boundedResponse(r);
    if(!(response.model===MODEL_POLICY.model||response.model?.startsWith(MODEL_POLICY.model+'-')))throw Error('provider_response_unverified');
@@ -87,7 +92,12 @@ export async function brokerAnswer(p,userHash,env,send=fetch){
   const settled=await invoke('/complete',{...identity,...(reconcile?{usage:budget.records}:{calls:budget.calls,inputTokens:budget.input,outputTokens:budget.output})});if(!settled.ok)throw Error('accounting_unverified');
   return json({version:modern?3:2,plan,...(answer?{answer}:{}),model:MODEL_POLICY.model,budget:await settled.json()});
  }catch(error){
-  if(reserved){try{if(knownProviderRejection(error)){if(budget.records.length)await invoke('/complete',{...identity,...(reconcile?{usage:budget.records}:{calls:budget.records.length,inputTokens:budget.input,outputTokens:budget.output})});else await invoke('/complete',{...identity,providerRejectedStatus:error.diagnostic.providerStatus,providerRejectedCode:error.diagnostic.providerCode});}else if(reconcile&&!budget.pending&&!budget.halted&&budget.records.length)await invoke('/complete',{...identity,usage:budget.records});else await invoke('/uncertain',identity)}catch{}}
+  if(reserved){try{if(managed){
+   if(!claimAttempted){if(budget.records.length)await invoke('/complete',{...identity,usage:budget.records});else await invoke('/cancel-undispatched',identity)}
+   else if(knownProviderRejection(error)&&error.diagnostic.stage==='provider_unavailable')await invoke('/complete',{...identity,usage:budget.records,providerRejectedStatus:error.diagnostic.providerStatus,providerRejectedCode:error.diagnostic.providerCode});
+   else if(!budget.pending&&!budget.halted&&budget.records.length)await invoke('/complete',{...identity,usage:budget.records});
+   else await invoke('/uncertain',identity);
+  }else if(knownProviderRejection(error)){if(budget.records.length)await invoke('/complete',{...identity,...(managed?{providerRejectedStatus:error.diagnostic.providerStatus,providerRejectedCode:error.diagnostic.providerCode}:{}),...(reconcile?{usage:budget.records}:{calls:budget.records.length,inputTokens:budget.input,outputTokens:budget.output})});else await invoke('/complete',{...identity,providerRejectedStatus:error.diagnostic.providerStatus,providerRejectedCode:error.diagnostic.providerCode});}else if(reconcile&&!budget.pending&&!budget.halted&&budget.records.length)await invoke('/complete',{...identity,usage:budget.records});else await invoke('/uncertain',identity)}catch{}}
   return json({error:error.message?.startsWith('provider_')?error.message:'validation_stopped',message:'The request could not be verified. Its reservation remains; no automatic retry.'},503);
  }
 }
@@ -100,7 +110,7 @@ async function brokerPublic(p,userHash,env,send){
  const invoke=(route,body)=>ledger.fetch(new Request('https://ledger'+route+'-v2',{method:'POST',body:JSON.stringify(body)}));
  const accounting=new StageAccounting({root:p.requestID,userHash,fingerprint:await digest(JSON.stringify(p)),invoke,maxStages:2});
  try{
-  const result=await researchPublicBusiness(p,env,send,usage=>metrics.measure('ledger',()=>accounting.complete(usage)),limits=>metrics.measure('ledger',()=>accounting.begin(limits.webCalls ? ACTIVE_PROFILES.research : ACTIVE_PROFILES.extraction)),metrics);
+  const result=await researchPublicBusiness(p,env,send,usage=>metrics.measure('ledger',()=>accounting.complete(usage)),(limits,body)=>metrics.measure('ledger',()=>accounting.begin(limits.webCalls ? ACTIVE_PROFILES.research : ACTIVE_PROFILES.extraction,body)),metrics);
   if(!accounting.lastBudget||accounting.current)throw Error('accounting_unverified');
   await metrics.measure('ledger',()=>accounting.diagnostic(result.diagnostic));
   return json({...result,budget:accounting.lastBudget,performance:metrics.snapshot()});

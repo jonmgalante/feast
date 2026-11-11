@@ -1,5 +1,5 @@
 import {ANSWER_JOBS as LIMIT,answerJobsEnabled,jobUUID,jobHash,jobStep,jobKey,jobDigest,canonicalJSON} from './answer-job-contract.mjs';
-import {validNativePayload,nativeRequestModel,nativeContinuation,NATIVE_RESEARCH} from './native-research.mjs';
+import {validNativePayload,nativeRequestModel,nativeContinuation,NATIVE_RESEARCH,nativeDigest} from './native-research.mjs';
 import {nativeConversationAnswer,decodeNativeResult,verifiedNativeUsage} from './native-conversation.mjs';
 import {nativeAccountingAdapter} from './native-accounting.mjs';
 import {phoneStore,accessJSON} from './phone-access.mjs';
@@ -12,6 +12,16 @@ const safeError=e=>/^[a-z_]{1,100}$/.test(e?.message??'')?e.message:'answer_job_
 const stopped=j=>j.cancelled||j.expired||j.acknowledged;
 const undispatched=message=>Object.assign(Error(message),{providerNotDispatched:true});
 const sameKeys=(v,keys)=>v&&typeof v==='object'&&!Array.isArray(v)&&Object.keys(v).sort().join(',')===keys.slice().sort().join(',');
+// Authentic old producer shape only. Partial managed proofs are not legacy.
+// A paused row preserves its original pre-dispatch phase and all content for a
+// separately verified compatible processor; upgrade mismatch is not a bill.
+const legacyPreproof=j=>{
+ const p=j.reserveIntent,r=j.reservation;
+ if(!['reserving','reserved'].includes(j.phase)||j.settlement||!p||j.phase==='reserved'&&!r||j.phase==='reserving'&&r||['dispatchMaterial','countBodyDigest'].some(k=>Object.hasOwn(j,k))||[p,r].filter(Boolean).some(x=>['executionVersion','executionDigest','bodyDigest'].some(k=>Object.hasOwn(x,k))))return false;
+ if(!sameKeys(p,['userHash','root','turnID','step','fingerprint','priorDigest','allocationRevision','privateLatched','webAllowed','maxWebActions','maxOutput','recoveryKey'])||p.userHash!==j.userHash||p.root!==j.requestID||p.turnID!==j.turnID||p.step!==j.step||p.recoveryKey!==j.recoveryKey||!jobHash(p.fingerprint)||!jobHash(p.recoveryKey)||!(p.priorDigest===null||jobHash(p.priorDigest))||!Number.isSafeInteger(p.allocationRevision)||typeof p.privateLatched!=='boolean'||typeof p.webAllowed!=='boolean'||!Number.isInteger(p.maxWebActions)||p.maxWebActions<0||p.maxWebActions>12||p.maxOutput!==8192||!Number.isSafeInteger(j.count?.input_tokens))return false;
+ return !r||Object.entries(p).every(([k,v])=>r[k]===v)&&jobUUID(r.requestID)&&r.accountingPolicy==='provider_controlled'&&Number.isSafeInteger(r.estimatedMicroUSD);
+};
+
 
 // A hashed device credential is sufficient to recheck current grants, but is not
 // accepted as a public bearer credential and is never logged or returned.
@@ -39,6 +49,38 @@ export class AnswerJobs {
   // A DO value is limited to 128 KiB. UTF-16 chunks stay below that even for
   // worst-case JSON escaping, and the transaction prevents partial readers.
   for(let i=0;i<text.length;i+=LIMIT.chunkUnits)await tx.put(prefix+String(i/LIMIT.chunkUnits).padStart(3,'0'),text.slice(i,i+LIMIT.chunkUnits));
+ }
+ async rawDispatch(tx,key,name,text){
+  // Accepted job payloads remain at their existing bound. Four times that
+  // bound covers JSON nesting plus generated schemas without shrinking the
+  // established provider-body contract; individual values remain <128 KiB.
+  if(new TextEncoder().encode(text).length>4*LIMIT.maxPayloadBytes)throw Error('answer_job_dispatch_material_limit');
+  const prefix=BLOB+key+':'+name+':';for(const k of (await tx.list({prefix})).keys())await tx.delete(k);
+  let chunks=0;for(let i=0;i<text.length;i+=LIMIT.chunkUnits){await tx.put(prefix+String(chunks++).padStart(3,'0'),text.slice(i,i+LIMIT.chunkUnits))}return chunks;
+ }
+ async readDispatch(tx,key,name,chunks){const prefix=BLOB+key+':'+name+':',parts=await tx.list({prefix});if(!Number.isInteger(chunks)||chunks<1||parts.size!==chunks||[...parts].some(([k,v],i)=>k!==prefix+String(i).padStart(3,'0')||typeof v!=='string'))throw Error('answer_job_dispatch_material_missing');return [...parts.values()].join('')}
+ async dispatchMaterial(key,payload,material){
+  const payloadDigest=await jobDigest(payload),allocationDigest=await jobDigest(material.allocation);
+  let conflict=false;
+  const result=await this.storage.transaction(async tx=>{
+   const j=await tx.get(META+key);if(!j||j.digest!==payloadDigest)throw Error('answer_job_dispatch_payload_conflict');
+   if(stopped(j)||this.now()>=j.expiresAt)throw undispatched('answer_job_stopped');
+   const saved=j.dispatchMaterial;
+   if(saved){
+    if(saved.version!==1||saved.payloadDigest!==payloadDigest||saved.model!==material.model||saved.fingerprint!==material.fingerprint||saved.allocationDigest!==allocationDigest){conflict=true;return null}
+    const providerBody=await this.readDispatch(tx,key,'dispatch-provider',saved.providerChunks),countBody=await this.readDispatch(tx,key,'dispatch-count',saved.countChunks);
+    if(await nativeDigest(providerBody)!==saved.providerBytesDigest||await nativeDigest(countBody)!==saved.countBytesDigest||await jobDigest(JSON.parse(providerBody))!==saved.bodyDigest||await jobDigest(JSON.parse(countBody))!==saved.countBodyDigest)throw Error('answer_job_dispatch_material_corrupt');
+    return {providerBody,countBody};
+   }
+   const bodyDigest=await jobDigest(JSON.parse(material.providerBody)),countBodyDigest=await jobDigest(JSON.parse(material.countBody));
+   // Historical reservations lacking exact dispatch provenance cannot adopt
+   // newly reconstructed bytes. No reservation means recounting remains safe.
+   if(j.reservation&&(j.reservation.bodyDigest!==bodyDigest)){conflict=true;return null}
+   const providerChunks=await this.rawDispatch(tx,key,'dispatch-provider',material.providerBody),countChunks=await this.rawDispatch(tx,key,'dispatch-count',material.countBody);
+   j.dispatchMaterial={version:1,payloadDigest,model:material.model,fingerprint:material.fingerprint,allocationDigest,bodyDigest,countBodyDigest,providerBytesDigest:await nativeDigest(material.providerBody),countBytesDigest:await nativeDigest(material.countBody),providerChunks,countChunks};await tx.put(META+key,j);return {providerBody:material.providerBody,countBody:material.countBody};
+  });
+  if(conflict){const j=await this.read(key);if(j.reservation)await this.settle(key,'uncertain');throw Error('answer_job_dispatch_body_conflict')}
+  return result;
  }
  async readBlob(tx,key,name){const parts=await tx.list({prefix:BLOB+key+':'+name+':'});return parts.size?JSON.parse([...parts.values()].join('')):undefined}
  async eraseContent(tx,key){for(const k of (await tx.list({prefix:BLOB+key+':'})).keys())await tx.delete(k)}
@@ -133,7 +175,7 @@ export class AnswerJobs {
      j.acknowledged=true;
     }
     if(stopped(j)&&j.phase==='done'){await this.eraseContent(tx,key);j.hasContent=false}
-    await tx.put(META+key,j);await this.wake(tx,now+1);return j;
+    await tx.put(META+key,j);if(!(c.op==='status'&&j.compatibilityBlocked&&legacyPreproof(j)&&!stopped(j)&&!j.needsFence))await this.wake(tx,now+1);return j;
    });
    if(j instanceof Response)return j;if(!j)return json({error:'answer_job_not_found'},404);
    if(c.op==='cancel'||c.op==='ack')this.notify(key);
@@ -150,7 +192,7 @@ export class AnswerJobs {
   try{
    // Subscribe before any await: an alarm may complete while the state read is
    // in flight, so even a stale nonterminal read must not lose its wake-up.
-   const j=await this.read(key);if(!j||terminal(j.state)||stopped(j))return false;
+   const j=await this.read(key);if(!j||terminal(j.state)||stopped(j)||j.compatibilityBlocked)return false;
    // Only a fully elapsed long-poll earns the short renewal delay. Early
    // notifications/runner failures retain backoff and cannot create a hot loop.
    return await Promise.race([changed,...this.running?[this.running.then(()=>false,()=>false)]:[],new Promise(resolve=>{timer=setTimeout(()=>resolve(true),this.foregroundWaitMs)})]);
@@ -171,7 +213,7 @@ export class AnswerJobs {
   await this.storage.transaction(async tx=>{
    const jobs=[...(await tx.list({prefix:META,limit:LIMIT.maxJobs+1})).values()],claims=await tx.list({prefix:CANCEL_CLAIM,limit:LIMIT.maxJobs+1}),now=this.now();
    if(!jobs.length&&!claims.size){await tx.deleteAlarm();return}
-   const next=Math.min(claims.size?now+LIMIT.retryMs:Infinity,...jobs.map(j=>j.phase!=='done'||j.needsFence?now+LIMIT.retryMs:Math.min(j.expired||j.acknowledged||j.cancelled?Infinity:j.expiresAt,j.purgeAt)));
+   const next=Math.min(claims.size?now+LIMIT.retryMs:Infinity,...jobs.map(j=>j.compatibilityBlocked&&legacyPreproof(j)&&!stopped(j)&&!j.needsFence?Math.min(j.expiresAt,j.purgeAt):j.phase!=='done'||j.needsFence?now+LIMIT.retryMs:Math.min(j.expired||j.acknowledged||j.cancelled?Infinity:j.expiresAt,j.purgeAt)));
    await tx.setAlarm(Math.max(now+1,next));
   });
  }
@@ -210,7 +252,7 @@ export class AnswerJobs {
    // A crash during a provider request must wake later even when an alarm is
    // the caller. Recovered dispatched work is NEVER blindly resubmitted.
    await this.storage.setAlarm(this.now()+LIMIT.watchdogMs);
-   try{await this.sweep();for(const j of (await this.list()).filter(x=>x.phase!=='done').sort((a,b)=>a.createdAt-b.createdAt).slice(0,LIMIT.maxActive))await this.run(j.key)}
+   try{await this.sweep();for(const j of (await this.list()).filter(x=>x.phase!=='done'&&(!x.compatibilityBlocked||!legacyPreproof(x)||stopped(x))).sort((a,b)=>a.createdAt-b.createdAt).slice(0,LIMIT.maxActive))await this.run(j.key)}
    finally{await this.schedule()}
   })();
   try{return await this.running}finally{this.running=null}
@@ -231,12 +273,14 @@ export class AnswerJobs {
    j.state=state;j.phase='done';if(error)j.error=error;
    // Keep only the delivered reply and compact dedup/accounting metadata.
    await this.blob(tx,key,'payload',undefined);await this.blob(tx,key,'provider',undefined);
-   delete j.count;delete j.allocation;delete j.reservation;delete j.reserveIntent;delete j.settlement;
+   await this.blob(tx,key,'dispatch-provider',undefined);await this.blob(tx,key,'dispatch-count',undefined);delete j.dispatchMaterial;
+   delete j.count;delete j.countBodyDigest;delete j.allocation;delete j.reservation;delete j.reserveIntent;delete j.settlement;
    if(stopped(j)||state!=='completed'){await this.blob(tx,key,'reply',undefined);j.hasContent=false}
   });this.notify(key);return result;
  }
  async run(key){
   let j=await this.read(key);if(!j||j.phase==='done')return;
+  if(!stopped(j)&&legacyPreproof(j)){if(!j.compatibilityBlocked)await this.mutate(key,async x=>{x.compatibilityBlocked='legacy-preproof-v1'});this.notify(key);return;}
   // A reservation RPC can commit even if its response is lost. Recover that
   // exact reservation before deciding whether there is anything to settle.
   if(j.reserveIntent&&!j.reservation){
@@ -244,7 +288,7 @@ export class AnswerJobs {
    catch(error){if(error.accountingStatus>=400&&error.accountingStatus<500){await this.mutate(key,async x=>{delete x.reserveIntent});return this.finish(key,'failed',safeError(error))}throw error}
   }
   if(j.settlement){await this.settle(key,j.settlement.kind,j.settlement.value);return this.finish(key,j.settlement.kind==='uncertain'?'uncertain':j.replyReady?'completed':'failed',j.error)}
-  if(j.phase==='dispatched'){
+  if(['claiming','claimed','dispatched'].includes(j.phase)){
    // The provider may have charged, but no durable receipt exists. Preserve
    // exposure and stop. Neither a restart nor a status request retries it.
    await this.settle(key,'uncertain');return this.finish(key,'uncertain','answer_job_uncertain');
@@ -267,23 +311,37 @@ export class AnswerJobs {
    const allocation=await base.prepare(p);await this.mutate(key,async x=>{x.allocation=allocation});return allocation;
   };
   accounting.reserve=async p=>{
-   const current=await this.read(key);if(current.reservation)return current.reservation;
+   const current=await this.read(key);if(current.reservation){
+    const rebuilt={...p,recoveryKey:current.recoveryKey};
+    if(!current.reserveIntent||canonicalJSON(rebuilt)!==canonicalJSON(current.reserveIntent)){await this.settle(key,'uncertain');throw Error('answer_job_dispatch_body_conflict')}
+    return current.reservation;
+   }
    if(stopped(current))throw undispatched('answer_job_cancelled');
    const intent={...p,recoveryKey:current.recoveryKey};await this.mutate(key,async x=>{x.reserveIntent=intent;x.phase='reserving'});
    let reservation;
    try{reservation=await base.reserve(intent)}catch(error){if(error.accountingStatus>=400&&error.accountingStatus<500)await this.mutate(key,async x=>{delete x.reserveIntent});throw error}
    await this.mutate(key,async x=>{x.reservation=reservation;x.phase='reserved'});return reservation;
   };
+  accounting.claim=async reservation=>{
+   const current=await this.read(key);if(stopped(current))throw undispatched('answer_job_cancelled');
+   await this.mutate(key,async x=>{if(stopped(x)||['claiming','claimed','dispatched'].includes(x.phase))throw Error('answer_job_claim_conflict');x.phase='claiming'});
+   const claim=await base.claim(reservation);
+   await this.mutate(key,async x=>{x.phase='claimed'});return claim;
+  };
   for(const method of ['complete','rejected','cancelUndispatched','uncertain'])accounting[method]=(_r,value)=>this.settle(key,method,value);
   const send=async(url,options)=>{
    let current=await this.read(key);
    if(url.endsWith('/input_tokens')){
-    if(current.count)return Response.json(current.count);
+    const countBodyDigest=await jobDigest(JSON.parse(options.body));
+    if(current.count&&current.countBodyDigest===countBodyDigest)return Response.json(current.count);
+    if(current.reservation&&!(current.dispatchMaterial?.countBodyDigest===countBodyDigest&&current.dispatchMaterial.bodyDigest===current.reservation.bodyDigest)){await this.settle(key,'uncertain');throw Error('answer_job_dispatch_body_conflict')}
     if(stopped(current))throw undispatched('answer_job_cancelled');
     const r=await this.send(url,options);if(!r.ok)return r;
-    const raw=await boundedResponse(r),count={input_tokens:raw.input_tokens};await this.mutate(key,async x=>{x.count=count});return Response.json(count);
+    const raw=await boundedResponse(r),count={input_tokens:raw.input_tokens};await this.mutate(key,async x=>{x.count=count;x.countBodyDigest=countBodyDigest});return Response.json(count);
    }
    if(url!=='https://api.openai.com/v1/responses')throw undispatched('answer_job_provider_route');
+   if(current.reservation?.executionVersion===1&&current.reservation.bodyDigest!==await jobDigest(JSON.parse(options.body)))throw Error('answer_job_dispatch_body_conflict');
+   if(current.dispatchMaterial&&current.dispatchMaterial.providerBytesDigest!==await nativeDigest(options.body))throw Error('answer_job_dispatch_body_conflict');
    const cached=await this.storage.transaction(tx=>this.readBlob(tx,key,'provider'));
    if(cached)return new Response(cached.text,{status:cached.status,headers:{'Content-Type':'application/json'}});
    if(stopped(current)||!answerJobsEnabled(this.env)||!await authenticate(this.env,current.credentialHash,current.userHash))throw undispatched('answer_job_access_changed');
@@ -299,6 +357,7 @@ export class AnswerJobs {
    return new Response(receipt.text,{status:receipt.status,headers:{'Content-Type':'application/json'}});
   };
   const recovery={
+   dispatchMaterial:material=>this.dispatchMaterial(key,payload,material),
    ready:(reply,bill)=>this.ready(key,reply,bill),
    failed:async error=>{await this.mutate(key,async x=>{x.error=safeError(error)})}
   };
@@ -311,6 +370,7 @@ export class AnswerJobs {
    await this.mutate(key,async(x,tx)=>{if(!stopped(x))await this.blob(tx,key,'reply',final)});
    return this.finish(key,'completed');
   }
+  if(j.reservation&&!j.settlement){await this.settle(key,'uncertain');j=await this.read(key)}
   if(j.settlement?.kind==='uncertain')return this.finish(key,'uncertain',j.error??'answer_job_uncertain');
   return this.finish(key,'failed',j.error??'answer_job_failed');
  }

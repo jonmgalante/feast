@@ -64,7 +64,7 @@ export async function researchPublicBusiness(p,env,send=fetch,onUsage=()=>{},onD
  if(!validPublicRequest(p)||!env.OPENAI_API_KEY)throw Error('invalid_public_request');
  const headers={Authorization:'Bearer '+env.OPENAI_API_KEY,'Content-Type':'application/json','OpenAI-Project':'proj_si0dRO6qKPoVOas0he2frPLO'};
  async function call(body,maxInput,maxOutput,webCalls){
-  await onDispatch({maxInput,maxOutput,webCalls});const r=await metrics.measure('provider',()=>send('https://api.openai.com/v1/responses',{method:'POST',redirect:'manual',headers,body:metrics.serialize(body),signal:AbortSignal.timeout(90000)}));if(!r.ok)throw await providerFailure(r,'public_upstream');const v=await metrics.measure('decode',()=>boundedResponse(r));metrics.usage(v);
+  await onDispatch({maxInput,maxOutput,webCalls},body);const r=await metrics.measure('provider',()=>send('https://api.openai.com/v1/responses',{method:'POST',redirect:'manual',headers,body:metrics.serialize(body),signal:AbortSignal.timeout(90000)}));if(!r.ok)throw await providerFailure(r,'public_upstream');const v=await metrics.measure('decode',()=>boundedResponse(r));metrics.usage(v);
   if(v.status!=='completed'||!(v.model===PUBLIC_MODEL||v.model?.startsWith(PUBLIC_MODEL+'-'))||!Number.isSafeInteger(v.usage?.input_tokens)||v.usage.input_tokens<0||v.usage.input_tokens>maxInput||!Number.isSafeInteger(v.usage?.output_tokens)||v.usage.output_tokens<0||v.usage.output_tokens>maxOutput)throw Error('public_usage_unverified');
   if(webCalls)checkedWebCalls(v,1);
   await onUsage({model:PUBLIC_MODEL,inputTokens:v.usage.input_tokens,outputTokens:v.usage.output_tokens,webCalls});return v;

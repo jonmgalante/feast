@@ -1,3 +1,4 @@
+import {jobDigest} from './answer-job-contract.mjs';
 import {richCollection} from './collection-context.mjs';
 import {nativeAccountingAdapter} from './native-accounting.mjs';
 // Gated native execution. Provider-controlled spend: estimates are not dollar ceilings.
@@ -24,27 +25,31 @@ export async function nativeConversationAnswer(p,userHash,env,send=fetch,depende
  if(dependencies.pilotExecutionModel&&(!['gpt-6-astra','gpt-6.1-sol'].includes(model)||env.RESEARCH_PILOT_ENABLED!=='true'||!['legacy-v1','sol-astra-v2','sol-only-v3'].includes(env.RESEARCH_PILOT_KIND??'legacy-v1')||(env.RESEARCH_PILOT_KIND??'legacy-v1')==='legacy-v1'&&model!=='gpt-6-astra'||env.RESEARCH_PILOT_KIND==='sol-only-v3'&&model!=='gpt-6.1-sol'))return json({error:'native_pilot_model_disabled'},503);
  const accounting=dependencies.accounting??nativeAccountingAdapter(env,model);
  if(accounting.policy!=='provider_controlled'&&!(dependencies.testOnly===true&&accounting.proofKind==='fixture_only'))return json({error:'native_accounting_policy'},503);
- const metrics=new PerformanceMeasurements();let reservation=null,settlementAttempted=false,verifiedBill=null,dispatched=false;
+ const metrics=new PerformanceMeasurements();let reservation=null,settlementAttempted=false,verifiedBill=null,dispatched=false,claimAttempted=false;
  try {
   const state=await nativeContinuation(p,model,nativeOptions);
   const allocation=await accounting.prepare({userHash,root:p.requestID,turnID:p.turnID,step:p.step,fingerprint:state.fingerprint,priorDigest:state.priorDigest,privateLatched:state.privateLatched,requestedWebActions:state.webAllowed?NATIVE_RESEARCH.maxWebActions-state.webActions:0});
   if(!allocation||typeof allocation.webAllowed!=='boolean'||!Number.isSafeInteger(allocation.remainingWebActions)||allocation.remainingWebActions<0||allocation.remainingWebActions>NATIVE_RESEARCH.maxWebActions-state.webActions)throw Error('native_allocation_unverified');
   state.privateLatched ||= allocation.privateLatched===true;
   state.webAllowed=state.webAllowed&&allocation.webAllowed&&env.ALLOW_PUBLIC_LOOKUP==='true';state.allowedWebActions=state.webAllowed?allocation.remainingWebActions:0;
-  const body=nativeBody(p,state),remaining=state.allowedWebActions;
+  const remaining=state.allowedWebActions;let body=nativeBody(p,state),providerBody=metrics.serialize(body);
+  const {max_tool_calls,...countable}=body;let countBody=metrics.serialize({...productionInputCountBody(countable),truncation:'disabled'});
+  if(dependencies.recovery?.dispatchMaterial){const material=await dependencies.recovery.dispatchMaterial({providerBody,countBody,model,fingerprint:state.fingerprint,allocation:{revision:allocation.revision,privateLatched:state.privateLatched,webAllowed:state.webAllowed,maxWebActions:remaining,maxOutput:NATIVE_RESEARCH.maxOutput}});providerBody=material.providerBody;countBody=material.countBody;body=JSON.parse(providerBody);if(body.model!==model)throw Error('native_dispatch_material_model')}
+  const bodyDigest=await jobDigest(body);
   const headers={Authorization:'Bearer '+env.OPENAI_API_KEY,'Content-Type':'application/json','OpenAI-Project':'proj_si0dRO6qKPoVOas0he2frPLO'};
-  const {max_tool_calls,...countable}=body;
-  const count=await metrics.measure('inputCount',async()=>{const r=await send('https://api.openai.com/v1/responses/input_tokens',{method:'POST',redirect:'manual',headers,body:metrics.serialize({...productionInputCountBody(countable),truncation:'disabled'}),signal:AbortSignal.timeout(20000)});if(!r.ok)throw await providerFailure(r,'input_count');return boundedResponse(r)});
+  const count=await metrics.measure('inputCount',async()=>{const r=await send('https://api.openai.com/v1/responses/input_tokens',{method:'POST',redirect:'manual',headers,body:countBody,signal:AbortSignal.timeout(20000)});if(!r.ok)throw await providerFailure(r,'input_count');return boundedResponse(r)});
   if(!Number.isSafeInteger(count.input_tokens)||count.input_tokens<0)throw Error(direct?'native_input_unverified':'native_input_limit');
   if(count.input_tokens>limits.maxInitialInput)throw Error('native_input_limit');
   // Required adapter contract: atomic shared-ledger concurrency/exposure, durable
   // human-turn identity, sequential attempt stages, prior-frame attestation,
   // privacy latch and whole-turn native action allowance. An in-memory counter
   // is NOT a production implementation of this contract.
-  reservation=await metrics.measure('ledger',()=>accounting.reserve({userHash,root:p.requestID,turnID:p.turnID,step:p.step,fingerprint:state.fingerprint,priorDigest:state.priorDigest,allocationRevision:allocation.revision,privateLatched:state.privateLatched,webAllowed:state.webAllowed,maxWebActions:remaining,maxOutput:NATIVE_RESEARCH.maxOutput}));
+  reservation=await metrics.measure('ledger',()=>accounting.reserve({userHash,root:p.requestID,turnID:p.turnID,step:p.step,fingerprint:state.fingerprint,priorDigest:state.priorDigest,allocationRevision:allocation.revision,privateLatched:state.privateLatched,webAllowed:state.webAllowed,maxWebActions:remaining,maxOutput:NATIVE_RESEARCH.maxOutput,bodyDigest}));
+  if(reservation?.executionVersion===1&&reservation.bodyDigest!==bodyDigest){claimAttempted=true;throw Error('native_dispatch_body_conflict')}
   if(!reservation||reservation.maxWebActions!==remaining||accounting.policy==='provider_controlled'&&reservation.accountingPolicy!=='provider_controlled')throw Error('native_reservation_unverified');
+  if(typeof accounting.claim==='function'){claimAttempted=reservation.executionVersion===1;const claim=await metrics.measure('ledger',()=>accounting.claim(reservation));if(claim?.dispatchGranted!==true)throw Error('native_dispatch_claim_unverified')}else if(reservation.executionVersion===1)throw Error('native_dispatch_claim_required')
   dispatched=true;
-  const r=await metrics.measure('provider',()=>send('https://api.openai.com/v1/responses',{method:'POST',redirect:'manual',headers,body:metrics.serialize(body),signal:AbortSignal.timeout(90000)}));if(!r.ok)throw await providerFailure(r,'provider');
+  const r=await metrics.measure('provider',()=>send('https://api.openai.com/v1/responses',{method:'POST',redirect:'manual',headers,body:providerBody,signal:AbortSignal.timeout(90000)}));if(!r.ok)throw await providerFailure(r,'provider');
   const value=await metrics.measure('decode',async()=>{try{return await (direct?boundedResponse(r,limits.maxProviderResponseBytes):boundedResponse(r))}catch(error){if(direct&&error.message==='upstream_limit')throw Error('native_provider_response_limit');throw error}});metrics.usage(value);
   const {reply:prepared,bill}=await decodeNativeResult(p,state,value,{limits,metrics,observedAt:dependencies.observedAt,onVerifiedUsage:bill=>{verifiedBill=bill}});
   // Recovery persists the complete deliverable before accounting. The ordinary
@@ -59,7 +64,7 @@ export async function nativeConversationAnswer(p,userHash,env,send=fetch,depende
   return json(reply);
  }catch(error){
   await dependencies.recovery?.failed(error);
-  if(reservation&&!settlementAttempted){settlementAttempted=true;try{if(!dispatched||error?.providerNotDispatched===true)await accounting.cancelUndispatched(reservation);else if(verifiedBill)await accounting.complete(reservation,{...verifiedBill,frameDigest:null,closed:true});else if(knownProviderRejection(error))await accounting.rejected(reservation,error.diagnostic);else await accounting.uncertain(reservation)}catch{}}
+  if(reservation&&!settlementAttempted){settlementAttempted=true;try{if((!dispatched||error?.providerNotDispatched===true)&&!claimAttempted)await accounting.cancelUndispatched(reservation);else if(!dispatched||error?.providerNotDispatched===true)await accounting.uncertain(reservation);else if(verifiedBill)await accounting.complete(reservation,{...verifiedBill,frameDigest:null,closed:true});else if(knownProviderRejection(error))await accounting.rejected(reservation,error.diagnostic);else await accounting.uncertain(reservation)}catch{}}
   return json({error:/^[a-z_]+$/.test(error.message)?error.message:'native_unverified',performance:metrics.snapshot()},direct?nativeCapacityStatus(error):503);
  }
 }

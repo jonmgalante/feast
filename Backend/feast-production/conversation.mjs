@@ -159,7 +159,7 @@ async function dispatch(p,userHash,env,send,body,profile,metrics){
   metrics.count('requestBytes',new TextEncoder().encode(countBody).byteLength+new TextEncoder().encode(providerBody).byteLength);metrics.record('preparation',preparation);
   const counter=await metrics.measure('inputCount',()=>send('https://api.openai.com/v1/responses/input_tokens',{method:'POST',redirect:'manual',headers,body:countBody,signal:AbortSignal.timeout(20000)}));
   if(!counter.ok)throw await providerFailure(counter,'input_count');const count=await metrics.measure('decode',()=>boundedResponse(counter));if(!Number.isSafeInteger(count.input_tokens)||count.input_tokens<0||count.input_tokens>(policy.webCalls===1?8192:policy.maxInput))throw Error('conversation_input_limit');
-  await metrics.measure('ledger',()=>accounting.begin(profile));
+  await metrics.measure('ledger',()=>accounting.begin(profile,body));
   const response=await metrics.measure('provider',()=>send('https://api.openai.com/v1/responses',{method:'POST',redirect:'manual',headers,body:providerBody,signal:AbortSignal.timeout(90000)}));if(!response.ok)throw await providerFailure(response,'provider');const value=await metrics.measure('decode',()=>boundedResponse(response));metrics.usage(value);
   if(!(value.model===policy.model||value.model?.startsWith(policy.model+'-'))||!['completed','incomplete'].includes(value.status))throw Error('conversation_response_shape');
   if(policy.webCalls)checkedConversationWebCalls(value);
