@@ -115,6 +115,10 @@ completeness and quiescence attestations require operational review; a local
 file cannot prove absence of omitted remote objects. The immutable migration
 receipt binds the disposition, complete artifact and reviewed revisions.
 
+For the exact accepted historical direct-ID domains, physical-key preservation,
+and UUID-strict managed admission boundary, see
+`HISTORICAL_ACCOUNTING_IDENTITY.md`. This reader does not infer dispatch or usage.
+
 ## Offline migration workflow
 
 The only supplied migration tool accepts local JSON snapshots. It has no network,

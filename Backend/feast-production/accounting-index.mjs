@@ -1,3 +1,4 @@
+import {historicalRequestID,historicalRootID,accountingOwnerPath} from './historical-accounting-identity.mjs';
 // Versioned, additive accounting checkpoint. Only the owning ledger's wrapped
 // transactions may write after cutover. Full offline audit remains independent.
 import {canonicalJSON,jobDigest,jobHash,jobUUID} from './answer-job-contract.mjs';
@@ -13,10 +14,10 @@ export const INDEX=V2+'accounting-index:v1:';
 export const WRITER_REVISION=V2+'accounting-writer-revision:v1',INDEX_BATCH=64;
 const STAGING=INDEX+'staging:',PENDING=INDEX+'pending';
 export const INDEX_LIMITS=Object.freeze({rows:64,sourceBytes:512*1024,valueBytes:128*1024,readBytes:16*1024*1024,writeBytes:16*1024*1024,operations:10000});
-const POLICY_VERSION='feast-index-staged-v1';
+const POLICY_VERSION='feast-index-staged-v2',pathLength=kind=>kind==='root'?72:64;
 // Include implicit historical defaults and exact rounding expression, not just
 // profiles whose newer variants happen to spell their rates out explicitly.
-const policyHash=()=>jobDigest({version:POLICY_VERSION,schema:1,holds:PROFILES,native:NATIVE_PROFILES,stage:STAGE_POLICY,public:PUBLIC_PROFILES,
+const policyHash=()=>jobDigest({version:POLICY_VERSION,schema:1,ownerPathEncoding:'lowercase-ascii36-v1',holds:PROFILES,native:NATIVE_PROFILES,stage:STAGE_POLICY,public:PUBLIC_PROFILES,
  legacy:{hold:2500000,input:20,output:100,maxInput:24576,maxOutput:16384,maxCalls:3,rounding:'ceil(base*11/10)'},
  saved:{model:'gpt-6-astra',input:20,output:100,maxCalls:3,maxPerCallInput:8192,maxPerCallOutput:8192,maxTotalOutput:16384,web:0,rounding:'ceil(base*1.1)'},
  publicV1:{model:'gpt-6-luna',input:0.5,output:1,web:10000,maxCalls:2,maxInputs:[2100000,8192],maxOutputs:[1800,1200],webCalls:[1,0],rounding:'ceil(base*1.1)'},
@@ -37,10 +38,10 @@ const digestState=async state=>{const {integrity,...body}=state;return jobDigest
 async function writerRevision(tx){const r=await tx.get(WRITER_REVISION);if(r===undefined)return 0;if(r?.version!==1||!integer(r.revision))throw Error('accounting_writer_revision_corrupt');return r.revision}
 export async function bumpAccountingWriterRevision(tx){const next=await writerRevision(tx)+1;if(!integer(next))throw Error('accounting_writer_revision_corrupt');await tx.put(WRITER_REVISION,{version:1,revision:next});return next}
 function treeStorage(tx,scope){if(!jobHash(scope))throw Error('accounting_index_scope');const key=k=>[INDEX+'root:',INDEX+'turn:',INDEX+'record:'].some(p=>k.startsWith(p))?INDEX+'tree:'+scope+':'+k.slice(INDEX.length):k;return {get:k=>tx.get(key(k)),put:(k,v)=>tx.put(key(k),v),delete:k=>tx.delete(key(k))}}
-async function readStage(tx,token){const stage=await tx.get(STAGING+token);if(!stage||stage.version!==1||stage.token!==token||!jobHash(token)||await jobDigest(stage.plan)!==token||stage.integrity!==await digestState(stage)||!integer(stage.step)||!['scanning','verifying','ready'].includes(stage.phase)||!Number.isInteger(stage.prefix)||stage.prefix<0||stage.prefix>2||!(stage.cursor===null||typeof stage.cursor==='string')||!Array.isArray(stage.stack)||stage.stack.length>100||stage.stack.some(f=>!['root','turn','record'].includes(f.kind)||typeof f.location!=='string'||f.location.length>64||!/^(?:[a-f0-9]{2})*$/.test(f.location)||!jobHash(f.hash)||!Number.isInteger(f.next)||f.next<0||f.next>256)||stage.phase==='ready'&&(stage.sealedStep!==stage.step||stage.prefix!==2||stage.cursor!==null||stage.stack.length!==0))throw Error('accounting_index_staging_corrupt');return stage}
+async function readStage(tx,token){const stage=await tx.get(STAGING+token);if(!stage||stage.version!==1||stage.token!==token||!jobHash(token)||await jobDigest(stage.plan)!==token||stage.integrity!==await digestState(stage)||!integer(stage.step)||!['scanning','verifying','ready'].includes(stage.phase)||!Number.isInteger(stage.prefix)||stage.prefix<0||stage.prefix>2||!(stage.cursor===null||typeof stage.cursor==='string')||!Array.isArray(stage.stack)||stage.stack.length>100||stage.stack.some(f=>!['root','turn','record'].includes(f.kind)||typeof f.location!=='string'||f.location.length>pathLength(f.kind)||!/^(?:[a-f0-9]{2})*$/.test(f.location)||!jobHash(f.hash)||!Number.isInteger(f.next)||f.next<0||f.next>256)||stage.phase==='ready'&&(stage.sealedStep!==stage.step||stage.prefix!==2||stage.cursor!==null||stage.stack.length!==0))throw Error('accounting_index_staging_corrupt');return stage}
 async function saveStage(tx,stage){stage={...stage,integrity:await digestState(stage)};await tx.put(STAGING+stage.token,stage);return stage}
 async function pinned(tx,plan){if(plan.revision!==await sourceRevisionDigest(plan))throw Error('accounting_index_revision_conflict');if(plan.schemaVersion!==1||plan.sourcePolicyVersion!==POLICY_VERSION||plan.policyHash!==await policyHash())throw Error('accounting_index_policy_changed');if(await writerRevision(tx)!==plan.writerRevision)throw Error('accounting_index_revision_conflict');if(await jobDigest(await tx.get(V2+'execution-cutover:v1'))!==plan.cutoverDigest)throw Error('accounting_index_cutover_conflict')}
-async function node(tx,kind,path,hash){const cache=proofCaches.get(tx),cacheKey=kind+':'+path+':'+hash;if(cache?.has(cacheKey))return cache.get(cacheKey);const n=await tx.get(INDEX+kind+':'+path);if(!n||await jobDigest(n)!==hash||!['branch','leaf'].includes(n.type))throw Error('accounting_index_node_corrupt');const length=kind==='root'?32:64;if(n.type==='leaf'?(typeof n.path!=='string'||n.path.length!==length||!n.path.startsWith(path)||!/^[a-f0-9]+$/.test(n.path)):(!validBranch(n,path)||n.prefix.length>=length))throw Error('accounting_index_node_shape');cache?.set(cacheKey,n);return n}
+async function node(tx,kind,path,hash){const cache=proofCaches.get(tx),cacheKey=kind+':'+path+':'+hash;if(cache?.has(cacheKey))return cache.get(cacheKey);const n=await tx.get(INDEX+kind+':'+path);if(!n||await jobDigest(n)!==hash||!['branch','leaf'].includes(n.type))throw Error('accounting_index_node_corrupt');const length=pathLength(kind);if(n.type==='leaf'?(typeof n.path!=='string'||n.path.length!==length||!n.path.startsWith(path)||!/^[a-f0-9]+$/.test(n.path)):(!validBranch(n,path)||n.prefix.length>=length))throw Error('accounting_index_node_shape');cache?.set(cacheKey,n);return n}
 // Compressed fixed-depth radix proofs. Branches have at most 256 children;
 // shared unary paths are represented by their prefix rather than one stored
 // node per byte. Lookup depth is bounded by key length, not history length.
@@ -67,7 +68,7 @@ async function update(tx,kind,path,hash,value,location=''){
  if(Object.keys(children).length===1){const [part,only]=Object.entries(children)[0],child=await node(tx,kind,prior.prefix+part,only);await tx.delete(INDEX+kind+':'+prior.prefix+part);return putNode(tx,kind,location,child)}
  return putNode(tx,kind,location,{type:'branch',prefix:prior.prefix,children});
 }
-const rootPath=root=>{if(!jobUUID(root))throw Error('accounting_index_root_identity');return root.toLowerCase().replaceAll('-','')};
+const rootPath=accountingOwnerPath;
 const turnPath=(user,turn)=>jobDigest({user,turn:turn.toLowerCase()});
 async function contribution(tx,key,r){
  const c=empty();if(!r)return c;
@@ -83,7 +84,13 @@ async function contribution(tx,key,r){
   else throw Error('accounting_corrupt');
  }return c;
 }
-function ownership(key,r){const prefix=ownerPrefixes.find(p=>key.startsWith(p));if(!prefix||!r)return [];if(!jobHash(r.userHash)||r.rootRequestID!==undefined&&!jobUUID(r.rootRequestID))throw Error('accounting_index_owner_corrupt');const roots=new Set([key.slice(prefix.length).toLowerCase(),...(r.rootRequestID?[r.rootRequestID.toLowerCase()]:[])]);return [...roots].map(root=>({root,path:rootPath(root),owner:r.userHash,links:1,records:prefix.endsWith('request:')?1:0,unsettled:prefix.endsWith('request:')&&!terminal(r.state)?1:0}))}
+function ownership(key,r){
+ const prefix=ownerPrefixes.find(p=>key.startsWith(p));if(!prefix||!r)return [];
+ const physical=key.slice(prefix.length),accounting=prefix.endsWith('request:');
+ if(!jobHash(r.userHash)||r.rootRequestID!==undefined&&!jobUUID(r.rootRequestID)||(accounting?!historicalRequestID(key,r):prefix===V2+'closed-root:'?!historicalRootID(physical):!jobUUID(physical)))throw Error('accounting_index_owner_corrupt');
+ const roots=new Set([physical.toLowerCase(),...(r.rootRequestID?[r.rootRequestID.toLowerCase()]:[])]);
+ return [...roots].map(root=>({root,path:rootPath(root),owner:r.userHash,links:1,records:accounting?1:0,unsettled:accounting&&!terminal(r.state)?1:0}));
+}
 function turnContribution(key,r){if(!key.startsWith(V2+'request:')||!r?.nativeTurnID)return null;if(!jobHash(r.userHash)||!jobUUID(r.nativeTurnID))throw Error('accounting_index_turn_corrupt');return {user:r.userHash,turn:r.nativeTurnID.toLowerCase(),unsettled:['pending','uncertain'].includes(r.state)?1:0}}
 async function load(tx){
  const cutover=await tx.get(V2+'execution-cutover:v1'),state=await tx.get(INDEX+'state');
@@ -109,7 +116,7 @@ export async function prepareAccountingIndexPlan(storage,evidence){
 }
 function validPlan(p){return p?.version===2&&p.schemaVersion===1&&p.sourcePolicyVersion===POLICY_VERSION&&jobHash(p.policyHash)&&/^[a-f0-9]{40}$/.test(p.sourceRevision??'')&&p.writersQuiesced===true&&jobHash(p.evidenceDigest)&&jobHash(p.revision)&&integer(p.writerRevision)&&jobHash(p.cutoverDigest)&&integer(p.recordCount)&&['recordHash','rootHash','turnHash'].every(k=>p[k]===null||jobHash(p[k]))&&p.totals&&fields.every(k=>integer(p.totals[k]))&&Array.isArray(p.activeManaged)&&p.activeManaged.length<=4&&p.activeManaged.every(jobUUID)&&new Set(p.activeManaged).size===p.activeManaged.length}
 const progress=s=>({token:s.token,step:s.step,phase:s.phase,records:s.recordCount});
-export async function beginAccountingIndex(storage,plan){storage=rawAccountingStorage(storage);if(!validPlan(plan))throw Error('accounting_index_plan_invalid');const token=await jobDigest(plan);return storage.transaction(async tx=>{const current=await load(tx);if(current){if(current.bootstrapReceipt!==token)throw Error('accounting_index_already_installed');return progress(await readStage(tx,token))}const pending=await tx.get(PENDING);if(pending?.token===token){await pinned(tx,plan);return progress(await readStage(tx,token))}if(pending){const prior=await readStage(tx,pending.token);if(prior.plan.writerRevision===await writerRevision(tx))throw Error('accounting_index_staging_conflict')}await pinned(tx,plan);const stage={version:1,token,plan,step:0,phase:'scanning',prefix:0,cursor:null,recordCount:0,rootHash:null,turnHash:null,recordHash:null,totals:empty(),activeManaged:[],stack:[],sealedStep:null,last:null};await saveStage(tx,stage);await tx.put(PENDING,{version:1,token});return progress(stage)})}
+export async function beginAccountingIndex(storage,plan){storage=rawAccountingStorage(storage);if(!validPlan(plan))throw Error('accounting_index_plan_invalid');const token=await jobDigest(plan);return storage.transaction(async tx=>{const current=await load(tx);if(current){if(current.bootstrapReceipt!==token)throw Error('accounting_index_already_installed');return progress(await readStage(tx,token))}const pending=await tx.get(PENDING);if(pending?.token===token){await pinned(tx,plan);return progress(await readStage(tx,token))}if(pending){const prior=await readStage(tx,pending.token);let stale=false;try{await pinned(tx,prior.plan)}catch(error){if(!['accounting_index_revision_conflict','accounting_index_cutover_conflict','accounting_index_policy_changed'].includes(error.message))throw error;stale=true}if(!stale)throw Error('accounting_index_staging_conflict')}await pinned(tx,plan);const stage={version:1,token,plan,step:0,phase:'scanning',prefix:0,cursor:null,recordCount:0,rootHash:null,turnHash:null,recordHash:null,totals:empty(),activeManaged:[],stack:[],sealedStep:null,last:null};await saveStage(tx,stage);await tx.put(PENDING,{version:1,token});return progress(stage)})}
 async function addRecord(tx,tree,s,key,r){
  if(accountKey(key)){const c=await contribution(tx,key,r);for(const f of fields)s.totals[f]+=c[f]}
  for(const item of ownership(key,r)){const value=await lookup(tree,'root',item.path,s.rootHash)??{owner:item.owner,links:0,records:0,unsettled:0};if(value.owner!==item.owner)throw Error('accounting_index_owner_conflict');value.links++;value.records+=item.records;value.unsettled+=item.unsettled;s.rootHash=await update(tree,'root',item.path,s.rootHash,value)}
@@ -119,7 +126,7 @@ async function addRecord(tx,tree,s,key,r){
  s.recordHash=await update(tree,'record',await jobDigest(key),s.recordHash,{key,digest:await jobDigest(r)});s.recordCount++;
  if(s.activeManaged.length>4||fields.some(f=>!integer(s.totals[f])))throw Error('accounting_index_totals_corrupt');
 }
-async function checkNode(tree,frame){const n=await node(tree,frame.kind,frame.location,frame.hash),length=frame.kind==='root'?32:64;if(n.type==='leaf'){if(typeof n.path!=='string'||n.path.length!==length||!n.path.startsWith(frame.location)||!/^[a-f0-9]+$/.test(n.path))throw Error('accounting_index_leaf_corrupt')}else if(!validBranch(n,frame.location)||n.prefix.length>=length)throw Error('accounting_index_branch_corrupt');return n}
+async function checkNode(tree,frame){const n=await node(tree,frame.kind,frame.location,frame.hash),length=pathLength(frame.kind);if(n.type==='leaf'){if(typeof n.path!=='string'||n.path.length!==length||!n.path.startsWith(frame.location)||!/^[a-f0-9]+$/.test(n.path))throw Error('accounting_index_leaf_corrupt')}else if(!validBranch(n,frame.location)||n.prefix.length>=length)throw Error('accounting_index_branch_corrupt');return n}
 function matching(s){return s.recordCount===s.plan.recordCount&&['recordHash','rootHash','turnHash'].every(k=>s[k]===s.plan[k])&&fields.every(k=>s.totals[k]===s.plan.totals[k])&&JSON.stringify([...s.activeManaged].sort())===JSON.stringify(s.plan.activeManaged)}
 export async function advanceAccountingIndex(storage,request){storage=rawAccountingStorage(storage);if(!jobHash(request?.token)||!integer(request.step))throw Error('accounting_index_step_invalid');return storage.transaction(async raw=>{const meter=metered(raw),tx=meter.tx;if((await tx.get(PENDING))?.token!==request.token)throw Error('accounting_index_staging_missing');let s=await readStage(tx,request.token);await pinned(tx,s.plan);if(request.step===s.step-1&&s.last)return s.last;if(request.step!==s.step)throw Error('accounting_index_step_conflict');if(s.phase==='ready')return progress(s);const tree=treeStorage(tx,s.token);proofCaches.set(tree,new Map());
  if(s.phase==='scanning'){

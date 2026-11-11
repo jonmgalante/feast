@@ -39,10 +39,12 @@ recursive hashes. Unknown retained fields are included in the record digest.
 Three deterministic compressed radix tries prove canonical physical keys,
 normalized root ownership/completeness, and owner/native-turn unsettled counts.
 Physical IDs are never renamed. Branches have at most 256 children and depths
-are limited by 32/64 hexadecimal path characters. Insertion and deletion order
+are limited by 72 ownership or 64 record/turn hexadecimal path characters. Insertion and deletion order
 produce the same root, including unary-branch compression. Aggregate safe
 integers preserve all historical, charged, pending, and active-slot values.
 The active managed-ID set is bounded by the existing four-execution limit.
+The separately versioned historical direct-ID reader and exact-key versus
+case-alias distinction are specified in `HISTORICAL_ACCOUNTING_IDENTITY.md`.
 
 `ProductionLedger` wraps every official storage transaction:
 

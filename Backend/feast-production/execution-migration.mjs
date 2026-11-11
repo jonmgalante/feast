@@ -1,3 +1,4 @@
+import {historicalRequestID,historicalRootID} from './historical-accounting-identity.mjs';
 import {validateRecoveryDisposition} from './answer-jobs-preflight.mjs';
 import {rawAccountingStorage,bumpAccountingWriterRevision} from './accounting-index.mjs';
 // Offline storage migration only. No HTTP route and no production credentials.
@@ -11,7 +12,7 @@ const unsettled=r=>['pending','uncertain'].includes(r.state);
 async function inventory(tx){
  const budget=await accountingView(tx,true),all=[...await entries(tx,V1),...await entries(tx,V2)].sort(([a],[b])=>a<b?-1:a>b?1:0),records=[],halts=[];
  for(const [key,r] of all){
-  if(key.startsWith(V1+'request:')||key.startsWith(V2+'request:')){if(!jobUUID(key.slice(key.lastIndexOf(':')+1))||r.userHash!==undefined&&!jobHash(r.userHash)||r.rootRequestID!==undefined&&!jobUUID(r.rootRequestID)||r.nativeTurnID!==undefined&&!jobUUID(r.nativeTurnID))throw Error('migration_record_identity');records.push({key,digest:await jobDigest(r),state:r.state,profile:r.profile??'legacySavedV1',hold:r.reservedMicroUSD,userHash:r.userHash??null,root:r.rootRequestID??key.slice(key.lastIndexOf(':')+1),turnID:r.nativeTurnID??null,stageIndex:r.stageIndex??null,executionVersion:r.executionVersion??null});}
+  if(key.startsWith(V1+'request:')||key.startsWith(V2+'request:')){if(!historicalRequestID(key,r)||r.userHash!==undefined&&!jobHash(r.userHash)||r.rootRequestID!==undefined&&!jobUUID(r.rootRequestID)||r.nativeTurnID!==undefined&&!jobUUID(r.nativeTurnID))throw Error('migration_record_identity');records.push({key,digest:await jobDigest(r),state:r.state,profile:r.profile??'legacySavedV1',hold:r.reservedMicroUSD,userHash:r.userHash??null,root:r.rootRequestID??key.slice(key.lastIndexOf(':')+1),turnID:r.nativeTurnID??null,stageIndex:r.stageIndex??null,executionVersion:r.executionVersion??null});}
  }
  for(const prefix of [V1,V2])if(await tx.get(prefix+'halted')===true){const generation=await tx.get(prefix+'halt-generation');halts.push({key:prefix+'halted',generation:generation?.generation??'legacy-unversioned'})}
  return {version:1,revision:await jobDigest(all),budget,records,halts,metadata:all.filter(([key])=>!key.includes(':request:')).map(([key,value])=>({key})),validationFailures:[]};
@@ -30,10 +31,10 @@ export async function applyExecutionMigration(storage,plan){
   if(await tx.get(V2+'execution-cutover:v1'))throw Error('migration_already_applied');
   const needed=current.records.filter(r=>r.executionVersion===null&&unsettled(r));
   if(plan.legacy.length!==needed.length||new Set(plan.legacy.map(x=>x.key)).size!==plan.legacy.length)throw Error('migration_legacy_classification_required');
-  const neededByKey=new Map(needed.map(r=>[r.key,r])),owners=new Map();for(const r of needed){if(!jobHash(r.userHash)||!jobUUID(r.root))throw Error('migration_unattributed_record');const root=r.root.toLowerCase();if(owners.has(root)&&owners.get(root)!==r.userHash)throw Error('migration_owner_conflict');owners.set(root,r.userHash)}const ownership=await attemptOwnershipBatch(tx,[...owners.keys()],owners),classifications=new Map(plan.legacy.map(x=>[x.key,x]));
+  const neededByKey=new Map(needed.map(r=>[r.key,r])),owners=new Map();for(const r of needed){if(!jobHash(r.userHash)||!historicalRootID(r.root))throw Error('migration_unattributed_record');const root=r.root.toLowerCase();if(owners.has(root)&&owners.get(root)!==r.userHash)throw Error('migration_owner_conflict');owners.set(root,r.userHash)}const ownership=await attemptOwnershipBatch(tx,[...owners.keys()],owners),classifications=new Map(plan.legacy.map(x=>[x.key,x]));
   for(const item of plan.legacy){
    const r=neededByKey.get(item.key);if(!r||r.digest!==item.recordDigest||!['attributed-uncertain','retain-active'].includes(item.classification))throw Error('migration_legacy_conflict');
-   if(!jobHash(r.userHash)||!jobUUID(r.root))throw Error('migration_unattributed_record');
+   if(!jobHash(r.userHash)||!historicalRootID(r.root))throw Error('migration_unattributed_record');
    if(r.stageIndex!==null&&(!jobStep(r.stageIndex)||await stageID(r.root,r.stageIndex)!==r.key.slice(r.key.lastIndexOf(':')+1)))throw Error('migration_stage_identity');
    if(r.stageIndex!==null&&r.turnID===null){const root=await tx.get(V2+'stage-root:'+r.root),record=await tx.get(r.key);if(!root||root.userHash!==r.userHash||root.fingerprint!==record.fingerprint||!Number.isSafeInteger(root.nextIndex)||root.nextIndex<=r.stageIndex)throw Error('migration_stage_association')}
    if(r.turnID!==null){

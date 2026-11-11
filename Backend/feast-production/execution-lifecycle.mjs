@@ -33,7 +33,8 @@ export async function validateExecutions(tx){
   // Settlement is permitted to replace a classified pending record, not its
   // owner/root/profile/hold. The classification never proves zero usage.
   let items=migrationItems.get(m.receiptDigest);if(!items){const plan=await readMigrationPlan(tx,m.receiptDigest);items=new Map(plan.legacy.map(item=>[item.key,item]));if(items.size!==plan.legacy.length)throw Error('legacy_execution_receipt_conflict');migrationItems.set(m.receiptDigest,items)}const item=items.get(m.recordKey);if(!item||item.recordDigest!==m.recordDigest||item.classification!==m.classification)throw Error('legacy_execution_receipt_conflict');
-  if(r.userHash!==m.userHash||(r.rootRequestID??m.requestID)!==m.root||(r.profile??null)!==m.profile||r.reservedMicroUSD!==m.hold)throw Error('legacy_execution_conflict');
+  const physicalID=m.recordKey.slice(m.recordKey.lastIndexOf(':')+1);
+  if(m.requestID!==physicalID||r.userHash!==m.userHash||(r.rootRequestID??physicalID)!==m.root||(r.nativeTurnID??null)!==m.turnID||(r.profile??null)!==m.profile||r.reservedMicroUSD!==m.hold)throw Error('legacy_execution_conflict');
  }
 }
 export async function activeExecutionCount(tx){if(tx.accountingIndex)return tx.accountingIndex.activeCount();let active=0;for(const [key,r] of await entries(tx,V2+'request:'))if(r.state==='pending'){const m=await tx.get(LEGACY_EXECUTION+key);if(m?.classification!=='attributed-uncertain')active++}return active}
