@@ -263,8 +263,8 @@ test('Stop or expiry during native preparation cannot persist new dispatch mater
  for(const mode of ['stop','expire']){const f=await setup({lifecycle:true}),p=payload();await f.submit(p);const get=f.env.PRODUCTION_STATE.get;let release,started;const gate=new Promise(r=>release=r),began=new Promise(r=>started=r);f.env.PRODUCTION_STATE.get=id=>{const target=get(id);return id===PHONE_OBJECT?target:{fetch:async request=>{const response=await target.fetch(request);if(new URL(request.url).pathname==='/native-prepare-v2'){started();await gate}return response}}};const work=f.run();await began;if(mode==='stop')await f.op('cancel',p);else{f.setTime(f.now+ANSWER_JOBS.contentTTL+1);await f.op('status',p)}let wrote=false;f.jobs.onCommit=()=>{if([...f.jobs.data.keys()].some(k=>k.includes(':dispatch-provider:')))wrote=true};release();await work;assert.equal(wrote,false);assert.equal(f.calls.count,0);assert.equal(f.calls.paid,0);assert.equal((await f.budget()).pendingMicroUSD,0);assert(![...f.jobs.data.keys()].some(k=>k.startsWith('content:')))}
 });
 
-test('new recovery clients retain negotiated history paging across durable acceptance and restart without changing legacy capacity',async()=>{
- const f=await setup(),p={...payload(),retainedHistoryVersion:1,context:{index:[],recent:[],collectionAccess:'permitted_details_v1',totalCount:0}};
+for(const lifecycle of [false,true])test('new recovery clients retain negotiated history paging across durable acceptance and restart without changing legacy capacity'+(lifecycle?' [managed]':' [legacy]'),async()=>{
+ const f=await setup({lifecycle}),p={...payload(),retainedHistoryVersion:1,context:{index:[],recent:[],collectionAccess:'permitted_details_v1',totalCount:0}};
  const health=await(await publicFetch(new Request('https://feast.test/health'),f.env)).json();assert.equal(health.answerJobsRetainedHistoryVersion,1);
  assert.equal((await f.submit(p)).status,200);f.restart();await f.run();
  const result=await(await f.op('status',p)).json();assert.equal(result.state,'completed');assert.equal(f.calls.paid,1);
@@ -273,15 +273,15 @@ test('new recovery clients retain negotiated history paging across durable accep
  f.env.ASK_FEAST_RECOVERY_ENABLED='false';const disabled=await(await publicFetch(new Request('https://feast.test/health'),f.env)).json();assert.equal(disabled.answerJobsRetainedHistoryVersion,undefined);
 });
 
-test('same-root step cannot change retained-history capability and dispatch again in direct or durable mode',async()=>{
+for(const lifecycle of [false,true])test('same-root step cannot change retained-history capability and dispatch again in direct or durable mode'+(lifecycle?' [managed]':' [legacy]'),async()=>{
  for(const enabled of [false,true]) {
   const p={...payload(),context:{index:[],recent:[],collectionAccess:'permitted_details_v1',totalCount:0},...(enabled?{retainedHistoryVersion:1}:{})};
   const changed={...p};if(enabled)delete changed.retainedHistoryVersion;else changed.retainedHistoryVersion=1;
-  const direct=await setup(),user=await phoneHash('identity',direct.grant.id);let paid=0;
+  const direct=await setup({lifecycle}),user=await phoneHash('identity',direct.grant.id);let paid=0;
   const send=async(url,o)=>{const body=JSON.parse(o.body);if(url.endsWith('/input_tokens'))return Response.json({input_tokens:100});paid++;return Response.json(answer(body))};
   assert.equal((await nativeConversationAnswer(p,user,direct.env,send)).status,200);
   assert.notEqual((await nativeConversationAnswer(changed,user,direct.env,send)).status,200);assert.equal(paid,1);
-  const durable=await setup();assert.equal((await durable.submit(p)).status,200);durable.restart();await durable.run();assert.equal(durable.calls.paid,1);
+  const durable=await setup({lifecycle});assert.equal((await durable.submit(p)).status,200);durable.restart();await durable.run();assert.equal(durable.calls.paid,1);
   assert.equal((await durable.submit(changed)).status,409);await durable.run();assert.equal(durable.calls.paid,1);
  }
 });
