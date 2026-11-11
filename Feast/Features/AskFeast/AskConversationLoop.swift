@@ -457,26 +457,15 @@ struct AskConversationLoop:Sendable {
                 try await saveBoundary(nextStep:step+1,phase:.ready)
                 continue
             }
-            // An answer-mode read deliberately renders no rows. A blank final
-            // must not turn its bookkeeping count into a completed explanation.
-            // Native lists/counts and durable action-only replies remain valid.
-            if String(AskMarkdownPresentation.inline(reply.text).characters).trimmingCharacters(in:.whitespacesAndNewlines).isEmpty {
-                let visible=state.latest.map { response in
-                    response.paragraphs.contains {paragraph in paragraph.spans.contains {span in
-                        switch span {case .text(let text):return !String(AskMarkdownPresentation.inline(text).characters).trimmingCharacters(in:.whitespacesAndNewlines).isEmpty;case .place:return true}
-                    }} || !(response.collectionActions ?? []).isEmpty || !(response.fieldActions ?? []).isEmpty || !(response.listedCandidateIDs ?? []).isEmpty
-                } ?? false
-                if !visible {
-                    if !state.publicResearch.isEmpty || !state.durableActions.isEmpty || state.latest?.verifiedPublicFindings?.isEmpty==false,let response=interrupted(AskHostedError.answerRejected) {return response}
-                    throw AskHostedError.answerRejected
-                }
-            }
+            // Normalize visible emptiness once. Control-token-only synthesis must
+            // not erase a native negative result and then become an empty answer.
+            let visibleSynthesis = !String(AskMarkdownPresentation.inline(reply.text).characters).trimmingCharacters(in:.whitespacesAndNewlines).isEmpty
             let assemblyStarted=DispatchTime.now().uptimeNanoseconds
             defer {AskPipelineScope.record(.assembly,since:assemblyStarted)}
             var response=state.latest ?? AskResponse(summary:String(reply.text.prefix(3000)),candidates:[],listedCandidateIDs:[],usesLocalCatalog:true)
             response.publicResearch=Array(state.publicResearch.suffix(4))
             response.operationRecords=state.operationRecords.isEmpty ? nil : state.operationRecords
-            let finalText = !state.unresolvedChanges.isEmpty ? "" : reply.text
+            let finalText = !state.unresolvedChanges.isEmpty || !visibleSynthesis ? "" : reply.text
             var rendered=Self.paragraph(finalText,catalog:context.index,available:state.available,candidates:&response.candidates,citations:state.citations)
             if native {rendered.citationsAreResearchPool=false}
             if !finalText.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty {
@@ -530,9 +519,19 @@ struct AskConversationLoop:Sendable {
                 response.answerMentionIDs=extras.isEmpty ? nil : extras
             }
             response.agentTask = .init(action:state.attemptedChange || !state.durableActions.isEmpty ? "change" : "query",fields:state.taskFields,orderedIDs:state.selectionIsOrdered ? state.ordered : [],sourcePolicy:"public_if_missing",privateSelection:state.privateScope || state.privateHistory,outcomes:state.durableOutcomes.isEmpty ? nil : state.durableOutcomes,selectionIDs:state.selectionIsOrdered ? nil : state.ordered,referencesIncomplete:state.referencesIncomplete,displayOrder:state.selectionIsOrdered ? state.displayOrder : nil)
+            // Check the assembled result, including every native UI-only shape.
+            // A bookkeeping summary or retained evidence is not itself synthesis.
+            let visible=response.paragraphs.contains {paragraph in paragraph.spans.contains {span in
+                switch span {case .text(let text):return !String(AskMarkdownPresentation.inline(text).characters).trimmingCharacters(in:.whitespacesAndNewlines).isEmpty;case .place:return true}
+            }} || !(response.collectionActions ?? []).isEmpty || !(response.fieldActions ?? []).isEmpty || !(response.listedCandidateIDs ?? []).isEmpty || !(response.mapChoices ?? []).isEmpty
+            if !visible {
+                if !state.publicResearch.isEmpty || !state.durableActions.isEmpty || state.latest?.verifiedPublicFindings?.isEmpty==false,let retained=interrupted(AskHostedError.answerRejected) {return retained}
+                throw AskHostedError.answerRejected
+            }
+            let historyText=finalText.isEmpty ? AskAnswerCopy.text(response) : finalText
             let acknowledgements=state.durableActions.map {"action \($0.id.uuidString) \($0.entity) \($0.operation) \($0.state.rawValue) targets \($0.targetIDs.joined(separator:","))"}.joined(separator:"; ")
-            response.publicConversationText=state.privateHistory || state.privateScope ? nil : (!state.unresolvedChanges.isEmpty ? "The requested change was not completed. Check its execution result before retrying." : reply.text)+(acknowledgements.isEmpty ? "" : "\nApp outcomes: "+acknowledgements)
-            keepCollectionHistory(&response,text:reply.text+"\n"+acknowledgements)
+            response.publicConversationText=state.privateHistory || state.privateScope ? nil : (!state.unresolvedChanges.isEmpty ? "The requested change was not completed. Check its execution result before retrying." : historyText)+(acknowledgements.isEmpty ? "" : "\nApp outcomes: "+acknowledgements)
+            keepCollectionHistory(&response,text:historyText+"\n"+acknowledgements)
             return response
         }
         if var response=interrupted(AskHostedError.answerRejected) {

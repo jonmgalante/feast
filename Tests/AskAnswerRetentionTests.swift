@@ -23,9 +23,10 @@ private actor RetentionPlanner:AskConversationPlanning {
 private struct RetentionProvider:AskFeastProvider {
     let label="Offline answer retention regression"
     let adapter:AskSavedCollection,engine:AskCollectionChangeEngine,planner:RetentionPlanner
+    var maps:[ApplePlaceMatch]=[]
     func answer(_ request:AskRequest,tools:AskReadTools)async throws->AskResponse {
         let view=try await adapter.readView(),semantic=try AskSemanticContext.make(request,catalog:view.snapshot,fullCollection:true)
-        let executor=await AskAgentExecutor(adapter:adapter,engine:engine,request:request,researcher:RetentionResearcher(),searchMaps:{_ in []},fullCollectionContext:true,supportsCollectionQueryV2:true)
+        let executor=await AskAgentExecutor(adapter:adapter,engine:engine,request:request,researcher:RetentionResearcher(),searchMaps:{_ in maps},fullCollectionContext:true,supportsCollectionQueryV2:true)
         let available=AskReadTools.localCandidates(Set(view.snapshot.places.map(\.id)),in:view.index)
         return try await AskConversationLoop(planner:planner,availableCandidates:available,execute:{call in try await executor.executeConversation(call,planner:planner)}).answer(request,context:semantic,cities:[],findings:[])
     }
@@ -76,6 +77,31 @@ private struct RetentionProvider:AskFeastProvider {
             let retained=try await AskConversationLoop(planner:findingPlanner,availableCandidates:[:],execute:{_ in preconditionFailure()},retainFindings:{_,_ in .init(output:.init(status:"success",complete:true,totalCount:1,records:[],findings:[],message:"ok",localOnly:false),response:.init(summary:"Public findings",candidates:[],listedCandidateIDs:[],usesLocalCatalog:true,verifiedPublicFindings:[finding]),orderedIDs:[item.id])}).answer(request,context:.init(index:[],recent:[]),cities:[],findings:[])
             precondition(retained.summary.contains("unfinished") && retained.verifiedPublicFindings==[finding])
             print("PASS whitespace/control-token direct and answer-read finals fail honestly across reload without retry; list/count/negative/action-only outputs remain valid and unsynthesized findings are retained as unfinished")
+        }
+        if selection==nil || selection=="native-visibility" {
+            let maps=ApplePlacesService.previewMatches.prefix(1).map {$0}
+            let planner=RetentionPlanner(calls:[.init(name:"search_maps",callID:"maps",arguments:"{\"query\":\"Harbor Bakery\",\"cityID\":null}")])
+            let provider=RetentionProvider(adapter:adapter,engine:engine,planner:planner,maps:maps)
+            let store=AskConversationStore(url:directory.appendingPathComponent("maps-visibility.json"))
+            let session=AskSession(index:try adapter.index(),provider:provider);session.restoreHistory(from:store)
+            session.input="Find Harbor Bakery in Maps";session.run();while session.isLoading {await Task.yield()}
+            precondition(session.turns.last?.status == .complete && session.response?.mapChoices?.count==1,"A native Maps-choice-only answer was rejected")
+            let choices=session.response!.mapChoices!
+            precondition(choices[0].match.applePlaceID==maps[0].applePlaceID && session.response?.collectionActions?.isEmpty != false)
+            session.flushHistory()
+            let reopened=AskSession(index:try adapter.index(),provider:provider);reopened.restoreHistory(from:store)
+            let places=try adapter.personalPlaces();precondition(reopened.response?.mapChoices==choices && places.count==1)
+            let status="No current hours could be verified. No saved fields changed."
+            let lookup=RetentionPlanner(calls:[.init(name:"research_businesses",callID:"lookup",arguments:"{}")],text:"\u{E200}cite\u{E202}turn0search0\u{E201}")
+            let response=try await AskConversationLoop(planner:lookup,availableCandidates:[:],execute:{_ in
+                .init(output:.init(status:"empty",complete:true,totalCount:0,records:[],findings:[],message:"not_found",localOnly:false),response:.init(summary:"Lookup result",candidates:[],paragraphs:[.init(id:"business-unverified",spans:[.text(status)],sourceIDs:[],transientToolStatus:true)],listedCandidateIDs:[],usesLocalCatalog:true),orderedIDs:[])
+            }).answer(.init(mode:.collection,text:"Find current hours",fromOCR:false),context:.init(index:[],recent:[]),cities:[],findings:[])
+            precondition(AskAnswerCopy.text(response).contains(status),"Invisible synthesis erased the native negative lookup result")
+            let turn=AskTurn(id:UUID(),request:.init(mode:.collection,text:"Find current hours",fromOCR:false),response:response,status:.complete)
+            let archive=try JSONDecoder().decode(AskArchivedTurn.self,from:JSONEncoder().encode(AskArchivedTurn(turn)))
+            let projected=AskConversationProjection.messages([archive.turn],fullCollection:true).map(\.text).joined(separator:"\n")
+            precondition(projected.contains(status) && !projected.contains("\u{E200}"),"History must retain the truthful native fallback, not invisible control tokens")
+            print("PASS native Maps choices survive Session/archive without saving; invisible final synthesis retains negative lookup presentation and truthful history")
         }
         if selection==nil || selection=="aggregate" {
             for i in 1...2400 {
