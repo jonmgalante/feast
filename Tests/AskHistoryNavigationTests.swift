@@ -40,7 +40,22 @@ import CoreData
             let baseline=try fixture.nearLimitLibrary(turn:turn);precondition(store.saveLibrary(baseline))
             let session=try fixture.session(store:store),original=session.activeChatID
             try await fixture.answer(session);session.input="Last durable pending draft";session.flushHistory()
-            let durableIDs=session.turns.map(\.id),large=String(repeating:"x",count:8*1024*1024-100_000)
+            let durableIDs=session.turns.map(\.id),durable=try store.durableLibrary()
+            let encoder=JSONEncoder();encoder.outputFormatting = .sortedKeys
+            var durablePayloadBytes=0
+            for chat in durable.chats {
+                durablePayloadBytes+=chat.conversation.draft.utf8.count
+                for archived in chat.conversation.turns {durablePayloadBytes+=try encoder.encode(archived).count}
+            }
+            let priorDraftBytes=durable.chats.first {$0.id==original}!.conversation.draft.utf8.count
+            let otherPayloadBytes=durablePayloadBytes-priorDraftBytes
+            // Native section/provenance metadata can change accepted turn sizes.
+            // Cross the aggregate limit without crossing an individual piece limit.
+            let draftBytes=AskConversationStore.maximumPendingBytes-otherPayloadBytes+1
+            precondition((1...8*1024*1024).contains(draftBytes),"Fixture must isolate the aggregate pending budget from the individual draft limit")
+            let large=String(repeating:"x",count:draftBytes)
+            precondition(otherPayloadBytes+large.utf8.count==AskConversationStore.maximumPendingBytes+1,"Fixture must exceed the actual referenced payload budget by exactly one byte")
+            print("DIAGNOSTIC pending budget other payload bytes \(otherPayloadBytes), draft bytes \(large.utf8.count), candidate total \(otherPayloadBytes+large.utf8.count), limit \(AskConversationStore.maximumPendingBytes)")
             session.input=large;session.flushHistory()
             do {_ = try store.durableLibrary();preconditionFailure("Budget failure must not authorize checkpoint compaction")}catch {}
             check(session.newChat(),"crossing total pending budget still permits RAM escape")
