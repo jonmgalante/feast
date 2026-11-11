@@ -46,6 +46,22 @@ separate acceptance checks. The separate history-permission proof below is not c
 journal signoff. Retention versus erasure remains a product decision; existing
 retention semantics are unchanged.
 
+## Reviewed journal error truthfulness correction
+
+Integrated as `d866f5ad8ba6bd5733fc37108bf6e6c9c79bae73`. The generic journal
+failure no longer says "Nothing was changed" when a busy or corrupt journal
+prevents verifying an already committed action. It asks the user to check the
+collection before retrying. This changes one production sentence only; storage,
+locking, mutation, permissions, Undo and recovery behavior are unchanged.
+
+The unchanged expected-correct tests first produced 31 wording/propagation
+failures, including an actual second process holding the lock after the collection
+save. The corrected immutable source passed 354 focused default-mode checkpoints,
+exit 0, including prior receipt/value preservation and `AskSession` propagation.
+Independent exact-source/evidence review passed. Evidence is
+`/tmp/feast-journal-error-green.72HSUA`; the journal store hash remains `d9d6dec4`.
+Full combined default/recovery gates still follow the remaining work below.
+
 ## Reviewed deleted-history authority proof
 
 Integrated as `e31eb81` (source `b69c7ea`). An exact committed-deletion or
@@ -147,8 +163,17 @@ capability or deployment was activated.
 - Preserve unaffected dialogue when one saved reference becomes inaccessible;
   never return revoked/private content through remaining fragments.
 - Make retained long-answer tails retrievable through bounded, truthful context.
+
+### History navigation branch: `fix/ask-audit-navigation`
+
 - Permit non-destructive navigation when current in-memory history cannot save,
   preserving the full chat and draft rather than silently dropping/truncating them.
+- One authoritative pending library, exact-revision reconciliation and explicit
+  Clear/Delete recovery barriers remain under implementation review and fault tests.
+- The pending materialized library has an explicit 16 MiB total resource budget.
+  Above that budget or on actual storage failure, exact RAM navigation remains
+  available with a persistent unsaved warning, not a restart-durability promise.
+  Existing canonical limits remain unchanged; no automatic deletion or truncation.
 
 ## Required integration gate
 
