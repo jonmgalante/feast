@@ -162,14 +162,20 @@ test('slow unknown-root ownership claim cannot block an existing owned local Sto
   if(new URL(request.url).pathname==='/native-close-v2'&&(await request.clone().json()).root===unknown.requestID){started();await gate}
   return target.fetch(request);
  }}};
- const pending=f.op('cancel',unknown);await began;
- let stopped=false;const local=f.op('cancel',owned).then(r=>{stopped=true;return r});
+ let claimFinished=false,timer;const pending=f.op('cancel',unknown).then(r=>{claimFinished=true;return r});
  try{
-  for(let i=0;i<15&&!stopped;i++)await new Promise(r=>setImmediate(r));
-  assert.equal(stopped,true,'unrelated ledger latency must not hold the local job transaction');
-  assert.equal((await(await local).json()).state,'cancelled');
-  assert.equal((await(await f.op('status',owned)).json()).state,'cancelled');assert.equal(f.calls.paid,0);
- }finally{release();await pending}
+  // Await the actual responses while the unrelated RPC remains held. A fixed
+  // number of event-loop turns does not wait for asynchronous credential hashes.
+  const responsive=(async()=>{
+   await began;const local=await f.op('cancel',owned);assert.equal(local.status,200);
+   assert.equal((await local.json()).state,'cancelled');
+   assert.equal(f.jobs.data.get('job:'+jobKey(owned.requestID,owned.step)).cancelled,true);
+   const status=await f.op('status',owned);assert.equal(status.status,200);assert.equal((await status.json()).state,'cancelled');
+   assert.equal(claimFinished,false);assert.equal(f.calls.paid,0);assert.equal(f.calls.count,0);
+  })();
+  // This is a deadlock guard, not a response-latency or scheduling-turn contract.
+  await Promise.race([responsive,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('owned Stop/status blocked by an unrelated ledger RPC')),5000)})]);
+ }finally{clearTimeout(timer);release();await pending}
 });
 
 test('lost cancellation claim acknowledgment is bounded, blocks delayed submit and resolves after restart without dispatch',async()=>{
