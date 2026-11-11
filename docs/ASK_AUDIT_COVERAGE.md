@@ -163,15 +163,52 @@ and verified the official API documentation and exact source snapshot. Evidence
 is `/tmp/feast-file-metadata-privacy.erBewu`; Release/recovery bundle parity still
 belongs to the final combined gate. See `PRIVACY_MANIFEST_REVIEW.md`.
 
+## Reviewed bounded accounting index
+
+Integrated as `95311f6bfedfd60be0cc616e789f509b56bce90c` (source
+`79d658373745c31c6f24769ecd142ead47146160`). The 17-file index-only commit preserves
+the accepted history protocol and exact-material recovery. Every official writer
+maintains the revision-pinned canonical index; preparation uses a complete immutable
+snapshot, followed by bounded scan/build and all-node verification before atomic
+activation. Partial stages are never authoritative, corrupt active indexes never
+fall back to an incomplete scan, and no-op replays leave whole stored maps unchanged.
+
+The corrected standalone freeze passed 416 Node tests, 65/27 Python tests, four
+mock-only SQLite/workerd lifecycle/recovery runtimes and two resource-bound runs.
+Independent review passed 26 focused tests, accounting/claim race probes and the
+original count/ack tamper probes with clean positive controls. All 17 committed
+files matched the reviewed source manifest before and after integration.
+
+The immutable **combined index + retained-history protocol** gate at `95311f6`
+then passed 423 Node tests, 65/27 Python tests and all six mocked runtimes, with
+all source hashes unchanged. Its 10,000-row build used 846 resumable steps, at most
+269 ms per measured step, 2,641,007 bytes read, 2,660,506 bytes written and 767 value
+operations. The near-128-KiB-row case also passed. These are local observations,
+not a production latency guarantee. Evidence:
+`/tmp/feast-index-protocol-integration.bdwOeG`.
+
+Bounded hot paths rely on validated official-writer maintenance and touched-record
+proofs. Arbitrary untouched/out-of-band corruption requires the independent full
+immutable audit; hashes do not prove operational inventory completeness or writer
+quiescence. See `Backend/feast-production/ACCOUNTING_INDEX.md`.
+
+The separately discovered legacy direct-ID compatibility boundary below is **not**
+closed by this index acceptance. No live index, migration, ledger or provider was
+used or activated.
+
 ## Continuing implementation, not yet integrated or verified
 
-### Accounting scaling branch: `fix/ask-audit-accounting`
+### Legacy accounting identity compatibility: `fix/ask-audit-accounting`
 
-- Historical-scan scaling without skipping records or trusting unverifiable totals.
-- Every writer must update validated aggregates, ownership and replay fences.
-- Revision-pinned bootstrap/activation and full audit need realistic runtime
-  resource checks and resumable staging if one-shot work cannot finish safely.
-- Independent review and final combined capability/body-binding gates remain.
+- Authentic old V1/V2 direct producers accepted certain 36-character IDs that are
+  not UUIDs. The current migration inventory rejects those valid old records.
+  Complete preflight must block rather than omit them or assume none exist.
+- A separate reviewed design will recognize only authentic legacy-direct record
+  shapes, keep native/staged/managed UUID admission strict, preserve every original
+  physical key/value and charge/hold, and keep case-alias ownership separate from
+  per-record accounting/replay. Hyphen-position variants must remain distinct.
+- New ownership proof bounds and a versioned offline-plan policy need exact
+  positive/negative fixtures, independent implementation review and combined gates.
 
 ### Answer/history branch: `fix/ask-audit-answers`
 
