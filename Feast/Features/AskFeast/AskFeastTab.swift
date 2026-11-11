@@ -156,7 +156,9 @@ struct AskConversationAnswer: View {
                 }
             }
             if response.paragraphs.isEmpty && (response.fieldActions ?? []).isEmpty && operations.isEmpty {
-                Text(String(AskMarkdownPresentation.inline(response.summary).characters)).font(FeastTheme.Typography.body)
+                Text(underlinedLinks(AskMarkdownPresentation.inline(response.summary))).font(FeastTheme.Typography.body)
+                    .tint(FeastTheme.AdaptiveColors.utilityAction)
+                    .environment(\.openURL, OpenURLAction { openLink($0) })
             }
             ForEach(response.substantiveParagraphs.filter { paragraph in !((response.fieldActions ?? []).isEmpty == false && paragraph.representedField == "instagram") }) { paragraph in
                 VStack(alignment: .leading, spacing: FeastTheme.Spacing.xSmall) {
@@ -170,13 +172,7 @@ struct AskConversationAnswer: View {
                             }
                         }
                         .tint(FeastTheme.AdaptiveColors.utilityAction)
-                        .environment(\.openURL, OpenURLAction { url in
-                            if let accepted=AskCitationLink.acceptedURL(for:url,citations:response.paragraphs.flatMap(\.citations)) { return .systemAction(accepted) }
-                            guard let candidate = AskPlaceReference.candidate(for: url, in: response.candidates),
-                                  let id = candidate.existingRecordID else { return .discarded }
-                            openSaved(id)
-                            return .handled
-                        })
+                        .environment(\.openURL, OpenURLAction { openLink($0) })
                     if isSample && !paragraph.sourceIDs.isEmpty {
                         AskSourceDetails(sources: sources.filter { paragraph.sourceIDs.contains($0.id) }, expanded: expandSources)
                     }
@@ -201,6 +197,13 @@ struct AskConversationAnswer: View {
         .accessibilityAction(named: Text("Copy answer")) { UIPasteboard.general.string = plainAnswer }
         .contextMenu {
             Button("Copy answer", systemImage: "doc.on.doc") { UIPasteboard.general.string = plainAnswer }
+        }
+    }
+    func openLink(_ url: URL) -> OpenURLAction.Result {
+        switch AskAnswerLink.destination(for:url,candidates:response.candidates,citations:response.paragraphs.flatMap(\.citations)) {
+        case .web(let safe): return .systemAction(safe)
+        case .savedPlace(let id): openSaved(id); return .handled
+        case nil: return .discarded
         }
     }
     private var operations:[AskOperationPresentation] {AskOperationPresentation.make(response:response,turnID:turnID)}
@@ -311,6 +314,15 @@ struct AskConversationAnswer: View {
         guard let ids = response.listedCandidateIDs else { return response.candidates }
         return ids.compactMap { id in response.candidates.first { $0.id == id } }
     }
+    private func underlinedLinks(_ original: AttributedString) -> AttributedString {
+        // Links remain discoverable when the adaptive dark tint is near the
+        // surrounding text color. Keep the existing palette and text layout.
+        var result=original
+        for run in Array(original.runs) where run.link != nil {
+            result[run.range].underlineStyle=Text.LineStyle(pattern:.solid)
+        }
+        return result
+    }
     private func attributed(_ paragraph: AskAnswerParagraph) -> AttributedString {
         var result = AskMarkdownPresentation.inline(paragraph,candidates:response.candidates,citations:response.paragraphs.flatMap(\.citations))
         let allCitations = response.paragraphs.flatMap(\.citations).reduce(into: [AskWebCitation]()) { result, citation in
@@ -323,7 +335,7 @@ struct AskConversationAnswer: View {
             link.link = url
             result.append(link)
         }
-        return result
+        return underlinedLinks(result)
     }
 }
 

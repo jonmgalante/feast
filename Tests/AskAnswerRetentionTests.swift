@@ -748,7 +748,8 @@ private struct RetentionProvider:AskFeastProvider {
             let paragraph=AskAnswerParagraph(id:"links",spans:[.place(candidate.id),.text(" [Stored business](https://example.org/book) [Verified](https://example.org/source?view=full&utm_source=test) [Unsafe](javascript:alert) ")],sourceIDs:candidate.sourceIDs,citations:[citation])
             let shown=AskMarkdownPresentation.inline(paragraph,candidates:[candidate])
             let links=shown.runs.compactMap(\.link)
-            precondition(!links.contains { $0.absoluteString=="https://example.org/book" },"An unsupported stored link must not look tappable")
+            precondition(links.contains { $0.absoluteString=="https://example.org/book" },"A safe stored navigation link must remain tappable without citation evidence")
+            precondition(AskCitationLink.acceptedURL(for:URL(string:"https://example.org/book")!,citations:[citation])==nil)
             precondition(links.contains {AskCitationLink.acceptedURL(for:$0,citations:[citation]) != nil})
             precondition(links.contains {AskPlaceReference.candidate(for:$0,in:[candidate]) != nil})
             precondition(!links.contains {$0.scheme=="javascript"})
@@ -758,7 +759,7 @@ private struct RetentionProvider:AskFeastProvider {
             let restored=try JSONDecoder().decode(AskResponse.self,from:JSONEncoder().encode(response))
             precondition(AskMarkdownPresentation.inline(restored.paragraphs[0],candidates:restored.candidates).runs.compactMap(\.link)==links)
             precondition(AskAnswerCopy.text(restored).contains("Stored business"))
-            print("PASS paragraph links match approved tap destinations; saved uncited and unsafe links are plain text, citations/internal links and copy survive reload")
+            print("PASS safe uncited stored links remain navigation, unsafe links stay plain text, and citation/internal destinations and copy survive reload")
         }
     }
 }

@@ -1,5 +1,63 @@
 import Foundation
 
+/// Ordinary navigation is not citation evidence. Keep the existing HTTPS safety
+/// gate, and resolve only explicit public domains or app-created saved references.
+enum AskAnswerLink {
+    enum Destination: Equatable {
+        case web(URL)
+        case savedPlace(String)
+    }
+    private static let bareDomain = try! NSRegularExpression(pattern: #"^(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,63}(?:[/?#][^\s<>]*)?$"#)
+    private static let detector = try! NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+
+    static func webURL(_ raw: String) -> URL? {
+        if let safe = AskWebCitation(title: "Link", url: raw).safeURL { return safe }
+        // Do not infer a site from an @handle, relative path, email or another
+        // scheme. Only an entire explicit domain may gain the HTTPS scheme.
+        let range = NSRange(raw.startIndex..., in: raw)
+        guard bareDomain.firstMatch(in: raw, range: range)?.range == range else { return nil }
+        return AskWebCitation(title: "Link", url: "https://" + raw).safeURL
+    }
+    static func permitsPlainLink(at index: AttributedString.Index, in value: AttributedString) -> Bool {
+        guard index != value.startIndex else { return true }
+        let preceding=value.characters[value.characters.index(before:index)]
+        return preceding.isWhitespace || "([{<\"'“‘".contains(preceding)
+    }
+    static func renderedWebURL(_ url: URL, label: String, permitsImplicitWWW: Bool) -> URL? {
+        if let safe=webURL(url.absoluteString) { return safe }
+        // Foundation Markdown gives bare www addresses an implicit HTTP link.
+        // Upgrade only an exact displayed-domain match, never an HTTP label or
+        // a different destination hidden behind a seemingly safe label.
+        guard permitsImplicitWWW, label.lowercased().hasPrefix("www."),
+              URL(string:"http://"+label)==url else { return nil }
+        return webURL(label)
+    }
+    static func destination(for url: URL, candidates: [AskCandidate], citations: [AskWebCitation] = []) -> Destination? {
+        if let candidate = AskPlaceReference.candidate(for: url, in: candidates), let id = candidate.existingRecordID {
+            return .savedPlace(id)
+        }
+        guard let safe = webURL(url.absoluteString) else { return nil }
+        return .web(AskCitationLink.acceptedURL(for: safe, citations: citations) ?? safe)
+    }
+    static func addingPlainLinks(to original: AttributedString) -> AttributedString {
+        var value = original
+        // Work only in plain runs, before sanitizing existing Markdown links.
+        // This prevents relinking the label of a rejected destination or code.
+        for run in Array(original.runs) where run.link == nil && run.inlinePresentationIntent?.contains(.code) != true {
+            let text = String(original[run.range].characters)
+            for match in detector.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
+                guard let range = Range(match.range, in: text) else { continue }
+                let start = value.characters.index(run.range.lowerBound, offsetBy: text[..<range.lowerBound].count)
+                guard permitsPlainLink(at:start,in:value) else { continue }
+                guard let url = webURL(String(text[range])) else { continue }
+                let end = value.characters.index(start, offsetBy: text[range].count)
+                value[start..<end].link = url
+            }
+        }
+        return value
+    }
+}
+
 enum AskMarkdownPresentation {
     /// Provider control syntax is not prose or a source-to-claim association.
     /// Remove only complete recognized citations in presentation; keep malformed
@@ -54,7 +112,7 @@ enum AskMarkdownPresentation {
         var covered=Set<URL>()
         for block in text.components(separatedBy:"\n\n") {
             if block.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty {continue}
-            let value=inline(block),runs=Array(value.runs)
+            let value=inline(block,navigationLinks:false),runs=Array(value.runs)
             let linked=runs.compactMap {run->(URL,String)? in
                 guard let link=run.link else{return nil}
                 return (link,String(value[run.range].characters))
@@ -92,20 +150,28 @@ enum AskMarkdownPresentation {
         }
         return false
     }
-    static func inline(_ text:String)->AttributedString {
+    static func inline(_ text:String,navigationLinks:Bool=true)->AttributedString {
         let visible=visibleText(text)
         var value=(try? AttributedString(markdown:readableBlocks(visible),options:.init(interpretedSyntax:.inlineOnlyPreservingWhitespace))) ?? AttributedString(visible)
-        for run in value.runs {if let url=run.link,AskWebCitation(title:"Link",url:url.absoluteString).safeURL==nil {value[run.range].link=nil}}
+        if navigationLinks { value=AskAnswerLink.addingPlainLinks(to:value) }
+        for run in Array(value.runs) {
+            guard let url=run.link else{continue}
+            value[run.range].link = navigationLinks ? AskAnswerLink.renderedWebURL(url,label:String(value[run.range].characters),permitsImplicitWWW:AskAnswerLink.permitsPlainLink(at:run.range.lowerBound,in:value)) : AskWebCitation(title:"Link",url:url.absoluteString).safeURL
+        }
         return value
     }
     static func inline(_ paragraph:AskAnswerParagraph,candidates:[AskCandidate],citations:[AskWebCitation]?=nil)->AttributedString {
-        // Styling and tap handling use the same evidence boundary. Safe syntax
-        // alone does not make an uncited model/stored URL an approved destination.
+        // Styling and taps share a navigation resolver. Safe external URLs do
+        // not become citations; internal links still require saved-place spans.
         func supportedLinks(_ original:AttributedString)->AttributedString {
             var value=original
             for run in value.runs {
                 guard let url=run.link else{continue}
-                if AskPlaceReference.candidate(for:url,in:candidates)==nil && AskCitationLink.acceptedURL(for:url,citations:citations ?? paragraph.citations)==nil {value[run.range].link=nil}
+                switch AskAnswerLink.destination(for:url,candidates:candidates,citations:citations ?? paragraph.citations) {
+                case .web(let safe): value[run.range].link=safe
+                case .savedPlace: break
+                case nil: value[run.range].link=nil
+                }
             }
             return value
         }

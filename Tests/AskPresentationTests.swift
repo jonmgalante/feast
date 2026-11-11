@@ -18,6 +18,7 @@ private actor PresentationGateProvider:AskFeastProvider {
 @MainActor enum AskPresentationTests {
     static func run(model:NSManagedObjectModel,directory:URL)async throws {
         try markdownProjection(directory:directory)
+        try navigationLinks(directory:directory)
         try await historyTitles(directory:directory)
         let a=UUID().uuidString,b=UUID().uuidString,turn=UUID()
         let applied=AskCollectionAction(id:UUID(),title:"Update one",targetIDs:[a],entity:"place",operation:"update",state:.applied,undoable:true)
@@ -254,6 +255,64 @@ private actor PresentationGateProvider:AskFeastProvider {
         }
         print("PASS explicit Rename protects New chat/exact-question/custom names through later sends, relaunch, revoked access, pending/canonical round trips and Clear/relaunch/send")
     }
+    private static func navigationLinks(directory:URL)throws {
+        let full="https://www.instagram.com/full_profile/?hl=en#menu"
+        let bare="instagram.com/public_cafe"
+        let source=AskWebCitation(title:"Menu",url:"https://example.org/menu?item=2&utm_source=citation#lunch")
+        let requestURL=URL(string:"https://example.org/menu?item=2&utm_source=answer#lunch")!
+        let savedID=UUID().uuidString
+        let candidate=AskCandidate(id:UUID().uuidString,name:"Saved Café",city:"Test City",facts:[],sourceIDs:[],uncertainty:"",mapOptions:[],existingRecordID:savedID)
+        let forged=AskPlaceReference.url(for:candidate)!.absoluteString
+        let raw="🧑🏽‍🍳 **Profile**: [Visit Instagram](\(full))\n\(full)\n\(bare)\n[Domain profile](\(bare))\nwww.example.org/menu?q=one%20two#lunch\n@public_cafe @**cafe.name** @**www.example.org** **user**@instagram.com user@example.org\n`https://example.org/code`\n[Blocked label instagram.com/profile](javascript:alert)\n[Fake place](\(forged))"
+        let paragraph=AskAnswerParagraph(id:"navigation",spans:[.text(raw)],sourceIDs:[])
+        let rendered=AskMarkdownPresentation.inline(paragraph,candidates:[candidate])
+        func link(_ label:String)->URL? {rendered[rendered.range(of:label)!].link}
+        precondition(link("Visit Instagram")?.absoluteString==full)
+        precondition(link(full)?.absoluteString==full)
+        precondition(link(bare)?.absoluteString=="https://"+bare)
+        precondition(link("Domain profile")?.absoluteString=="https://"+bare)
+        precondition(link("www.example.org/menu?q=one%20two#lunch")?.absoluteString=="https://www.example.org/menu?q=one%20two#lunch")
+        let linkedLabels=rendered.runs.filter {$0.link != nil}.map {String(rendered[$0.range].characters)}
+        precondition(linkedLabels==["Visit Instagram",full,bare,"Domain profile","www.example.org/menu?q=one%20two#lunch"],"Only the five explicit navigation labels may be linked, including across formatted handles")
+        for label in ["@public_cafe","cafe.name","@www.example.org","@instagram.com","user@example.org","https://example.org/code","Blocked label instagram.com/profile","Fake place"] {precondition(link(label)==nil,"Unexpected link: "+label)}
+        precondition(AskAnswerLink.destination(for:URL(string:full)!,candidates:[]) == .web(URL(string:full)!))
+        precondition(AskAnswerLink.destination(for:URL(string:bare)!,candidates:[]) == .web(URL(string:"https://"+bare)!))
+        precondition(AskAnswerLink.destination(for:requestURL,candidates:[],citations:[source]) == .web(source.safeURL!))
+        let different=URL(string:"https://example.org/menu?item=3#lunch")!
+        precondition(AskAnswerLink.destination(for:different,candidates:[],citations:[source]) == .web(different))
+        precondition(AskCitationLink.acceptedURL(for:different,citations:[source])==nil,"Ordinary navigation cannot imply citation evidence")
+        precondition(AskAnswerLink.destination(for:AskPlaceReference.url(for:candidate)!,candidates:[candidate]) == .savedPlace(savedID))
+        precondition(AskAnswerLink.destination(for:AskPlaceReference.url(for:candidate)!,candidates:[])==nil)
+        for unsafe in ["http://example.org", "javascript:alert(1)", "data:text/html,test", "file:///private/tmp/test", "mailto:person@example.org", "//example.org/menu", "/menu", "@cafe.name", "https://name:secret@example.org", "https://example.org:8443", "https://localhost", "https://app.local", "https://app.internal", "https://127.0.0.1", "https://[::1]"] {
+            precondition(AskAnswerLink.webURL(unsafe)==nil,"Unsafe normal navigation: "+unsafe)
+            if let url=URL(string:unsafe) {precondition(AskAnswerLink.destination(for:url,candidates:[candidate])==nil)}
+            let bad=AskMarkdownPresentation.inline("[Unsafe](\(unsafe))")
+            precondition(bad.runs.allSatisfy {$0.link==nil},"Unsafe Markdown destination: "+unsafe)
+        }
+        for disguised in ["[www.example.org](http://evil.example)","[http://www.example.org](http://www.example.org)","http://www.example.org"] {
+            precondition(AskMarkdownPresentation.inline(disguised).runs.allSatisfy {$0.link==nil})
+        }
+        let punctuation=AskMarkdownPresentation.inline("See (instagram.com/public_cafe), then **https://example.org/café?q=one%20two#menu**.")
+        precondition(punctuation.runs.compactMap(\.link).map(\.absoluteString)==["https://instagram.com/public_cafe","https://example.org/caf%C3%A9?q=one%20two#menu"])
+        let table=AskMarkdownPresentation.inline("| Site | Profile |\n|---|---|\n| Café | instagram.com/public_cafe |")
+        precondition(table.runs.compactMap(\.link)==[URL(string:"https://"+bare)!])
+        precondition(paragraph.citations.isEmpty && AskMarkdownPresentation.locallyLinkedSources(paragraph).isEmpty)
+        let linkedSource=AskAnswerParagraph(id:"citation",spans:[.text("Lunch is served. [Official menu](\(source.url))")],sourceIDs:[],citations:[source])
+        precondition(AskMarkdownPresentation.locallyLinkedSources(linkedSource)==[source.safeURL!])
+        let rawSource=AskAnswerParagraph(id:"raw-source",spans:[.text("Lunch is served. "+source.url)],sourceIDs:[],citations:[source])
+        precondition(AskMarkdownPresentation.locallyLinkedSources(rawSource).isEmpty,"Autolinking must not alter source-to-claim association")
+        let response=AskResponse(summary:raw,candidates:[candidate],paragraphs:[paragraph],listedCandidateIDs:[],publicConversationText:raw)
+        let turn=AskTurn(id:UUID(),request:.init(mode:.collection,text:"Show the restaurant links",fromOCR:false),response:response,status:.complete)
+        var library=AskChatLibrary.empty();library.chats[0].conversation.turns=[AskArchivedTurn(turn)]
+        let store=AskConversationStore(url:directory.appendingPathComponent("navigation-link-history.json"))
+        precondition(store.saveLibrary(library))
+        let restored=try store.loadLibrary().chats[0].conversation.turns[0].response
+        precondition(restored==response && restored.paragraphs[0].citations.isEmpty)
+        let replay=AskMarkdownPresentation.inline(restored.paragraphs[0],candidates:restored.candidates)
+        precondition(replay==rendered && AskAnswerCopy.text(restored)==AskAnswerCopy.text(response))
+        precondition(AskConversationProjection.messages([turn]).last?.text==raw,"Link rendering must not change outbound conversation bytes")
+        print("PASS safe ordinary Markdown/plain/domain links share navigation resolution after archive reload; citations, queries, Unicode, saved references and unsafe/ambiguous destinations remain distinct")
+    }
     private static func markdownProjection(directory:URL)throws {
         let a=UUID().uuidString,b=UUID().uuidString,savedID=UUID().uuidString
         let first=AskCandidate(id:a,name:"The Elk",city:"",facts:[],sourceIDs:[],uncertainty:"",mapOptions:[],existingRecordID:savedID)
@@ -284,7 +343,7 @@ private actor PresentationGateProvider:AskFeastProvider {
         let links=AskAnswerParagraph(id:"links",spans:[.text("[Forged](\(forgedURL)) [File](file:///private) [Relative](/local) [Source](\(safeURL)) ["),.place(a),.text("](https://evil.example) ["),.place(b),.text("](https://evil.example)")],sourceIDs:[])
         let linked=AskMarkdownPresentation.inline(links,candidates:candidates)
         precondition(linked[linked.range(of:"Forged")!].link==nil && linked[linked.range(of:"File")!].link==nil && linked[linked.range(of:"Relative")!].link==nil)
-        precondition(linked[linked.range(of:"Source")!].link==nil) // Safe syntax without source evidence is not a working link.
+        precondition(linked[linked.range(of:"Source")!].link?.absoluteString==safeURL) // Navigation does not require or create citation evidence.
         let evidenced=AskMarkdownPresentation.inline(links,candidates:candidates,citations:[.init(title:"Source",url:safeURL)])
         precondition(evidenced[evidenced.range(of:"Source")!].link?.absoluteString==safeURL)
         precondition(linked[linked.range(of:first.name)!].link==AskPlaceReference.url(for:first))
