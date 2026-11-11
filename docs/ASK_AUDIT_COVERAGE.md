@@ -46,6 +46,23 @@ separate acceptance checks. A forthcoming history-permission proof is a separate
 reviewed engine change, not covered by this journal signoff. Retention versus
 erasure remains a product decision; existing retention semantics are unchanged.
 
+## Reviewed additional answer milestone
+
+Integrated as `51f61a5` and `17d140e` (reviewed source commits `ddcee653` and
+`e387ab70`). Empty or visually empty synthesis cannot complete a bookkeeping-only
+answer; visible native Maps choices, lists/counts/actions and negative lookup
+results remain usable. Invisible final text no longer erases a truthful native
+fallback. Unverified URL text no longer advertises an unsupported tap action.
+Large **nonordinal** aggregate checkpoint membership uses the same save/restore
+validation without relaxing ordered-selection, mutation or 8 MiB bounds.
+
+The exact immutable milestone passed 251 default and 252 recovery-compiled
+checkpoints with serialized runtimes. Independent source/evidence review approved
+this bounded scope. Production and retention-test hashes match after integration;
+only test-runner entry points were combined with the journal suite. Combined
+journal/answer suites are in progress; the final full combined build/review gate
+still follows the remaining implementation below.
+
 ## Continuing implementation, not yet integrated or verified
 
 ### Accounting branch: `fix/ask-audit-accounting`
@@ -56,6 +73,9 @@ erasure remains a product decision; existing retention semantics are unchanged.
 - Isolate attributable staged uncertainty only after every caller is compatible;
   corruption, unattributed uncertainty and unexplained legacy halts stay fail-closed.
 - Reviewed, revision-checked legacy inventory/migration and compatible rollback.
+- New queued jobs retain exact dispatch/count material. Historical jobs lacking
+  that proof require content-free preflight and verified drain/compatible handling
+  before source deployment, not merely before activation. This is still under review.
 - Historical-scan scaling without skipping records or trusting unverifiable totals.
 
 ### Answer/history branch: `fix/ask-audit-answers`
@@ -64,10 +84,7 @@ erasure remains a product decision; existing retention semantics are unchanged.
   occurrence provenance. Do not merge unrelated lists into the last query scope.
 - Preserve unaffected dialogue when one saved reference becomes inaccessible;
   never return revoked/private content through remaining fragments.
-- Reject blank synthesis that has not actually answered via a rendered result.
-- Resolve the styled-but-inert uncited link affordance safely.
 - Make retained long-answer tails retrievable through bounded, truthful context.
-- Align large aggregate checkpoint save/restore without a new collection cap.
 - Permit non-destructive navigation when current in-memory history cannot save,
   preserving the full chat and draft rather than silently dropping/truncating them.
 
