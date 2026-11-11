@@ -142,7 +142,8 @@ extension AskResponse {
 struct AskChatHistoryRow:Identifiable {
     let id:UUID
     let title,preview,date:String
-    var accessibilityLabel:String {title+", "+date+". "+preview}
+    var visiblePreview:String? {preview == title ? nil : preview}
+    var accessibilityLabel:String {title+", "+date+(visiblePreview.map {". "+$0} ?? "")}
 }
 enum AskHistoryPresentation {
     static func compact(_ text:String, limit:Int) -> String {
@@ -151,15 +152,19 @@ enum AskHistoryPresentation {
         let prefix=String(clean.prefix(limit));let boundary=prefix.lastIndex(of:" ")
         return (boundary.map {String(prefix[..<$0])} ?? prefix)+"…"
     }
-    static func title(_ chat:AskChatArchive,questionUnavailable:Bool=false)->String {
+    static func title(_ chat:AskChatArchive,questionUnavailable:Bool=false,presentedQuestion:String?=nil)->String {
         let first=chat.conversation.turns.first
-        let auto=chat.title=="New chat" || first.map {chat.title==String($0.question.prefix(80))}==true
+        let auto=chat.hasCustomTitle != true && (chat.title=="New chat" || first.map {chat.title==String($0.question.prefix(80))}==true)
         guard auto else{return chat.title}
         guard !questionUnavailable else{return "Collection conversation"}
         guard let first else{return "New chat"}
-        let projected=AskConversationProjection.messages([first.turn]).first(where:{$0.role=="user"})?.text
+        // History supplies the fresh, permission-filtered LOCAL request. Public
+        // provider projection intentionally omits otherwise-readable collection
+        // questions and is only a conservative fallback for other callers.
+        let projected=presentedQuestion ?? AskConversationProjection.messages([first.turn]).first(where:{$0.role=="user"})?.text
         guard let projected,projected != AskConversationProjection.omittedHuman else{return "Collection conversation"}
-        return compact(projected,limit:56)
+        let title=compact(projected,limit:56)
+        return title.isEmpty ? "New chat" : title
     }
     static func preview(_ chat:AskChatArchive,presentedResponse:AskResponse?=nil,presentedQuestions:[UUID:String]?=nil)->String {
         guard !chat.conversation.turns.isEmpty else{return chat.conversation.draft.isEmpty ? "No messages yet" : "Draft message"}
@@ -178,8 +183,11 @@ enum AskHistoryPresentation {
             // Unknown-provenance legacy questions may be hidden even when their
             // old archive forgot the private-selection flag. Never fall back to
             // that raw question after the active presentation denied it.
-            if let presentedQuestions,presentedQuestions[turn.id] != turn.question {continue}
-            let human=AskConversationProjection.messages([turn.turn]).first(where:{$0.role=="user"})?.text
+            let human:String?
+            if let presentedQuestions {
+                guard presentedQuestions[turn.id] == turn.question else{continue}
+                human=presentedQuestions[turn.id]
+            }else{human=AskConversationProjection.messages([turn.turn]).first(where:{$0.role=="user"})?.text}
             if let human,human != AskConversationProjection.omittedHuman,human.split(whereSeparator:{$0.isWhitespace}).count>=3 {return compact(human,limit:120)}
         }
         return "Collection conversation"

@@ -46,7 +46,7 @@ private actor NavigationHeldRecoveryWire {
             session.input="Keep title";session.flushHistory();check(session.renameChat(old,to:"Same visible title"),"seed visible title before clear")
             session.historyDestructiveInterruption={$0==point};session.clearConversation()
             let restarted=try fixture.session();restarted.collectionRecovery={try engine.recoverableTurns(in:$0)};restarted.restoreHistory(from:AskConversationStore(url:store.url))
-            check(restarted.activeChatID != old && restarted.turns.isEmpty && restarted.input.isEmpty && restarted.chats[0].title=="Same visible title","clear barrier survives interruption at "+point)
+            check(restarted.activeChatID != old && restarted.turns.isEmpty && restarted.input.isEmpty && restarted.chats[0].title=="Same visible title" && restarted.chats[0].hasCustomTitle==true,"clear barrier survives interruption at "+point)
             check(try engine.actionStatus(receipt.1).state == .applied,"clear never deletes action receipt/Undo evidence")
         }
         do {

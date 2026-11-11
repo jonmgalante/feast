@@ -746,23 +746,34 @@ struct AskTurn: Identifiable, Equatable {
         let permitted=refreshIndex==nil ? index.historyAccessIDs : ((try? refreshIndex?())?.historyAccessIDs ?? [])
         return presented(turns,permitted:permitted)
     }
-    private func presented(_ values:[AskTurn],permitted:Set<String>)->[AskTurn] {
+    private func presented(_ values:[AskTurn],permitted:Set<String>,forHistoryRows:Bool=false)->[AskTurn] {
         let legacy=values.compactMap(\.response).reduce(into:Set<String>()) {$0.formUnion(AskConversationProjection.dependencies($1))}
         return values.map {turn in
             var access=permitted
             if let historyDeletedRecordIDs,let deleted=try? historyDeletedRecordIDs(turn.id,(turn.response?.collectionActions ?? []).map(\.id)) {access.formUnion(deleted)}
-            return AskConversationProjection.presented(turn,permitted:access,legacyDependencies:legacy)
+            let projected=AskConversationProjection.presented(turn,permitted:access,legacyDependencies:legacy)
+            // A private selection may carry an older independent-question marker.
+            // History must not promote that request into a title/preview after
+            // its source access is denied. Use the same fresh access and verified
+            // deleted-record proof as the local projection; leave the transcript
+            // and deliberately renamed titles unchanged.
+            if forHistoryRows,let response=turn.response,
+               response.agentTask?.privateSelection==true || response.libraryContext?.excludesExternalReferences==true,
+               !AskConversationProjection.dependencies(response).isSubset(of:access) {
+                return .init(id:projected.id,request:.init(mode:projected.request.mode,text:AskConversationProjection.omittedHuman,fromOCR:false),response:projected.response,sources:projected.sources,status:projected.status)
+            }
+            return projected
         }
     }
     func historyRows()->[AskChatHistoryRow] {
         let permitted=refreshIndex==nil ? index.historyAccessIDs : ((try? refreshIndex?())?.historyAccessIDs ?? [])
         return AskHistoryPresentation.ordered(chats).map {chat in
-            let visible=presented(chat.conversation.turns.map(\.turn),permitted:permitted)
+            let visible=presented(chat.conversation.turns.map(\.turn),permitted:permitted,forHistoryRows:true)
             // Classify automatic/manual title on the ORIGINAL archive. Projecting
             // its first question first would misclassify the old automatic title.
             let questions=Dictionary(uniqueKeysWithValues:visible.map {($0.id,$0.request.text)})
             let hiddenQuestion=chat.conversation.turns.first.map {questions[$0.id] != $0.question} ?? false
-            let title=AskHistoryPresentation.title(chat,questionUnavailable:hiddenQuestion)
+            let title=AskHistoryPresentation.title(chat,questionUnavailable:hiddenQuestion,presentedQuestion:visible.first?.request.text)
             return .init(id:chat.id,title:title,preview:AskHistoryPresentation.preview(chat,presentedResponse:visible.last?.response,presentedQuestions:questions),date:AskHistoryPresentation.date(chat))
         }
     }
@@ -1115,7 +1126,7 @@ struct AskTurn: Identifiable, Equatable {
         let replacement:AskChatArchive
         if let i=next.firstIndex(where:{$0.id==oldID}) {
             let old=next[i]
-            replacement = .init(id:UUID(),title:old.title,updatedAt:old.updatedAt,conversation:.init(),lastActivityAt:old.lastActivityAt)
+            replacement = .init(id:UUID(),title:old.title,updatedAt:old.updatedAt,conversation:.init(),lastActivityAt:old.lastActivityAt,hasCustomTitle:old.hasCustomTitle)
             next[i]=replacement
         } else {replacement = .init(id:UUID(),title:"New chat",updatedAt:Date(),conversation:.init());next=[replacement]}
         // No cancel/stop before commit: stopping can scrub a recovery checkpoint.
@@ -1233,7 +1244,7 @@ struct AskTurn: Identifiable, Equatable {
         let title = name.trimmingCharacters(in:.whitespacesAndNewlines)
         guard !title.isEmpty,title.count <= 80 else { error = "Use a chat name of 1–80 characters.";return false }
         guard flushCurrentChat(),let position = chats.firstIndex(where:{$0.id == id}) else { return false }
-        var next = chats;next[position].title = title
+        var next = chats;next[position].title = title;next[position].hasCustomTitle = true
         return commitChats(next,active:activeChatID)
     }
     @discardableResult func deleteChat(_ id:UUID) -> Bool {
@@ -1313,7 +1324,7 @@ struct AskTurn: Identifiable, Equatable {
         if let position = next.firstIndex(where:{$0.id == activeChatID}) {
             next[position].conversation = snapshot()
             if let pendingActivityAt {next[position].lastActivityAt=pendingActivityAt;next[position].updatedAt=pendingActivityAt}
-            if next[position].title == "New chat",let first = next[position].conversation.turns.first,
+            if next[position].hasCustomTitle != true,next[position].title == "New chat",let first = next[position].conversation.turns.first,
                !first.question.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty {
                 next[position].title = String(first.question.prefix(80))
             }
@@ -1386,7 +1397,7 @@ struct AskTurn: Identifiable, Equatable {
             next[position].conversation.draft="";next[position].conversation.fallbackDraftTurnID=nil
         }
         next[position].lastActivityAt=activityNow();next[position].updatedAt=activityNow()
-        if next[position].title=="New chat" {next[position].title=String(turn.request.text.prefix(80))}
+        if next[position].hasCustomTitle != true,next[position].title=="New chat" {next[position].title=String(turn.request.text.prefix(80))}
         return commitChats(next,active:activeChatID,allowVolatile:true,changedChatIDs:[chat])
     }
     private func cancelRecoveryJob(_ turn:UUID) {

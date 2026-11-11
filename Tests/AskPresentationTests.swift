@@ -18,6 +18,7 @@ private actor PresentationGateProvider:AskFeastProvider {
 @MainActor enum AskPresentationTests {
     static func run(model:NSManagedObjectModel,directory:URL)async throws {
         try markdownProjection(directory:directory)
+        try await historyTitles(directory:directory)
         let a=UUID().uuidString,b=UUID().uuidString,turn=UUID()
         let applied=AskCollectionAction(id:UUID(),title:"Update one",targetIDs:[a],entity:"place",operation:"update",state:.applied,undoable:true)
         let anotherField=AskCollectionAction(id:UUID(),title:"Another field",targetIDs:[a],entity:"place",operation:"update",state:.applied,undoable:true)
@@ -159,6 +160,99 @@ private actor PresentationGateProvider:AskFeastProvider {
         print("PASS best-effort operation Undo uses reverse existing actions, stops at conflict, preserves earlier reversal and does not bump History on replay")
         try await persistentUndo(model:model,directory:directory)
 
+    }
+    private static func historyTitles(directory:URL)async throws {
+        let dependency=UUID().uuidString
+        let allowed=AskLocalIndex(records:[],visibleCityIDs:[dependency],visibleNoteIDs:[],scope:.savedMetadata)
+        let denied=AskLocalIndex(records:[],visibleCityIDs:[],visibleNoteIDs:[],scope:.savedMetadata)
+        let local=AskResponse(summary:"Local answer",candidates:[],listedCandidateIDs:[],usesLocalCatalog:true,agentTask:.init(action:"query",fields:["note"],orderedIDs:[dependency],sourcePolicy:"local_only",privateSelection:true),historyRecordIDs:[dependency],retainsIndependentQuestion:false)
+        let publicAnswer=AskResponse(summary:"Public answer",candidates:[],paragraphs:[.init(id:"public",spans:[.text("A useful public answer")],sourceIDs:[],historyRecordIDs:[])],publicConversationText:"A useful public answer",historyRecordIDs:[],retainsIndependentQuestion:true)
+        func chat(_ question:String,response:AskResponse?=nil,at:TimeInterval=1000)->AskChatArchive {
+            let turn=AskArchivedTurn(.init(id:UUID(),request:.init(mode:.collection,text:question,fromOCR:false),response:response ?? local,status:.complete))
+            return .init(id:UUID(),title:String(question.prefix(80)),updatedAt:Date(timeIntervalSinceReferenceDate:at),conversation:.init(turns:[turn]),lastActivityAt:Date(timeIntervalSinceReferenceDate:at))
+        }
+        var olderPrivateMarker=local;olderPrivateMarker.retainsIndependentQuestion=true
+        let privateChat=chat("  Show\n my\t saved cafés\u{00A0}in London  ",response:olderPrivateMarker)
+        let publicChat=chat("Find the best 3 coffee shops in soho London",response:publicAnswer,at:2000)
+        var legacy=local;legacy.historyRecordIDs=nil;legacy.retainsIndependentQuestion=nil
+        legacy.agentTask = .init(action:"query",fields:[],orderedIDs:[dependency],sourcePolicy:"stored_only",privateSelection:false)
+        let legacyChat=chat("Explain LEGACY_PRIVATE_NOTE from my collection",response:legacy)
+        var manual=privateChat;manual=AskChatArchive(id:UUID(),title:"My deliberate name",updatedAt:manual.updatedAt,conversation:manual.conversation)
+        var clarification=local
+        clarification.operationRecords=[.init(id:"clarification",entity:"place",operation:"update",actionIDs:[],targetIDs:[dependency],status:"needs_confirmation",outcomes:[])]
+        let statusChat=chat("Update the saved places I selected",response:clarification)
+        let empty=AskChatArchive(id:UUID(),title:"New chat",updatedAt:Date(),conversation:.init())
+        let store=AskConversationStore(url:directory.appendingPathComponent("history-title-projection.json"))
+        let library=AskChatLibrary(activeID:privateChat.id,chats:[privateChat,publicChat,legacyChat,manual,statusChat,empty])
+        precondition(store.saveLibrary(library))
+        let session=AskSession(index:allowed,provider:PresentationProvider());session.restoreHistory(from:store)
+        let originalBytes=try Data(contentsOf:store.url)
+        var access=allowed,reads=0
+        session.refreshIndex={reads+=1;return access}
+        let rows=session.historyRows()
+        precondition(reads==1 && rows.first {$0.id==privateChat.id}?.title=="Show my saved cafés in London","Local titles must use the permitted request, not the public-provider projection")
+        precondition(rows.first {$0.id==publicChat.id}?.title==publicChat.title)
+        precondition(rows.first {$0.id==privateChat.id}?.visiblePreview==nil,"An exact meaningful duplicate belongs only in the title and its accessibility label")
+        let longer=AskChatHistoryRow(id:UUID(),title:"Find coffee shops…",preview:"Find coffee shops with outdoor seating near the river",date:"Today")
+        precondition(longer.visiblePreview==longer.preview && longer.accessibilityLabel.contains(longer.preview),"A distinct longer preview must not be removed by prefix or fuzzy matching")
+        precondition(rows.first {$0.id==statusChat.id}?.visiblePreview=="Clarification needed")
+        precondition(rows.first {$0.id==empty.id}?.title=="New chat" && rows.first {$0.id==empty.id}?.preview=="No messages yet")
+        precondition(rows.first {$0.id==privateChat.id}?.accessibilityLabel.contains("Show my saved cafés in London")==true)
+        access=denied
+        let hidden=session.historyRows(),hiddenLocal=hidden.first {$0.id==privateChat.id}!
+        precondition(reads==2 && hiddenLocal.title=="Collection conversation" && hiddenLocal.visiblePreview==nil)
+        precondition(!hiddenLocal.accessibilityLabel.contains("cafés") && hiddenLocal.accessibilityLabel.components(separatedBy:"Collection conversation").count==2)
+        precondition(!hidden.first {$0.id==legacyChat.id}!.accessibilityLabel.contains("LEGACY_PRIVATE_NOTE"))
+        precondition(hidden.first {$0.id==manual.id}?.title==manual.title && hidden.first {$0.id==publicChat.id}?.title==publicChat.title)
+        let unchangedBytes=try Data(contentsOf:store.url)
+        precondition(rows.map(\.id)==hidden.map(\.id) && rows.map(\.id)==AskHistoryPresentation.ordered(library.chats).map(\.id) && originalBytes==unchangedBytes)
+        session.refreshIndex={throw CocoaError(.fileReadUnknown)}
+        precondition(session.historyRows().first {$0.id==privateChat.id}?.title=="Collection conversation","Failed permission refresh must fail closed")
+        let long="Find a quiet café with vegan lunch options near the river in central London"
+        let cleaned=AskHistoryPresentation.compact(long,limit:56)
+        precondition(cleaned=="Find a quiet café with vegan lunch options near the…" && cleaned.count<=57)
+        let grapheme="👨‍👩‍👧‍👦",noSpaces=String(repeating:grapheme,count:65)
+        precondition(AskHistoryPresentation.compact(noSpaces,limit:56)==String(repeating:grapheme,count:56)+"…")
+        let unicode="  Café e\u{301} 🍜\n\t東京  "
+        precondition(AskHistoryPresentation.compact(unicode,limit:56)=="Café e\u{301} 🍜 東京")
+        let blank=chat("  \n ",response:publicAnswer)
+        precondition(AskHistoryPresentation.title(blank,presentedQuestion:blank.conversation.turns[0].question)=="New chat")
+        var draft=empty;draft.conversation.draft="Unsent request"
+        precondition(AskHistoryPresentation.preview(draft)=="Draft message")
+        let legacyBytes=try JSONSerialization.data(withJSONObject:["id":UUID().uuidString,"title":"New chat","conversation":["version":1,"draft":"","turns":[]]])
+        let legacyEmpty=try JSONDecoder().decode(AskChatArchive.self,from:legacyBytes)
+        precondition(legacyEmpty.hasCustomTitle==nil && AskHistoryPresentation.title(legacyEmpty)=="New chat")
+        print("PASS meaningful local/public History titles, whitespace/word/Unicode boundaries, empty/draft fallbacks, useful statuses, permission refresh/revocation/legacy and older private-marker redaction, AX and read-only ordering")
+
+        for name in ["New chat","Show my saved coffee shops in London","Weekend cafés 🍜"] {
+            let initial=chat("Show my saved coffee shops in London")
+            let renameStore=AskConversationStore(url:directory.appendingPathComponent("rename-"+UUID().uuidString+".json"))
+            precondition(renameStore.saveLibrary(.init(activeID:initial.id,chats:[initial])))
+            let renamed=AskSession(index:allowed,provider:PresentationProvider(response:local));renamed.restoreHistory(from:renameStore)
+            precondition(renamed.renameChat(initial.id,to:name))
+            renamed.input="A later request must not rename this chat";renamed.run();while renamed.isLoading {await Task.yield()};renamed.flushHistory()
+            precondition(renamed.turns.count==2 && renamed.historyRows()[0].title==name && renamed.chats[0].hasCustomTitle==true)
+            let reloaded=AskSession(index:denied,provider:PresentationProvider());reloaded.restoreHistory(from:AskConversationStore(url:renameStore.url));reloaded.flushHistory()
+            precondition(reloaded.historyRows()[0].title==name && reloaded.chats[0].hasCustomTitle==true,"Manual names, including reserved/equal names, survive another send, reload and revoked source access")
+            var pending=try AskConversationStore(url:renameStore.url).loadLibrary()
+            pending.chats[0].conversation.draft=String(repeating:"oversized draft ",count:1000)
+            let pendingStore=AskConversationStore(url:renameStore.url);_ = try pendingStore.loadLibrary()
+            precondition(pendingStore.preserveLibrary(pending) == .pending)
+            let fromPending=try AskConversationStore(url:renameStore.url).loadLibrary()
+            precondition(fromPending.chats[0].hasCustomTitle==true && fromPending.chats[0].title==name)
+            var canonical=fromPending;canonical.chats[0].conversation.draft="Small draft"
+            precondition(pendingStore.preserveLibrary(canonical) == .canonical)
+            let fromCanonical=try AskConversationStore(url:renameStore.url).loadLibrary()
+            precondition(fromCanonical.chats[0].hasCustomTitle==true && fromCanonical.chats[0].title==name)
+            let clearing=AskSession(index:allowed,provider:PresentationProvider(response:local));clearing.restoreHistory(from:AskConversationStore(url:renameStore.url))
+            clearing.clearConversation()
+            precondition(clearing.activeChatID != initial.id && clearing.turns.isEmpty && clearing.chats[0].hasCustomTitle==true && clearing.historyRows()[0].title==name)
+            let afterClear=AskSession(index:allowed,provider:PresentationProvider(response:local));afterClear.restoreHistory(from:AskConversationStore(url:renameStore.url))
+            afterClear.input=initial.conversation.turns[0].question;afterClear.run();while afterClear.isLoading {await Task.yield()};afterClear.flushHistory()
+            afterClear.refreshIndex={denied}
+            precondition(afterClear.turns.count==1 && afterClear.historyRows()[0].title==name && afterClear.chats[0].hasCustomTitle==true,"Clear, relaunch and a new first send must preserve explicit manual-title intent")
+        }
+        print("PASS explicit Rename protects New chat/exact-question/custom names through later sends, relaunch, revoked access, pending/canonical round trips and Clear/relaunch/send")
     }
     private static func markdownProjection(directory:URL)throws {
         let a=UUID().uuidString,b=UUID().uuidString,savedID=UUID().uuidString

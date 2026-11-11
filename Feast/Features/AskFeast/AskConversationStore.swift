@@ -35,9 +35,11 @@ struct AskChatArchive: Codable, Identifiable {
     var updatedAt: Date
     var conversation: AskConversationSnapshot
     var lastActivityAt:Date? = nil
+    /// Nil in older archives; only an explicit Rename marks a title as manual.
+    var hasCustomTitle:Bool? = nil
 }
 extension AskChatArchive {
-    private enum CodingKeys:String,CodingKey {case id,title,updatedAt,conversation,lastActivityAt}
+    private enum CodingKeys:String,CodingKey {case id,title,updatedAt,conversation,lastActivityAt,hasCustomTitle}
     init(from decoder:any Decoder)throws {
         let c=try decoder.container(keyedBy:CodingKeys.self)
         id=try c.decode(UUID.self,forKey:.id)
@@ -45,6 +47,7 @@ extension AskChatArchive {
         updatedAt=try c.decodeIfPresent(Date.self,forKey:.updatedAt) ?? .distantPast
         conversation=try c.decode(AskConversationSnapshot.self,forKey:.conversation)
         lastActivityAt=try c.decodeIfPresent(Date.self,forKey:.lastActivityAt)
+        hasCustomTitle=try c.decodeIfPresent(Bool.self,forKey:.hasCustomTitle)
     }
 }
 struct AskChatMigration: Codable {
@@ -97,6 +100,7 @@ enum AskHistoryError: LocalizedError {
     private struct PendingChat:Codable {
         let id:UUID,title:String,updatedAt:Date,lastActivityAt:Date?,version:Int,fallbackDraftTurnID:UUID?
         let draft:Piece,turns:[TurnPiece]
+        var hasCustomTitle:Bool? = nil
     }
     private struct PendingLibrary:Codable {let version:Int,activeID:UUID,chats:[PendingChat],migration:AskChatMigration?}
     private struct PendingRoot:Codable {
@@ -243,7 +247,7 @@ enum AskHistoryError: LocalizedError {
             let turns=try chat.turns.map {entry->AskArchivedTurn in
                 let turn=try JSONDecoder().decode(AskArchivedTurn.self,from:payload(entry.piece));guard turn.id==entry.id else{throw AskHistoryError.unreadable};return turn
             }
-            return .init(id:chat.id,title:chat.title,updatedAt:chat.updatedAt,conversation:.init(version:chat.version,draft:draft,turns:turns,fallbackDraftTurnID:chat.fallbackDraftTurnID),lastActivityAt:chat.lastActivityAt)
+            return .init(id:chat.id,title:chat.title,updatedAt:chat.updatedAt,conversation:.init(version:chat.version,draft:draft,turns:turns,fallbackDraftTurnID:chat.fallbackDraftTurnID),lastActivityAt:chat.lastActivityAt,hasCustomTitle:chat.hasCustomTitle)
         }
         return .init(version:library.version,activeID:library.activeID,chats:chats,migration:library.migration)
     }
@@ -341,7 +345,7 @@ enum AskHistoryError: LocalizedError {
         }
         let chats=try value.chats.map {chat->PendingChat in
             guard chat.conversation.version==1,chat.conversation.draft.utf8.count<=Self.maximumPieceBytes,!chat.title.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty,chat.title.count<=80,Set(chat.conversation.turns.map(\.id)).count==chat.conversation.turns.count else{throw AskHistoryError.limit}
-            return .init(id:chat.id,title:chat.title,updatedAt:chat.updatedAt,lastActivityAt:chat.lastActivityAt,version:chat.conversation.version,fallbackDraftTurnID:chat.conversation.fallbackDraftTurnID,draft:try piece(Data(chat.conversation.draft.utf8)),turns:try chat.conversation.turns.map {.init(id:$0.id,piece:try piece(Self.encode($0)))})
+            return .init(id:chat.id,title:chat.title,updatedAt:chat.updatedAt,lastActivityAt:chat.lastActivityAt,version:chat.conversation.version,fallbackDraftTurnID:chat.conversation.fallbackDraftTurnID,draft:try piece(Data(chat.conversation.draft.utf8)),turns:try chat.conversation.turns.map {.init(id:$0.id,piece:try piece(Self.encode($0)))},hasCustomTitle:chat.hasCustomTitle)
         }
         var root=PendingRoot(revision:UUID(),canonical:canonical,replacement:replacement,library:.init(version:value.version,activeID:value.activeID,chats:chats,migration:value.migration),totalBytes:total,removedChatIDs:removed.isEmpty ? nil : removed.sorted {$0.uuidString<$1.uuidString})
         let debt=prior?.retired ?? []
@@ -458,7 +462,7 @@ enum AskHistoryError: LocalizedError {
                     baseline.chats.removeAll {removed.contains($0.id)}
                     if baseline.chats.isEmpty {
                         let active=value.chats.first {$0.id==value.activeID}!
-                        baseline.chats=[.init(id:active.id,title:active.title,updatedAt:active.updatedAt,conversation:.init(),lastActivityAt:active.lastActivityAt)]
+                        baseline.chats=[.init(id:active.id,title:active.title,updatedAt:active.updatedAt,conversation:.init(),lastActivityAt:active.lastActivityAt,hasCustomTitle:active.hasCustomTitle)]
                     }
                     if !baseline.chats.contains(where:{$0.id==baseline.activeID}) {baseline.activeID=baseline.chats[0].id}
                     if let migration=baseline.migration,removed.contains(migration.chatID) {baseline.migration=nil}

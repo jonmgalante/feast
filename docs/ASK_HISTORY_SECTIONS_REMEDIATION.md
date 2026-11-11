@@ -149,3 +149,69 @@ approved history projection while retaining its original local paragraph.
 No live provider, user library, credentials, deployment, configuration, recovery
 flag, TestFlight or on-device operation is part of these tests. Physical-device
 lifecycle, real CloudKit revocation and combined integration remain separate gates.
+
+## Follow-up: local History titles and Ask appearance (2026-11-11)
+
+The earlier History paragraph describes the prior privacy-remediation baseline.
+This follow-up adds local first-request display titles and a scoped appearance
+update; it does not change provider prompts, generate summaries, or add network
+work.
+
+- History uses the first request from its fresh permission-filtered local
+  projection, collapses whitespace, and truncates at a word boundary within the
+  existing compact-title budget. Rows show at most two title lines. Empty chats
+  retain their existing fallback. A preview is hidden only when it exactly equals
+  the displayed title; longer/different previews and useful status text remain.
+- Row labels, accessibility and Rename use the same safe display title. The
+  existing one-access-snapshot and verified deleted-record proof are retained.
+  History additionally rejects a private-selection request with a revoked
+  dependency even if an older response carries an independent-question marker.
+  Public independent requests and other transcript projections are unchanged.
+- Explicit Rename now persists an optional `hasCustomTitle` marker through
+  canonical/pending storage, subsequent sends, recovery and Clear. This preserves
+  deliberate names such as `New chat` or a name equal to the first request.
+  Absence remains backward-compatible: older archives still use the existing
+  title heuristic. An old deliberate name identical to an automatic title cannot
+  be distinguished retrospectively without provenance that was never stored.
+  No archive rewrite, history reorder or truncation is performed for display.
+- History, Settings (`AskPrivacyView`), activation/access, and owner Manage Access
+  use the existing adaptive Feast surface, text, divider and utility tokens plus
+  rounded typography. Utility actions are blue slate in light appearance and
+  the existing adaptive stone in dark appearance. Native disabled controls,
+  active toggle state and destructive red Revoke remain distinct. Authorization,
+  action closures, links, tasks and navigation behavior are unchanged.
+
+Validation of the final product/test source passed:
+
+- Full synthetic persistence suites in default and recovery-enabled builds, plus
+  the focused existing whole-library History privacy regression. The runner used
+  the repository's compiler/source list, retained disposable artifacts and ran
+  the focused case before the complete suite. Full runs had no real-store input
+  or test-selection environment override.
+- Added title tests cover local/public requests, whitespace and Unicode,
+  word-boundary truncation, empty/draft chats, exact duplicate versus longer
+  previews, useful statuses, permission refresh/revocation and legacy provenance,
+  accessibility, and read-only archive/order preservation. Manual-title tests
+  include Rename to `New chat` and the exact first request, later sends/relaunch,
+  denied access, pending/canonical round trips, and Clear/relaunch/send. Existing
+  interrupted-Clear and pending-store fault tests also assert the manual marker.
+- Backend suite: 436 passed, zero failures. Backend source is unchanged.
+- Debug iOS-simulator and unsigned Release iPhoneOS builds succeeded. The
+  repository's actual Release-app first-send harness passed its offline, answer,
+  and 2,000-synthetic-place cases using its injected local transport.
+- Synthetic iPhone 17 Pro / iOS 26.1 screenshots were inspected in light/dark and
+  normal/accessibility3 text sizes, including Settings, inactive access, owner
+  access, and Manage Access. The large-text fixture applies its environment
+  inside presented sheets as well as standalone roots. Native control colors,
+  disabled Activate/Create invitation, active toggle, red Revoke, wrapping and
+  two-line History titles were checked.
+- Interactive synthetic checks passed History → Settings → Back; Rename Cancel;
+  Delete confirmation dismissal with all four rows/order retained; History →
+  Access → Close; and owner Access → Manage → Revoke confirmation dismissal →
+  Back, with the synthetic member still Active. No destructive change was
+  confirmed. `git diff --check` passed.
+
+These are local synthetic checks, not physical-device, VoiceOver interaction,
+live account/activation, real CloudKit revocation, deployment or TestFlight
+verification. Live service configuration was stripped from UI and Release-smoke
+fixtures; the real collection and unrelated simulator data were not used.

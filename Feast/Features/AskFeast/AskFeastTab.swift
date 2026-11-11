@@ -405,6 +405,7 @@ private struct AskSourceDetails: View {
 
 
 private struct AskChatHistoryView: View {
+    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var session: AskSession
     let onlineConfigured:Bool
@@ -433,8 +434,11 @@ private struct AskChatHistoryView: View {
                     Button("Delete chat",role:.destructive) { if let id=deleting { _ = session.deleteChat(id) };deleting=nil }
                     Button("Cancel",role:.cancel) { deleting=nil }
                 } message: { Text("This removes the chat’s messages. Saved changes and their local Undo history are kept.") }
+                .toolbarBackground(FeastTheme.AdaptiveColors.groupedBackground,for:.navigationBar)
+                .toolbarColorScheme(colorScheme,for:.navigationBar)
                 .onAppear { session.flushHistory() }
         }
+        .tint(FeastTheme.AdaptiveColors.utilityAction)
     }
     private var historyList: some View {
         List {
@@ -442,12 +446,22 @@ private struct AskChatHistoryView: View {
                 NavigationLink { AskPrivacyView(onlineConfigured:onlineConfigured) } label: { Label("Settings",systemImage:"gearshape") }
                 if accessAvailable {
                     Button(action:showAccess) {Label("Ask Feast access",systemImage:"key")}
+                        .foregroundStyle(FeastTheme.AdaptiveColors.utilityAction)
                         .accessibilityIdentifier("ask.activate")
                 }
             }
+            .listRowBackground(FeastTheme.AdaptiveColors.surfaceBackground)
+            .listRowSeparatorTint(FeastTheme.AdaptiveColors.dividerBorder)
             ForEach(orderedChats) { chat in historyRow(chat) }
-            if let error = session.historyError { Text(error).font(.footnote).foregroundStyle(.secondary) }
+            if let error = session.historyError {
+                Text(error).font(FeastTheme.Typography.formHelper).foregroundStyle(FeastTheme.AdaptiveColors.secondaryText)
+                    .listRowBackground(FeastTheme.AdaptiveColors.surfaceBackground)
+            }
         }
+        .font(FeastTheme.Typography.body)
+        .foregroundStyle(FeastTheme.AdaptiveColors.primaryText)
+        .scrollContentBackground(.hidden)
+        .background(FeastTheme.AdaptiveColors.groupedBackground)
     }
     private func beginRename(_ id:UUID) {
         // Recheck if permissions changed after the row was rendered.
@@ -460,15 +474,17 @@ private struct AskChatHistoryView: View {
         } label: {
             HStack {
                 VStack(alignment:.leading,spacing:FeastTheme.Spacing.xSmall) {
-                    Text(chat.title).foregroundStyle(.primary).lineLimit(2)
-                    Text(chat.date).font(.caption).foregroundStyle(.secondary)
-                    Text(chat.preview).font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
-                    if session.unsavedHistoryChatIDs.contains(chat.id) {Text("Not saved").font(.caption).foregroundStyle(.secondary)}
+                    Text(chat.title).font(FeastTheme.Typography.body.weight(.semibold)).foregroundStyle(FeastTheme.AdaptiveColors.primaryText).lineLimit(2)
+                    Text(chat.date).font(FeastTheme.Typography.caption).foregroundStyle(FeastTheme.AdaptiveColors.secondaryText)
+                    if let preview=chat.visiblePreview {Text(preview).font(FeastTheme.Typography.supporting).foregroundStyle(FeastTheme.AdaptiveColors.secondaryText).lineLimit(2)}
+                    if session.unsavedHistoryChatIDs.contains(chat.id) {Text("Not saved").font(FeastTheme.Typography.caption).foregroundStyle(FeastTheme.AdaptiveColors.secondaryText)}
                 }
                 Spacer()
-                if chat.id == session.activeChatID { Image(systemName:"checkmark").accessibilityLabel("Current chat") }
+                if chat.id == session.activeChatID { Image(systemName:"checkmark").foregroundStyle(FeastTheme.AdaptiveColors.utilityAction).accessibilityLabel("Current chat") }
             }
         }
+        .listRowBackground(FeastTheme.AdaptiveColors.surfaceBackground)
+        .listRowSeparatorTint(FeastTheme.AdaptiveColors.dividerBorder)
         .accessibilityLabel(chat.accessibilityLabel+(session.unsavedHistoryChatIDs.contains(chat.id) ? ". Not saved" : ""))
         .accessibilityHint(session.unsavedHistoryChatIDs.contains(chat.id) ? "Open this conversation. Newer changes are not saved." : "Open this saved conversation")
         .accessibilityActions {

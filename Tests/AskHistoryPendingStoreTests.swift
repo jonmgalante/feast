@@ -12,6 +12,7 @@ import CryptoKit
         func check(_ value:Bool,_ name:String) {precondition(value,name);checks+=1;print("PASS pending history: "+name)}
         func fixture(_ name:String)throws->(AskConversationStore,AskChatLibrary) {
             let store=AskConversationStore(url:root.appendingPathComponent(name+".json"));var value=try store.loadLibrary();value.chats[0].conversation.draft=String(repeating:"preserved é 🧭\n",count:500)
+            value.chats[0].title="New chat";value.chats[0].hasCustomTitle=true
             return (store,value)
         }
         // Faults are real file-operation boundaries, not a store that lies about success.
