@@ -62,10 +62,13 @@ struct AskLocalIndex: Sendable {
     let records: [AskCollectionRecord]
     private let personalPlaces: [AskPersonalPlace]
     let catalogComplete: Bool
-    init(records: [AskCollectionRecord], visibleCityIDs: Set<String>, visibleNoteIDs: Set<String>, scope: AskDataScope = .synthetic, personalPlaces: [AskPersonalPlace] = [], catalogComplete: Bool = true) {
+    /// Fresh local access set, including city/neighborhood identities used by history.
+    let historyAccessIDs:Set<String>
+    init(records: [AskCollectionRecord], visibleCityIDs: Set<String>, visibleNoteIDs: Set<String>, scope: AskDataScope = .synthetic, personalPlaces: [AskPersonalPlace] = [], catalogComplete: Bool = true, visibleSectionIDs:Set<String> = []) {
         self.scope = scope
         self.catalogComplete = catalogComplete
         self.personalPlaces = personalPlaces
+        self.historyAccessIDs=Set(records.filter {visibleCityIDs.contains($0.cityID)}.map(\.id)).union(visibleCityIDs).union(visibleSectionIDs)
         self.records = records.filter { visibleCityIDs.contains($0.cityID) }.map { record in
             AskCollectionRecord(id: record.id, cityID: record.cityID, city: scope == .savedMetadata ? "" : record.city, name: record.name,
                 neighborhood: scope == .savedMetadata ? "" : record.neighborhood, cuisine: record.cuisine, status: scope == .savedMetadata ? "" : record.status,
@@ -157,8 +160,15 @@ struct AskRequest: Codable, Equatable, Sendable {
     var pendingActions:[AskCollectionAction] = []
     var publicResearch:[AskRetainedResearch] = []
     var mapChoices:[AskMapChoice] = []
+    // Local-only provenance and complete, permission-checked retrieval text.
+    // Neither is encoded into AskConversationStep or any external task projection.
+    var collectionHistory:[AskHistoryMessage]? = nil
+    var publicHistory:[AskHistoryMessage]? = nil
+    var retainedChannelDependencies:[String:[String]]? = nil
+    var referenceSections:[AskQuerySection]? = nil
+    var referenceSectionsTurnID:UUID? = nil
     func collectionReadVersion() -> Self {
-        .init(mode:.collection,text:text,fromOCR:fromOCR,previousQuestion:previousQuestion,attachment:attachment,referencedIDs:referencedIDs,referenceOnly:referenceOnly,libraryContext:libraryContext,referencedWebPlaces:referencedWebPlaces,verifiedFindings:verifiedFindings,performanceID:performanceID,providerRetry:providerRetry,recentQuestions:recentQuestions,agentTask:agentTask,conversationID:conversationID,dialogue:dialogue,collectionDialogue:collectionDialogue,collectionDialogueIDs:collectionDialogueIDs,collectionContinuation:collectionContinuation,pendingActions:pendingActions,publicResearch:publicResearch,mapChoices:mapChoices)
+        .init(mode:.collection,text:text,fromOCR:fromOCR,previousQuestion:previousQuestion,attachment:attachment,referencedIDs:referencedIDs,referenceOnly:referenceOnly,libraryContext:libraryContext,referencedWebPlaces:referencedWebPlaces,verifiedFindings:verifiedFindings,performanceID:performanceID,providerRetry:providerRetry,recentQuestions:recentQuestions,agentTask:agentTask,conversationID:conversationID,dialogue:dialogue,collectionDialogue:collectionDialogue,collectionDialogueIDs:collectionDialogueIDs,collectionContinuation:collectionContinuation,pendingActions:pendingActions,publicResearch:publicResearch,mapChoices:mapChoices,collectionHistory:collectionHistory,publicHistory:publicHistory,retainedChannelDependencies:retainedChannelDependencies,referenceSections:referenceSections,referenceSectionsTurnID:referenceSectionsTurnID)
     }
     var retrievalText: String {
         guard mode != .importText, let previousQuestion else { return text }
@@ -193,11 +203,27 @@ struct AskAnswerParagraph: Codable, Identifiable, Equatable, Sendable {
     var representedField:String? = nil
     var transientToolStatus:Bool? = nil
     var operationStatus:Bool? = nil
+    /// Local fragment dependencies. nil is legacy/unknown, never an empty grant.
+    var historyRecordIDs:[String]? = nil
+    func renamed(_ value:String)->Self {.init(id:value,spans:spans,sourceIDs:sourceIDs,citations:citations,citationsAreResearchPool:citationsAreResearchPool,representedField:representedField,transientToolStatus:transientToolStatus,operationStatus:operationStatus,historyRecordIDs:historyRecordIDs)}
 }
 enum AskResponseLayout:String,Codable,Sendable {case direct,list,lookup,clarification,action}
 struct AskCollectionPage:Codable,Equatable,Sendable {
     let snapshot:String,totalCount:Int,offset:Int,returnedCount:Int,nextOffset:Int?
     static let maximumRenderedRecords=2400 // 12 tool steps × 200; longer tasks stay explicitly partial.
+    var valid:Bool {snapshot.count==64 && snapshot.allSatisfy(\.isHexDigit) && offset>=0 && returnedCount>=0 && totalCount>=offset && returnedCount<=totalCount-offset && (nextOffset==nil ? offset+returnedCount==totalCount : nextOffset==offset+returnedCount && nextOffset!<totalCount)}
+}
+/// One native query's local identity, membership and displayed occurrences.
+/// Independent sections are never flattened into a single mutation scope.
+struct AskQuerySection:Codable,Equatable,Sendable {
+    let id:String,entity:String
+    var context:AskLibraryContext?
+    var page:AskCollectionPage?
+    var selectionIDs:[String]
+    var ordered:Bool
+    var displayOrder:[String]?
+    var paragraphIDs:[String]
+    let displayed:Bool
 }
 struct AskResponse: Codable, Equatable, Sendable {
     var summary: String
@@ -223,12 +249,15 @@ struct AskResponse: Codable, Equatable, Sendable {
     var publicConversationText:String? = nil
     var collectionConversationText:String? = nil
     var collectionPage:AskCollectionPage? = nil
+    var querySections:[AskQuerySection]? = nil
     var publicResearch:[AskRetainedResearch]? = nil
     var mapChoices:[AskMapChoice]? = nil
     var pendingProposal:AskChangeProposal? = nil
     var executionStatus:String? = nil
     var operationRecords:[AskOperationRecord]? = nil
     var undoFailures:[String:String]? = nil
+    var historyRecordIDs:[String]? = nil
+    var retainsIndependentQuestion:Bool? = nil
     /// Refresh only the executor's generated review status, never model prose.
     mutating func refreshCollectionReviewStatus() {
         guard let actions=collectionActions,!actions.isEmpty,!actions.contains(where:{$0.state == .ready || $0.state == .needsConfirmation}) else{return}
@@ -238,14 +267,27 @@ struct AskResponse: Codable, Equatable, Sendable {
         else {return}
         for i in paragraphs.indices where paragraphs[i].id=="agent-message" && ["Review this change before applying it.","Saved.","Undone."].contains(where:{paragraphs[i].spans == [.text($0)]}) {
             let old=paragraphs[i]
-            paragraphs[i] = .init(id:old.id,spans:[.text(text)],sourceIDs:old.sourceIDs,citations:old.citations,citationsAreResearchPool:old.citationsAreResearchPool,representedField:old.representedField,transientToolStatus:old.transientToolStatus,operationStatus:old.operationStatus)
+            paragraphs[i] = .init(id:old.id,spans:[.text(text)],sourceIDs:old.sourceIDs,citations:old.citations,citationsAreResearchPool:old.citationsAreResearchPool,representedField:old.representedField,transientToolStatus:old.transientToolStatus,operationStatus:old.operationStatus,historyRecordIDs:old.historyRecordIDs)
             if ["Review this change before applying it.","Saved.","Undone."].contains(summary) {summary=text}
         }
+    }
+    var nativeContexts:[AskLibraryContext] {querySections?.compactMap(\.context) ?? libraryContext.map {[$0]} ?? []}
+    var nativeMembership:Set<String> {Set(nativeContexts.flatMap(\.ids))}
+    var hasPagedNativeResults:Bool {collectionPage != nil || querySections?.contains {$0.page != nil}==true}
+    var nativeAuthoritySection:AskQuerySection? {
+        guard let querySections else{return nil}
+        let shown=querySections.filter(\.displayed)
+        return shown.count==1 ? shown[0] : shown.isEmpty && querySections.count==1 ? querySections[0] : nil
+    }
+    var ambiguousNativeSections:Bool {querySections?.isEmpty==false && nativeAuthoritySection==nil}
+    mutating func refreshNativeAuthority() {
+        guard querySections != nil else{return}
+        libraryContext=nativeAuthoritySection?.context;collectionPage=nativeAuthoritySection?.page
     }
     /// Retained findings are independently verified evidence, not necessarily
     /// prose mentions or native query members. They never grant edit authority.
     var supplementalFindingIDs:Set<String> {
-        Set((verifiedPublicFindings ?? []).map(\.recordID)).subtracting(Set(libraryContext?.ids ?? []))
+        Set((verifiedPublicFindings ?? []).map(\.recordID)).subtracting(nativeMembership)
     }
     /// Shared admission/archive bounds: additional display evidence never consumes
     /// native query membership, and cannot enlarge that membership by declaration.
@@ -255,22 +297,35 @@ struct AskResponse: Codable, Equatable, Sendable {
         let referenced=Set(paragraphs.flatMap(\.spans).compactMap {span->String? in if case .place(let id)=span{return id};return nil})
         guard candidateIDs.count==candidates.count,mentions.count<=Self.maximumAnswerMentions,
               mentionSet.count==mentions.count,mentionSet.isSubset(of:candidateIDs),mentionSet.isSubset(of:referenced),
-              mentionSet.isDisjoint(with:Set(libraryContext?.ids ?? [])),mentions.isEmpty || usesLocalCatalog,
+              mentionSet.isDisjoint(with:nativeMembership),mentions.isEmpty || usesLocalCatalog,
               supplemental.count<=24,supplemental.isSubset(of:candidateIDs),
               libraryContext == nil || supplemental.isEmpty || usesLocalCatalog else{return nil}
         let extra=mentionSet.union(supplemental)
-        if let context=libraryContext {
+        if let sections=querySections {
+            let paragraphIDs=Set(paragraphs.map(\.id))
+            guard !sections.isEmpty,sections.count<=100,Set(sections.map(\.id)).count==sections.count,
+                  sections.allSatisfy({section in
+                      section.id.count==64 && section.id.allSatisfy(\.isHexDigit) && ["place","city","neighborhood"].contains(section.entity) &&
+                      Set(section.selectionIDs).count==section.selectionIDs.count && section.selectionIDs.allSatisfy {UUID(uuidString:$0) != nil} &&
+                      Set(section.paragraphIDs).count==section.paragraphIDs.count && Set(section.paragraphIDs).isSubset(of:paragraphIDs) && (section.page?.valid ?? true) && (section.context?.validDisplayOrder ?? true) &&
+                      (!section.ordered || section.selectionIDs.count<=AskCollectionPage.maximumRenderedRecords) &&
+                      (section.displayOrder.map {section.ordered && $0.count<=section.selectionIDs.count*20 && Set($0)==Set(section.selectionIDs)} ?? true) &&
+                      (section.context.map {Set($0.ids).isSubset(of:Set(section.selectionIDs))} ?? true)
+                  }),nativeMembership==candidateIDs.subtracting(extra) else{return nil}
+        } else if let context=libraryContext {
             guard context.validDisplayOrder,Set(context.ids).count==context.ids.count,
                   context.ids==candidates.map(\.id).filter({!extra.contains($0)}) else{return nil}
         }
-        return libraryContext == nil ? [] : extra
+        return libraryContext == nil && querySections==nil ? [] : extra
     }
     var maximumArchiveSources:Int {
-        usesLocalCatalog ? (collectionPage != nil ? AskCollectionPage.maximumRenderedRecords : 200)+(archiveAdditionalIDs?.count ?? 0) : 60
+        usesLocalCatalog ? (hasPagedNativeResults ? AskCollectionPage.maximumRenderedRecords : 200)+(archiveAdditionalIDs?.count ?? 0) : 60
     }
     var hasArchiveCompatibleBounds:Bool {
         guard let extra=archiveAdditionalIDs else{return false}
-        let nativeLimit=collectionPage != nil ? AskCollectionPage.maximumRenderedRecords : usesLocalCatalog ? 200 : 6
+        func validDependencies(_ ids:[String]?)->Bool {ids.map {Set($0).count==$0.count && $0.allSatisfy {UUID(uuidString:$0) != nil}} ?? true}
+        guard validDependencies(historyRecordIDs),paragraphs.allSatisfy({validDependencies($0.historyRecordIDs)}) else{return false}
+        let nativeLimit=hasPagedNativeResults ? AskCollectionPage.maximumRenderedRecords : usesLocalCatalog ? 200 : 6
         let usedSources=Set(candidates.flatMap(\.sourceIDs)+paragraphs.flatMap(\.sourceIDs))
         return summary.count<=3000 && candidates.count-extra.count<=nativeLimit &&
             paragraphs.count<=(usesLocalCatalog ? 4001 : 8) && usedSources.count<=maximumArchiveSources
@@ -420,7 +475,7 @@ struct AskReadTools: Sendable {
                 for source in candidate.sourceIDs where !sourceIDs.contains(source) {sourceIDs.append(source)}
                 return .place(id)
             }
-            return .init(id:paragraph.id,spans:spans,sourceIDs:sourceIDs,citations:paragraph.citations,citationsAreResearchPool:paragraph.citationsAreResearchPool,representedField:paragraph.representedField,transientToolStatus:paragraph.transientToolStatus)
+            return .init(id:paragraph.id,spans:spans,sourceIDs:sourceIDs,citations:paragraph.citations,citationsAreResearchPool:paragraph.citationsAreResearchPool,representedField:paragraph.representedField,transientToolStatus:paragraph.transientToolStatus,operationStatus:paragraph.operationStatus,historyRecordIDs:paragraph.historyRecordIDs)
         }
         response.listedCandidateIDs=response.listedCandidateIDs.map {$0.filter {available.contains($0)}}
         response.fieldActions=response.fieldActions.map {$0.filter {available.contains($0.finding.recordID)}}
@@ -440,11 +495,11 @@ struct AskReadTools: Sendable {
         let referenced=Set(response.paragraphs.flatMap(\.spans).compactMap {span->String? in if case .place(let id)=span {return id};return nil})
         guard mentions.count<=AskResponse.maximumAnswerMentions,mentionSet.count==mentions.count,
               mentionSet.isSubset(of:candidateIDs),mentionSet.isSubset(of:referenced),
-              mentionSet.isDisjoint(with:Set(response.libraryContext?.ids ?? [])),mentions.isEmpty || response.usesLocalCatalog else {throw rejected(.answerMentions)}
+              mentionSet.isDisjoint(with:response.nativeMembership),mentions.isEmpty || response.usesLocalCatalog else {throw rejected(.answerMentions)}
         let listing = response.usesLocalCatalog ? AskCollectionListingPlan.make(request, places: index.personalCatalog) : nil
         let localTool = response.usesLocalCatalog && (response.libraryContext != nil || response.agentTask != nil)
         let localListing = listing != nil || localTool
-        guard response.summary.count <= 3_000, response.candidates.count - (response.libraryContext == nil ? 0 : extraIDs.count) <= (response.collectionPage != nil ? AskCollectionPage.maximumRenderedRecords : localListing ? 200 : 6),
+        guard response.summary.count <= 3_000, response.candidates.count - (response.libraryContext == nil && response.querySections==nil ? 0 : extraIDs.count) <= (response.hasPagedNativeResults ? AskCollectionPage.maximumRenderedRecords : localListing ? 200 : 6),
               Set(response.candidates.map(\.id)).count == response.candidates.count else { throw rejected(.responseBounds) }
         let available = response.usesLocalCatalog ? localEvidence : evidence
         let catalog = Dictionary(uniqueKeysWithValues: available.candidates.map { ($0.id, $0) })
@@ -454,8 +509,9 @@ struct AskReadTools: Sendable {
                   Set(candidate.sourceIDs).isSubset(of: sources),
                   candidate.facts.allSatisfy({ candidate.sourceIDs.contains($0.sourceID) }) else { throw rejected(.candidateEvidence) }
         }
-        if let context = response.libraryContext {
-            guard context.validDisplayOrder,context.ids.count <= (response.collectionPage != nil ? AskCollectionPage.maximumRenderedRecords : 200), Set(context.ids).count == context.ids.count, context.ids == response.candidates.map(\.id).filter({!extraIDs.contains($0)}) else { throw rejected(.queryMembership) }
+        if response.querySections != nil {guard response.nativeMembership==candidateIDs.subtracting(extraIDs) else{throw rejected(.queryMembership)}}
+        for context in response.nativeContexts {
+            guard context.validDisplayOrder,context.ids.count <= (response.hasPagedNativeResults ? AskCollectionPage.maximumRenderedRecords : 200), Set(context.ids).count == context.ids.count, response.querySections != nil || context.ids == response.candidates.map(\.id).filter({!extraIDs.contains($0)}) else { throw rejected(.queryMembership) }
             if let selection=context.selectionIDs {
                 guard response.usesLocalCatalog,[AskLibraryPlan.Operation.count,.group].contains(context.filters.operation),Set(selection).count == selection.count,Set(selection).isSubset(of:Set(index.personalCatalog.map(\.id))) else { throw rejected(.aggregateMembership) }
             }
@@ -500,7 +556,7 @@ struct AskReadTools: Sendable {
         var characters = 0
         for paragraph in response.paragraphs {
             guard paragraph.citations.count <= (localTool ? 20 : 6), paragraph.citations.allSatisfy({ $0.safeURL != nil && $0.title.count <= 200 }) else { throw rejected(.citations) }
-            guard !paragraph.id.isEmpty, paragraph.id.count <= 80, (1...(response.collectionPage != nil ? 4801 : localTool ? 401 : 24)).contains(paragraph.spans.count),
+            guard !paragraph.id.isEmpty, paragraph.id.count <= 80, (1...(response.hasPagedNativeResults ? 4801 : localTool ? 401 : 24)).contains(paragraph.spans.count),
                   Set(paragraph.sourceIDs).count == paragraph.sourceIDs.count,
                   Set(paragraph.sourceIDs).isSubset(of: returnedSources) else { throw rejected(.paragraphEvidence) }
             for span in paragraph.spans {
@@ -513,7 +569,7 @@ struct AskReadTools: Sendable {
                 }
             }
         }
-        guard characters <= (response.collectionPage != nil ? 720_000 : localListing ? 60_000 : 3_000) else { throw rejected(.answerLength) }
+        guard characters <= (response.hasPagedNativeResults ? 720_000 : localListing ? 60_000 : 3_000) else { throw rejected(.answerLength) }
         // Retain the precise existing evidence/membership rejection reason, then
         // ensure every accepted response also meets the shared archive envelope.
         guard response.hasArchiveCompatibleBounds else {throw rejected(.responseBounds)}
@@ -635,6 +691,7 @@ struct AskTurn: Identifiable, Equatable {
     var refreshIndex:(()throws->AskLocalIndex)?
     var collectionExecutor:((UUID,Bool)throws->AskCollectionAction)?
     var collectionStatus:((UUID)throws->AskCollectionAction)?
+    var historyDeletedRecordIDs:((UUID,[UUID])throws->Set<String>)?
     var collectionReceipts:((UUID)throws->[AskCollectionAction])?
     var collectionRecovery:((UUID)throws->[AskRecoveredActionTurn])?
     var collectionClear:((UUID)throws->Void)?
@@ -685,7 +742,32 @@ struct AskTurn: Identifiable, Equatable {
         guard !isLoading,recoveryTasks.isEmpty else{return false};provider=next;return true
     }
     func updateIndex(_ index: AskLocalIndex) { self.index = index }
-    func source(_ id: String) -> AskSource? { turns.reversed().flatMap(\.sources).first { $0.id == id } }
+    func presentedTurns()->[AskTurn] {
+        let permitted=refreshIndex==nil ? index.historyAccessIDs : ((try? refreshIndex?())?.historyAccessIDs ?? [])
+        return presented(turns,permitted:permitted)
+    }
+    private func presented(_ values:[AskTurn],permitted:Set<String>)->[AskTurn] {
+        let legacy=values.compactMap(\.response).reduce(into:Set<String>()) {$0.formUnion(AskConversationProjection.dependencies($1))}
+        return values.map {turn in
+            var access=permitted
+            if let historyDeletedRecordIDs,let deleted=try? historyDeletedRecordIDs(turn.id,(turn.response?.collectionActions ?? []).map(\.id)) {access.formUnion(deleted)}
+            return AskConversationProjection.presented(turn,permitted:access,legacyDependencies:legacy)
+        }
+    }
+    func historyRows()->[AskChatHistoryRow] {
+        let permitted=refreshIndex==nil ? index.historyAccessIDs : ((try? refreshIndex?())?.historyAccessIDs ?? [])
+        return AskHistoryPresentation.ordered(chats).map {chat in
+            let visible=presented(chat.conversation.turns.map(\.turn),permitted:permitted)
+            // Classify automatic/manual title on the ORIGINAL archive. Projecting
+            // its first question first would misclassify the old automatic title.
+            let questions=Dictionary(uniqueKeysWithValues:visible.map {($0.id,$0.request.text)})
+            let hiddenQuestion=chat.conversation.turns.first.map {questions[$0.id] != $0.question} ?? false
+            let title=AskHistoryPresentation.title(chat,questionUnavailable:hiddenQuestion)
+            return .init(id:chat.id,title:title,preview:AskHistoryPresentation.preview(chat,presentedResponse:visible.last?.response,presentedQuestions:questions),date:AskHistoryPresentation.date(chat))
+        }
+    }
+    func presentedTurn(_ turn:AskTurn)->AskTurn {presentedTurns().first {$0.id==turn.id} ?? AskConversationProjection.presented(turn,permitted:[])}
+    func source(_ id: String) -> AskSource? { presentedTurns().reversed().flatMap(\.sources).first { $0.id == id } }
     func runAutomatically() {
         let exactPublicReference = turns.last(where: { $0.status == .complete })?.response.map { ($0.referenceWebPlaces ?? $0.webPlaces).contains { $0.name.caseInsensitiveCompare(input.trimmingCharacters(in: .whitespacesAndNewlines)) == .orderedSame } } == true
         let resolved = exactPublicReference ? AskMode.discovery : AskIntentRouter.mode(for: input, fromOCR: fromOCR,
@@ -731,15 +813,17 @@ struct AskTurn: Identifiable, Equatable {
         contextual.conversationID=activeChatID
         contextual.dialogue=AskConversationProjection.messages(turns)
         contextual.collectionDialogue=AskConversationProjection.messages(turns,fullCollection:true)
-        contextual.collectionContinuation=turns.last(where:{$0.status == .complete})?.response.flatMap {$0.collectionPage?.nextOffset != nil ? $0 : nil}
+        contextual.collectionHistory=AskConversationProjection.retainedMessages(turns)
+        contextual.publicHistory=AskConversationProjection.publicRetainedMessages(turns)
+        contextual.retainedChannelDependencies=AskConversationProjection.channelDependencies(turns)
+        contextual.collectionContinuation=turns.last(where:{$0.status == .complete})?.response.flatMap {$0.collectionPage?.nextOffset != nil || $0.querySections?.contains(where:{$0.page?.nextOffset != nil})==true ? $0 : nil}
         contextual.collectionDialogueIDs=Array(Set(turns.compactMap(\.response).flatMap {($0.agentTask?.selectionIDs ?? $0.agentTask?.orderedIDs ?? [])+$0.candidates.map(\.id)}))
         contextual.pendingActions=Array(turns.compactMap(\.response).flatMap {$0.collectionActions ?? []}.filter {$0.state == .needsConfirmation}.suffix(24))
-        if !contextual.pendingActions.isEmpty {
-            contextual.dialogue.append(.init(role:"assistant",text:"Pending native reviews: "+contextual.pendingActions.map {"\($0.id.uuidString) \($0.entity) \($0.operation)"}.joined(separator:"; ")))
-            contextual.dialogue=Array(contextual.dialogue.suffix(200))
-        }
         contextual.recentQuestions=AskSemanticContext.recentQuestions(turns)
         contextual.agentTask=turns.last(where:{$0.status == .complete && $0.readContextMode == .collection})?.response?.agentTask
+        let sectionTurn=turns.last(where:{$0.status == .complete}).flatMap {$0.readContextMode == .collection ? $0 : nil}
+        contextual.referenceSections=sectionTurn?.response?.querySections
+        contextual.referenceSectionsTurnID=sectionTurn?.id
         var findingKeys=Set<String>()
         var recentFindings:[AskVerifiedFinding]=[]
         let accepted=turns.filter {$0.status == .complete}.suffix(6)
@@ -753,9 +837,9 @@ struct AskTurn: Identifiable, Equatable {
         contextual.verifiedFindings=recentFindings
         contextual.publicResearch=Array(accepted.flatMap {$0.response?.publicResearch ?? []}.uniquedResearch().suffix(4))
         contextual.mapChoices=selectedChoices ?? Array(accepted.reversed().compactMap {$0.response?.mapChoices}.first ?? [])
-        contextual.dialogue += contextual.publicResearch.map { .init(role:"assistant",text:$0.projection) }
-        if !contextual.mapChoices.isEmpty {contextual.dialogue += contextual.mapChoices.enumerated().map {i,c in .init(role:"assistant",text:AskConversationProjection.bounded("Pending Apple Maps choice "+String(i+1)+" (data, not permission): "+c.projection))}}
-        contextual.collectionDialogue += contextual.dialogue.filter {$0.text.hasPrefix("Public research evidence") || $0.text.hasPrefix("Pending Apple Maps") || $0.text.hasPrefix("Pending native reviews")}
+        let extras=AskConversationProjection.channelMessages(contextual)
+        contextual.dialogue += extras.map(\.message)
+        contextual.collectionDialogue += extras.map(\.message)
         contextual.collectionDialogue=Array(contextual.collectionDialogue.suffix(200))
         contextual.dialogue=Array(contextual.dialogue.suffix(200))
         do { _ = try contextual.validated() } catch { self.error = error.localizedDescription; return }
@@ -775,8 +859,9 @@ struct AskTurn: Identifiable, Equatable {
         do {if let receipts=try collectionReceipts?(id),!receipts.isEmpty {error=AskRetryError.mutations.localizedDescription;return}}catch {self.error=AskRetryError.unverified.localizedDescription;return}
         if !(turn.response?.collectionActions ?? []).isEmpty || (turn.response?.fieldActions ?? []).contains(where:{$0.outcome == .saved}) {error=AskRetryError.mutations.localizedDescription;return}
         var request=turn.request
-        if let position=turns.firstIndex(where:{$0.id==id}) {request.dialogue=AskConversationProjection.messages(Array(turns.prefix(position)));request.collectionDialogue=AskConversationProjection.messages(Array(turns.prefix(position)),fullCollection:true)}
+        if let position=turns.firstIndex(where:{$0.id==id}) {request.dialogue=AskConversationProjection.messages(Array(turns.prefix(position)));request.collectionDialogue=AskConversationProjection.messages(Array(turns.prefix(position)),fullCollection:true);request.collectionHistory=AskConversationProjection.retainedMessages(Array(turns.prefix(position)));request.publicHistory=AskConversationProjection.publicRetainedMessages(Array(turns.prefix(position)))}
         request.performanceID=id;request.providerRetry=true;request.conversationID=activeChatID
+        request.retainedChannelDependencies=AskConversationProjection.channelDependencies(turns)
         if let response=turn.response {
             request.publicResearch=response.publicResearch ?? request.publicResearch
             request.verifiedFindings=response.verifiedPublicFindings ?? request.verifiedFindings
@@ -812,7 +897,9 @@ struct AskTurn: Identifiable, Equatable {
             }
             defer {if trace.snapshot().outcome == .running {trace.finish(Task.isCancelled ? .cancelled : .failed)};trace.elapsed(.taskExit,since:startedAt);Task {await AskPerformanceRecorder.shared.recordPipeline(trace.snapshot())}}
             do {
-                let result = try await AskPipelineScope.$trace.withValue(trace) {try await provider.answer(request, tools: tools)}
+                let result = try await AskProviderAttemptScope.$store.withValue(providerAttempts) {
+                    try await AskPipelineScope.$trace.withValue(trace) {try await provider.answer(request, tools: tools)}
+                }
                 let retryTicket=try? await providerAttempts.archiveTicket(turn:id)
                 try Task.checkCancellation()
                 if let self,let recoveryStore=self.recoveryStore {

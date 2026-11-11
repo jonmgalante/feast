@@ -138,6 +138,12 @@ extension AskResponse {
     }
 }
 
+/// Display-only History values. Raw archived text never reaches row controls.
+struct AskChatHistoryRow:Identifiable {
+    let id:UUID
+    let title,preview,date:String
+    var accessibilityLabel:String {title+", "+date+". "+preview}
+}
 enum AskHistoryPresentation {
     static func compact(_ text:String, limit:Int) -> String {
         let clean=text.split(whereSeparator:{$0.isWhitespace}).joined(separator:" ")
@@ -145,28 +151,34 @@ enum AskHistoryPresentation {
         let prefix=String(clean.prefix(limit));let boundary=prefix.lastIndex(of:" ")
         return (boundary.map {String(prefix[..<$0])} ?? prefix)+"…"
     }
-    static func title(_ chat:AskChatArchive)->String {
+    static func title(_ chat:AskChatArchive,questionUnavailable:Bool=false)->String {
         let first=chat.conversation.turns.first
         let auto=chat.title=="New chat" || first.map {chat.title==String($0.question.prefix(80))}==true
         guard auto else{return chat.title}
+        guard !questionUnavailable else{return "Collection conversation"}
         guard let first else{return "New chat"}
         let projected=AskConversationProjection.messages([first.turn]).first(where:{$0.role=="user"})?.text
         guard let projected,projected != AskConversationProjection.omittedHuman else{return "Collection conversation"}
         return compact(projected,limit:56)
     }
-    static func preview(_ chat:AskChatArchive)->String {
+    static func preview(_ chat:AskChatArchive,presentedResponse:AskResponse?=nil,presentedQuestions:[UUID:String]?=nil)->String {
         guard !chat.conversation.turns.isEmpty else{return chat.conversation.draft.isEmpty ? "No messages yet" : "Draft message"}
         if let last=chat.conversation.turns.last {
-            let operations=AskOperationPresentation.make(response:last.response,turnID:last.id)
+            let displayed=presentedResponse ?? last.response
+            let operations=AskOperationPresentation.make(response:displayed,turnID:last.id)
             if !operations.isEmpty {return compact(operations.map {$0.title(names:[:])}.joined(separator:"; "),limit:120)}
             if last.response.publicConversationText != nil,last.response.agentTask?.privateSelection != true,last.response.libraryContext?.excludesExternalReferences != true {
-                for paragraph in last.response.substantiveParagraphs where paragraph.id != "library-city-heading" && paragraph.transientToolStatus != true {
-                    let clean=String(AskMarkdownPresentation.inline(paragraph,candidates:last.response.candidates).characters)
+                for paragraph in displayed.substantiveParagraphs where paragraph.id != "library-city-heading" && paragraph.transientToolStatus != true {
+                    let clean=String(AskMarkdownPresentation.inline(paragraph,candidates:displayed.candidates).characters)
                     if !clean.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty {return compact(clean,limit:120)}
                 }
             }
         }
         for turn in chat.conversation.turns.reversed() {
+            // Unknown-provenance legacy questions may be hidden even when their
+            // old archive forgot the private-selection flag. Never fall back to
+            // that raw question after the active presentation denied it.
+            if let presentedQuestions,presentedQuestions[turn.id] != turn.question {continue}
             let human=AskConversationProjection.messages([turn.turn]).first(where:{$0.role=="user"})?.text
             if let human,human != AskConversationProjection.omittedHuman,human.split(whereSeparator:{$0.isWhitespace}).count>=3 {return compact(human,limit:120)}
         }

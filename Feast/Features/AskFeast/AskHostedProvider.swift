@@ -87,7 +87,7 @@ struct AskHostedProvider: AskFeastProvider {
     let configuration: AskHostedConfiguration
     let token: @Sendable () async throws -> String
     let approve: @Sendable (AskRequest, AskEvidence) async throws -> Bool
-    let send: @Sendable (URLRequest) async throws -> (Data, HTTPURLResponse)
+    var send: @Sendable (URLRequest) async throws -> (Data, HTTPURLResponse)
     var webEnabled: @Sendable () async -> Bool = { false }
     var libraryToolsEnabled: @Sendable () async -> Bool = { false }
     var permission: @Sendable () async -> Bool = { true }
@@ -97,7 +97,9 @@ struct AskHostedProvider: AskFeastProvider {
     var prepareCapabilities:@Sendable ()async->Void = {}
     var nativeResearchEnabled:@Sendable ()async->Bool = {false}
     var collectionQueriesEnabled:@Sendable ()async->Bool = {false}
+    var retainedHistoryEnabled:@Sendable ()async->Bool = {false}
     var recoveryEnabled:@Sendable ()async->Bool = {false}
+    var recoveryRetainedHistoryEnabled:@Sendable ()async->Bool = {false}
     var recoveryCleanupToken:(@Sendable ()async throws->String)?=nil
 
     func answer(_ request: AskRequest, tools: AskReadTools) async throws -> AskResponse {
@@ -257,7 +259,7 @@ final class AskHostedHTTP: @unchecked Sendable {
         let body=request.httpBody.flatMap {(try? JSONSerialization.jsonObject(with:$0)) as? [String:Any]}
         if let lease=AskProviderAttemptScope.lease,request.httpMethod=="POST",request.url?.path=="/v1/answer",
            body?["mode"] as? String != "retryFence",let raw=body?["requestID"] as? String,let root=UUID(uuidString:raw) {
-            try await AskProviderAttempts.shared.register(root,lease:lease)
+            try await AskProviderAttemptScope.store.register(root,lease:lease)
         }
         if request.httpMethod=="POST",request.url?.path=="/v1/answer",let mode=body?["mode"] as? String,["conversationStep","authorizeChange","webSearch"].contains(mode) {
             return try await Self.settleDispatched {try await self.exchange(request)}

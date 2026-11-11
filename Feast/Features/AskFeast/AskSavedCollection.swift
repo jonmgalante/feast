@@ -62,7 +62,12 @@ import Foundation
             guard let cityID=reading.cityIDs[place.id] else{return nil}
             return .init(id:place.id,cityID:cityID,city:"",name:place.name,neighborhood:"",cuisine:String(place.cuisines.joined(separator:", ").prefix(500)),status:"",notes:[])
         }
-        let index=AskLocalIndex(records:records,visibleCityIDs:Set(visible.map(\.uuidString)),visibleNoteIDs:[],scope:.savedMetadata,personalPlaces:snapshot.places,catalogComplete:snapshot.complete)
+        let sections=NSFetchRequest<NSDictionary>(entityName:"ListSection")
+        sections.resultType = .dictionaryResultType;sections.includesPendingChanges=false;sections.propertiesToFetch=["id"]
+        sections.predicate=NSPredicate(format:"feastList.id IN %@",Array(visible) as NSArray)
+        let sectionIDs=try context.fetch(sections).compactMap {($0["id"] as? UUID)?.uuidString}
+        let grouped=Dictionary(grouping:sectionIDs,by:{$0})
+        let index=AskLocalIndex(records:records,visibleCityIDs:Set(visible.map(\.uuidString)),visibleNoteIDs:[],scope:.savedMetadata,personalPlaces:snapshot.places,catalogComplete:snapshot.complete,visibleSectionIDs:Set(sectionIDs.filter {grouped[$0]?.count==1}))
         return (snapshot,index)
     }
 

@@ -82,7 +82,10 @@ actor AskConversationReceipts {
     }
 }
 struct AskProviderAttemptLease:Sendable {let turn:UUID;let attempt:UUID}
-enum AskProviderAttemptScope {@TaskLocal static var lease:AskProviderAttemptLease?}
+enum AskProviderAttemptScope {
+    @TaskLocal static var lease:AskProviderAttemptLease?
+    @TaskLocal static var store:AskProviderAttempts = .shared
+}
 enum AskRetryError:LocalizedError,Equatable {
     case unverified,active,mutations,storage,capacity
     var retryable:Bool {if case .capacity=self {return false};return true}
@@ -217,6 +220,7 @@ actor AskProviderAttempts {
     }
     private static func context(_ response:AskResponse)->AskResponse {
         var context=AskResponse(summary:"Completed read context retained.",candidates:[],listedCandidateIDs:[],usesLocalCatalog:true)
+        context.historyRecordIDs=response.historyRecordIDs;context.retainsIndependentQuestion=response.retainsIndependentQuestion
         context.publicResearch=Array((response.publicResearch ?? []).suffix(4));context.verifiedPublicFindings=response.verifiedPublicFindings;context.agentTask=response.agentTask;context.mapChoices=response.mapChoices
         return context
     }
@@ -302,6 +306,23 @@ struct AskConversationFailure:LocalizedError {
     }
 }
 
+/// Local-only history fragments. A record dependency is access provenance, not
+/// query membership, an ordinal, or permission to mutate anything.
+struct AskHistoryFragment:Codable,Equatable,Sendable {
+    let text:String
+    let recordIDs:[String]
+}
+struct AskHistoryMessage:Codable,Equatable,Sendable {
+    let role:String
+    let fragments:[AskHistoryFragment]
+    var hasUnavailableContent:Bool? = nil
+    func permitted(_ ids:Set<String>)->Self {
+        .init(role:role,fragments:fragments.map {fragment in
+            Set(fragment.recordIDs).isSubset(of:ids) ? fragment : .init(text:AskConversationProjection.unavailableFragment,recordIDs:[])
+        },hasUnavailableContent:hasUnavailableContent)
+    }
+    var message:AskDialogueMessage {.init(role:role,text:fragments.map(\.text).joined(separator:"\n\n"))}
+}
 struct AskDialogueMessage:Codable,Equatable,Sendable {let role,text:String}
 struct AskConversationReply:Codable,Sendable {
     let version:Int,requestID:String,step:Int,kind:String,text:String,continuation:String,model:String
@@ -337,6 +358,7 @@ struct AskConversationStep:Codable,Sendable {
     var webAllowed:Bool? = nil
     var turnID:String? = nil
     var collectionQueryVersion:Int? = nil
+    var retainedHistoryVersion:Int? = nil
 }
 struct AskToolPresentation:Codable,Sendable {
     let kind:String,requestedFields:[String],returnedFields:[String],complete:Bool,renderedLocally:Bool
@@ -355,6 +377,7 @@ protocol AskConversationPlanning:Sendable {
     func conversationAvailable()async->Bool
     func nativeResearchAvailable()async->Bool
     func collectionQueryVersion()async->Int
+    func retainedHistoryVersion()async->Int
     func conversationStep(_ step:AskConversationStep)async throws->AskConversationReply
     func searchConversationWeb(_ query:String)async throws->AskWebResearchResult
     func authorizePendingConfirmation(_ actions:[AskCollectionAction],question:String,history:[String])async throws->AskHumanAuthorization
@@ -363,13 +386,14 @@ protocol AskConversationPlanning:Sendable {
 extension AskConversationPlanning {
     func nativeResearchAvailable()async->Bool {false}
     func collectionQueryVersion()async->Int {0}
+    func retainedHistoryVersion()async->Int {0}
 }
 extension AskHostedProvider:AskConversationPlanning {
     func prepareProviderAttempt(turn:UUID,retrying:Bool)async throws->AskProviderAttemptLease {
         let started=DispatchTime.now().uptimeNanoseconds
         defer {AskPipelineScope.record(retrying ? .retry : .reconciliation,since:started)}
         let legacy=await AskConversationReceipts.shared.legacyStoppedAndSettled(turn)
-        return try await AskProviderAttempts.shared.begin(turn:turn,retrying:retrying,legacySettled:legacy){roots in
+        return try await AskProviderAttemptScope.store.begin(turn:turn,retrying:retrying,legacySettled:legacy){roots in
             struct Fence:Decodable {let version:Int;let state:String;let roots:[UUID]}
             do {let result=try await conversationRequest(["version":9,"mode":"retryFence","roots":roots.map {$0.uuidString}],as:Fence.self)
                 guard result.version==9,result.state=="fenced",Set(result.roots)==Set(roots) else{throw AskRetryError.unverified}
@@ -378,6 +402,7 @@ extension AskHostedProvider:AskConversationPlanning {
     }
     func nativeResearchAvailable()async->Bool {guard await permission() else{return false};return await nativeResearchEnabled()}
     func collectionQueryVersion()async->Int {guard await permission() else{return 0};return await collectionQueriesEnabled() ? 2 : 0}
+    func retainedHistoryVersion()async->Int {guard await permission() else{return 0};return await retainedHistoryEnabled() ? 1 : 0}
     func conversationAvailable()async->Bool {let allowed=await permission();let version=await libraryPlanVersion();return allowed && version>=6}
     private func conversationRequest<T:Decodable>(_ payload:[String:Any],as:T.Type)async throws->T {
         let preparation=DispatchTime.now().uptimeNanoseconds
@@ -420,6 +445,9 @@ extension AskHostedProvider:AskConversationPlanning {
         guard [9,10].contains(step.version) else {throw AskHostedError.invalidResponse}
         if let queryVersion=step.collectionQueryVersion {
             guard queryVersion==2,step.version==10,step.context.collectionAccess=="permitted_details_v1",AskRecoveryScope.handle==nil else{throw AskHostedError.invalidResponse}
+        }
+        if let version=step.retainedHistoryVersion {
+            guard version==1,step.version==10,step.context.collectionAccess=="permitted_details_v1" else{throw AskHostedError.invalidResponse}
         }
         if step.context.collectionAccess != nil {
             guard step.context.collectionAccess=="permitted_details_v1",await libraryPlanVersion()>=7 else{throw AskHostedError.disabled}

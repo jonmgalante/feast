@@ -52,7 +52,7 @@ struct AskSavedCollectionPanel: View {
                                     .foregroundStyle(FeastTheme.AdaptiveColors.secondaryText)
                             }.padding(.top, FeastTheme.Spacing.xxLarge)
                         }
-                        ForEach(session.turns) { turn in
+                        ForEach(session.presentedTurns()) { turn in
                             VStack(alignment: .leading, spacing: FeastTheme.Spacing.medium) {
                                 Text(turn.request.text.isEmpty ? "Screenshot" : turn.request.text)
                                     .padding(FeastTheme.Spacing.medium)
@@ -142,7 +142,7 @@ struct AskSavedCollectionPanel: View {
         .sheet(item: $selectedPlace) { place in NavigationStack { SavedPlaceDetailView(savedPlace: place) } }
     }
     private var replacementMessage:String {
-        guard let replacement,let turn=session.turns.first(where:{$0.id==replacement.turn}),
+        guard let replacement,let turn=session.presentedTurns().first(where:{$0.id==replacement.turn}),
               let action=turn.response?.fieldActions?.first(where:{$0.finding.id==replacement.finding}) else {return "This answer changed. Cancel and review the current place."}
         let old=action.expectedValue.flatMap(InstagramWebsiteParser.profileURL).flatMap(URL.init(string:)).map {"@"+$0.lastPathComponent} ?? "the existing Instagram"
         let new=URL(string:action.finding.value).map {"@"+$0.lastPathComponent} ?? "the new account"

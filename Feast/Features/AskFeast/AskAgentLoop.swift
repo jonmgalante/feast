@@ -32,6 +32,9 @@ struct AskAgentExecution:Sendable {
     var effectiveTargetIDs:[String]? = nil
     var selectionIsOrdered=true
     var displayOrder:[String]? = nil
+    var invalidatesNativeQueries:Bool {
+        (response?.collectionActions ?? []).contains {$0.state == .undone || ($0.state == .applied && $0.wasChanged)}
+    }
 }
 /// One sequential tool loop for any cardinality. The app owns tool execution and writes;
 /// the model chooses the next tool from the actual previous result, never an English routing gate.
@@ -45,6 +48,8 @@ struct AskAgentLoop:Sendable {
         var candidates=previous.candidates
         for candidate in next.candidates {if let i=candidates.firstIndex(where:{$0.id==candidate.id}) {candidates[i]=candidate}else{candidates.append(candidate)}}
         response.candidates=candidates
+        response.historyRecordIDs=Array(AskConversationProjection.dependencies(previous).union(AskConversationProjection.dependencies(next))).sorted()
+        response.retainsIndependentQuestion=previous.retainsIndependentQuestion==true && next.retainsIndependentQuestion==true ? true : nil
         let native=Set(next.libraryContext?.ids ?? [])
         let mentions=((previous.answerMentionIDs ?? [])+(next.answerMentionIDs ?? [])).reduce(into:[String]()) {if !native.contains($1),!$0.contains($1) {$0.append($1)}}
         response.answerMentionIDs=mentions.isEmpty ? nil : mentions
@@ -55,7 +60,7 @@ struct AskAgentLoop:Sendable {
         response.mapChoices=((previous.mapChoices ?? [])+(next.mapChoices ?? [])).reduce(into:[]) {all,choice in if !all.contains(where:{$0.id==choice.id}) {all.append(choice)}}
 
         let paragraphs=(previous.paragraphs+next.paragraphs).reduce(into:[AskAnswerParagraph]()) {all,p in if !all.contains(where:{$0.spans==p.spans && $0.citations==p.citations && $0.sourceIDs==p.sourceIDs}) {all.append(p)}}
-        response.paragraphs=paragraphs.enumerated().map {i,p in .init(id:"agent-result-\(i)",spans:p.spans,sourceIDs:p.sourceIDs,citations:p.citations,citationsAreResearchPool:p.citationsAreResearchPool ?? (AskMarkdownPresentation.hasResearchPoolProvenance(p,in:response) ? true : nil),representedField:p.representedField,transientToolStatus:p.transientToolStatus,operationStatus:p.operationStatus)}
+        response.paragraphs=paragraphs.enumerated().map {i,p in .init(id:"agent-result-\(i)",spans:p.spans,sourceIDs:p.sourceIDs,citations:p.citations,citationsAreResearchPool:p.citationsAreResearchPool ?? (AskMarkdownPresentation.hasResearchPoolProvenance(p,in:response) ? true : nil),representedField:p.representedField,transientToolStatus:p.transientToolStatus,operationStatus:p.operationStatus,historyRecordIDs:p.historyRecordIDs)}
         var actions=previous.fieldActions ?? []
         for action in next.fieldActions ?? [] {if let i=actions.firstIndex(where:{$0.finding.recordID==action.finding.recordID && $0.finding.field==action.finding.field}) {actions[i]=action}else{actions.append(action)}}
         response.fieldActions=actions.isEmpty ? nil : actions
@@ -65,6 +70,83 @@ struct AskAgentLoop:Sendable {
         var facts=previous.verifiedPublicFindings ?? []
         for finding in next.verifiedPublicFindings ?? [] {facts.removeAll {$0.recordID==finding.recordID&&$0.field==finding.field};facts.append(finding)}
         response.verifiedPublicFindings=facts.isEmpty ? nil : facts
+        return response
+    }
+    /// Preserve each native query's rows and scope. Only exact consecutive pages
+    /// of that query merge membership/order; supplemental findings stay separate.
+    static func retainingNative(_ prior:AskResponse?,_ incoming:AskResponse)->AskResponse {
+        guard var previous=prior else{return incoming}
+        var next=incoming,sections=previous.querySections ?? []
+        func paging(_ p:AskAnswerParagraph)->Bool {p.spans.count==1 && {if case .text(let text)=p.spans[0] {return text.hasPrefix("Showing ") && text.contains("matching saved")};return false}()}
+        for var section in next.querySections ?? [] {
+            if let i=sections.firstIndex(where:{$0.id==section.id}) {
+                let old=sections[i]
+                if let a=old.page,let b=section.page,a.snapshot==b.snapshot,b.offset==a.offset+a.returnedCount {
+                    section.page = .init(snapshot:b.snapshot,totalCount:b.totalCount,offset:a.offset,returnedCount:a.returnedCount+b.returnedCount,nextOffset:b.nextOffset)
+                    if let context=section.context,let prior=old.context {
+                        let ids=(prior.ids+context.ids).reduce(into:[String]()) {if !$0.contains($1) {$0.append($1)}}
+                        let occurrences=(prior.displayOrder ?? prior.ids)+(context.displayOrder ?? context.ids)
+                        section.context = .init(ids:ids,filters:context.filters,excludesExternalReferences:true,displayOrder:context.filters.groupBy != nil || occurrences != ids ? occurrences : nil)
+                    }
+                    let oldIDs=Set(old.paragraphIDs),newIDs=Set(section.paragraphIDs)
+                    previous.paragraphs.removeAll {oldIDs.contains($0.id) && paging($0)}
+                    next.paragraphs.removeAll {newIDs.contains($0.id) && paging($0)}
+                    section.paragraphIDs=previous.paragraphs.filter {oldIDs.contains($0.id)}.map(\.id)+next.paragraphs.filter {newIDs.contains($0.id)}.map(\.id)
+                    if let remaining=b.nextOffset {
+                        let id="q"+String(section.id.prefix(24))+"-remaining"
+                        next.paragraphs.append(.init(id:id,spans:[.text("Showing \(remaining) of \(b.totalCount) matching saved places. More results remain.")],sourceIDs:[],historyRecordIDs:section.selectionIDs))
+                        section.paragraphIDs.append(id)
+                    }
+                }else {
+                    let replaced=Set(old.paragraphIDs);previous.paragraphs.removeAll {replaced.contains($0.id)}
+                }
+                sections[i]=section
+            }else{sections.append(section)}
+        }
+        var response=merged(previous,next)
+        response.querySections=sections
+        let nativeParagraphs=Set(sections.flatMap(\.paragraphIDs))
+        var seen=Set<String>(),paragraphs:[AskAnswerParagraph]=[]
+        for original in previous.paragraphs+next.paragraphs where original.id != "conversation-interrupted" && original.id != "conversation-limit" {
+            if !nativeParagraphs.contains(original.id),paragraphs.contains(where:{$0.spans==original.spans && $0.sourceIDs==original.sourceIDs && $0.citations==original.citations}) {continue}
+            // A continued answer keeps its earlier prose/extra mentions. Give
+            // old synthesis its own local ID so the new final paragraph cannot
+            // erase the only visible support for a retained extra candidate.
+            var p=original.id=="conversation-answer" ? original.renamed("retained-answer-"+String(paragraphs.count)) : original
+            if !seen.insert(p.id).inserted {p=p.renamed(String(p.id.prefix(60))+"-extra-"+String(paragraphs.count));seen.insert(p.id)}
+            paragraphs.append(p)
+        }
+        paragraphs.removeAll {$0.id.hasPrefix("section-heading-")}
+        // Pages can arrive interleaved (A1, B1, A2, B2). Display the complete
+        // native sections in their original query order, never append A2 under
+        // B's heading. Keep independent prose outside those contiguous blocks.
+        if let firstNative=paragraphs.firstIndex(where:{nativeParagraphs.contains($0.id)}) {
+            let byID=Dictionary(uniqueKeysWithValues:paragraphs.map {($0.id,$0)})
+            let ordered=sections.flatMap {section in section.paragraphIDs.compactMap {byID[$0]}}
+            let prefix=Array(paragraphs.prefix(firstNative))
+            let supporting=paragraphs.dropFirst(firstNative).filter {!nativeParagraphs.contains($0.id)}
+            paragraphs=prefix+ordered+supporting
+        }
+        let shown=sections.filter(\.displayed)
+        if shown.count>1 {
+            for (number,section) in shown.enumerated().reversed() {
+                let plan=section.context?.filters
+                let label=plan?.name ?? plan?.city ?? (section.entity=="place" ? "Saved places" : section.entity=="city" ? "Saved cities" : "Saved neighborhoods")
+                let qualifier=plan.map {" · "+$0.operation.rawValue} ?? ""
+                let heading=AskAnswerParagraph(id:"section-heading-"+String(section.id.prefix(24)),spans:[.text("Section \(number+1): "+String(label.prefix(200))+qualifier)],sourceIDs:[])
+                if let index=paragraphs.firstIndex(where:{section.paragraphIDs.contains($0.id)}) {paragraphs.insert(heading,at:index)}
+            }
+        }
+        response.paragraphs=paragraphs
+        response.refreshNativeAuthority()
+        let native=response.nativeMembership
+        let mentions=Set(paragraphs.flatMap(\.spans).compactMap {span->String? in if case .place(let id)=span{return id};return nil}).subtracting(native)
+        response.answerMentionIDs=mentions.isEmpty ? nil : mentions.sorted()
+        let retained=native.union(mentions).union(response.supplementalFindingIDs)
+        response.candidates.removeAll {!retained.contains($0.id)}
+        let byID=Dictionary(uniqueKeysWithValues:response.candidates.map {($0.id,$0)})
+        let ordered=sections.flatMap {$0.context?.ids ?? []}.reduce(into:[String]()) {if !$0.contains($1) {$0.append($1)}}
+        response.candidates=ordered.compactMap {byID[$0]}+response.candidates.filter {!native.contains($0.id)}
         return response
     }
     func answer(_ request:AskRequest,context:AskSemanticContext,cities:[AskAgentCity],findings:[AskAgentFinding])async throws -> AskResponse {

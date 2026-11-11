@@ -415,7 +415,7 @@ private struct AskChatHistoryView: View {
     @State private var deleting:UUID?
     @State private var showingRename = false
     @State private var showingDelete = false
-    private var orderedChats:[AskChatArchive] { AskHistoryPresentation.ordered(session.chats) }
+    private var orderedChats:[AskChatHistoryRow] { session.historyRows() }
     var body: some View {
         NavigationStack {
             historyList
@@ -432,7 +432,7 @@ private struct AskChatHistoryView: View {
                 .confirmationDialog("Delete this chat?",isPresented:$showingDelete,titleVisibility:.visible) {
                     Button("Delete chat",role:.destructive) { if let id=deleting { _ = session.deleteChat(id) };deleting=nil }
                     Button("Cancel",role:.cancel) { deleting=nil }
-                } message: { Text("Your saved restaurants won’t be changed.") }
+                } message: { Text("This removes the chat’s messages. Saved changes and their local Undo history are kept.") }
                 .onAppear { session.flushHistory() }
         }
     }
@@ -449,34 +449,39 @@ private struct AskChatHistoryView: View {
             if let error = session.historyError { Text(error).font(.footnote).foregroundStyle(.secondary) }
         }
     }
-    private func historyRow(_ chat:AskChatArchive) -> some View {
+    private func beginRename(_ id:UUID) {
+        // Recheck if permissions changed after the row was rendered.
+        guard let row=session.historyRows().first(where:{$0.id==id}) else{return}
+        title=row.title;renaming=id;showingRename=true
+    }
+    private func historyRow(_ chat:AskChatHistoryRow) -> some View {
         Button {
             if chat.id == session.activeChatID || session.openChat(chat.id) { dismiss() }
         } label: {
             HStack {
                 VStack(alignment:.leading,spacing:FeastTheme.Spacing.xSmall) {
-                    Text(AskHistoryPresentation.title(chat)).foregroundStyle(.primary).lineLimit(2)
-                    Text(AskHistoryPresentation.date(chat)).font(.caption).foregroundStyle(.secondary)
-                    Text(AskHistoryPresentation.preview(chat)).font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
+                    Text(chat.title).foregroundStyle(.primary).lineLimit(2)
+                    Text(chat.date).font(.caption).foregroundStyle(.secondary)
+                    Text(chat.preview).font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
                     if session.unsavedHistoryChatIDs.contains(chat.id) {Text("Not saved").font(.caption).foregroundStyle(.secondary)}
                 }
                 Spacer()
                 if chat.id == session.activeChatID { Image(systemName:"checkmark").accessibilityLabel("Current chat") }
             }
         }
-        .accessibilityLabel(AskHistoryPresentation.title(chat)+", "+AskHistoryPresentation.date(chat)+". "+AskHistoryPresentation.preview(chat)+(session.unsavedHistoryChatIDs.contains(chat.id) ? ". Not saved" : ""))
+        .accessibilityLabel(chat.accessibilityLabel+(session.unsavedHistoryChatIDs.contains(chat.id) ? ". Not saved" : ""))
         .accessibilityHint(session.unsavedHistoryChatIDs.contains(chat.id) ? "Open this conversation. Newer changes are not saved." : "Open this saved conversation")
         .accessibilityActions {
-            Button("Rename chat") {title=chat.title;renaming=chat.id;showingRename=true}
+            Button("Rename chat") {beginRename(chat.id)}
             Button("Delete chat") {deleting=chat.id;showingDelete=true}
         }
         .contextMenu {
-            Button("Rename",systemImage:"pencil") { title=chat.title;renaming=chat.id;showingRename=true }
+            Button("Rename",systemImage:"pencil") { beginRename(chat.id) }
             Button("Delete chat",systemImage:"trash",role:.destructive) { deleting=chat.id;showingDelete=true }
         }
         .swipeActions {
             Button("Delete",role:.destructive) { deleting=chat.id;showingDelete=true }
-            Button("Rename") { title=chat.title;renaming=chat.id;showingRename=true }
+            Button("Rename") { beginRename(chat.id) }
         }
     }
 }

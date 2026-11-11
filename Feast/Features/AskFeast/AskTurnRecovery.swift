@@ -45,6 +45,7 @@ struct AskRecoveryLoopState:Codable,Sendable {
     var durableActions:[AskCollectionAction]=[]
     var durableOutcomes:[AskAgentOutcome]=[]
     var operationRecords:[AskOperationRecord]=[]
+    var historyRecordIDs:[String]? = nil
 }
 struct AskTurnCheckpoint:Codable,Sendable {
     enum Phase:String,Codable {case ready, awaitingReply, receivedReply, executingTool, completed, stopped, blocked}
@@ -67,6 +68,7 @@ struct AskTurnCheckpoint:Codable,Sendable {
     var finalResponse:AskResponse?
     var failure:String?
     var retainedRecordIDs:[String]=[]
+    var retainedHistoryVersion:Int? = nil
     var resumable:Bool {![.stopped,.blocked].contains(phase)}
 }
 /// Local only, separate from the existing chat archive. A failed atomic write
@@ -177,7 +179,14 @@ struct AskTurnCheckpoint:Codable,Sendable {
     func complete(_ id:UUID,response:AskResponse)throws {
         guard var value=try checkpoint(id) else{throw AskRecoveryError.storage}
         let external=Set((value.request.mapChoices+(value.state.latest?.mapChoices ?? [])+(response.mapChoices ?? [])).map(\.id))
-        value.retainedRecordIDs=Array(Set(value.retainedRecordIDs+(value.context?.index.map(\.id) ?? [])+value.cities.map(\.id)+Array(value.state.available.keys)+value.state.ordered+value.request.collectionDialogueIDs).subtracting(external)).sorted()
+        var retained=Set(value.retainedRecordIDs)
+        retained.formUnion(value.context?.index.map(\.id) ?? [])
+        retained.formUnion(value.cities.map(\.id));retained.formUnion(value.state.available.keys)
+        retained.formUnion(value.state.ordered);retained.formUnion(value.request.collectionDialogueIDs)
+        retained.subtract(external)
+        retained.formUnion(value.state.historyRecordIDs ?? [])
+        retained.formUnion(AskConversationProjection.activeChannelRecordIDs(value.request))
+        value.retainedRecordIDs=retained.sorted()
         value.finalResponse=response;value.phase = .completed;try save(scrubbed(value))
     }
     /// Only after the answer has been committed to its ORIGINAL chat archive.

@@ -9,6 +9,24 @@ struct AskAgentProvider:AskFeastProvider {
     let searchMaps:@MainActor @Sendable (String)async throws->[ApplePlaceMatch]
     var recoveryStore:AskTurnRecoveryStore?=nil
     var resolveMaps:@MainActor @Sendable (String)async throws->ApplePlaceMatch? = {_ in nil}
+    /// Keep the check at dispatch, after credential/capability awaits inside the
+    /// hosted provider. Opaque recovery status/cleanup carries no retained data.
+    private var privacyCheckedRemote:any AskFeastProvider {
+        guard var hosted=remote as? AskHostedProvider else{return remote}
+        let send=hosted.send
+        hosted.send={request in
+            let body=request.httpBody.flatMap {(try? JSONSerialization.jsonObject(with:$0)) as? [String:Any]}
+            if !["status","cancel","ack"].contains(body?["op"] as? String ?? "") {try await AskHistoryAccessScope.check()}
+            return try await send(request)
+        }
+        return hosted
+    }
+    @MainActor private func checkedMapsSearch(_ query:String)async throws->[ApplePlaceMatch] {
+        try await AskHistoryAccessScope.check();return try await searchMaps(query)
+    }
+    @MainActor private func checkedMapsResolution(_ id:String)async throws->ApplePlaceMatch? {
+        try await AskHistoryAccessScope.check();return try await resolveMaps(id)
+    }
     private func localOrConsent(_ request:AskRequest,tools:AskReadTools)async throws->AskResponse {
         do {return try await fallback.answer(request,tools:tools)}
         catch AskHostedError.disabled {
@@ -45,27 +63,30 @@ struct AskAgentProvider:AskFeastProvider {
             let lease=try await hosted.prepareProviderAttempt(turn:turn,retrying:request.providerRetry)
             do {
                 var resumed=request
-                if request.providerRetry,let context=try await AskProviderAttempts.shared.readContext(for:lease) {
+                if request.providerRetry,let context=try await AskProviderAttemptScope.store.readContext(for:lease) {
                     resumed.publicResearch=context.publicResearch ?? resumed.publicResearch
                     resumed.verifiedFindings=context.verifiedPublicFindings ?? resumed.verifiedFindings
                     resumed.agentTask=context.agentTask ?? resumed.agentTask
                     resumed.mapChoices=context.mapChoices ?? resumed.mapChoices
+                    let provenance=AskConversationProjection.channelDependencies([.init(id:turn,request:request,response:context,status:.complete)],requireExplicitOrigin:true)
+                    resumed.retainedChannelDependencies=(resumed.retainedChannelDependencies ?? [:]).merging(provenance,uniquingKeysWith:{Array(Set($0+$1)).sorted()})
                 }
                 let response=try await AskProviderAttemptScope.$lease.withValue(lease){try await runAnswer(resumed,tools:tools)}
-                await AskProviderAttempts.shared.finish(lease)
+                await AskProviderAttemptScope.store.finish(lease)
                 return response
-            }catch {await AskProviderAttempts.shared.finish(lease);throw error}
+            }catch {await AskProviderAttemptScope.store.finish(lease);throw error}
         }
         return try await runAnswer(request,tools:tools)
     }
     private func runRecovered(_ saved:AskTurnCheckpoint,tools:AskReadTools)async throws->AskResponse {
+        let remote=privacyCheckedRemote
         guard let context=saved.context ?? (saved.phase == .completed ? AskSemanticContext(index:[],recent:[]) : nil),let conversational=remote as? any AskConversationPlanning,let researcher=remote as? any AskBusinessResearching else{throw AskRecoveryError.unavailable}
-        let executor=await AskAgentExecutor(adapter:adapter,engine:engine,request:saved.executorRequest ?? saved.request,researcher:researcher,searchMaps:{query in try await searchMaps(query)},resolveMaps:resolveMaps,fullCollectionContext:context.collectionAccess=="permitted_details_v1")
+        let executor=await AskAgentExecutor(adapter:adapter,engine:engine,request:saved.executorRequest ?? saved.request,researcher:researcher,searchMaps:{query in try await checkedMapsSearch(query)},resolveMaps:{id in try await checkedMapsResolution(id)},fullCollectionContext:context.collectionAccess=="permitted_details_v1")
         // Fresh access checks protect retained private context. Do not silently
         // rebuild a changed selection or send a different request under one ID.
         let permitted=try await executor.permittedRecordIDs()
         let external=Set((saved.request.mapChoices+(saved.state.latest?.mapChoices ?? [])+(saved.finalResponse?.mapChoices ?? [])).map(\.id))
-        let referenced=Set(context.index.map(\.id)+saved.cities.map(\.id)+Array(saved.state.available.keys)+saved.state.ordered+saved.request.collectionDialogueIDs+saved.retainedRecordIDs).subtracting(external)
+        let referenced=Set(context.index.map(\.id)+saved.cities.map(\.id)+Array(saved.state.available.keys)+saved.state.ordered+saved.request.collectionDialogueIDs+saved.retainedRecordIDs).subtracting(external).union(AskConversationProjection.activeChannelRecordIDs(saved.request))
         let deleted=try await engine.recoveryDeletedRecordIDs(forTurn:saved.turnID,includingActionIDs:Set((saved.state.durableActions+(saved.finalResponse?.collectionActions ?? [])).map(\.id)))
         guard referenced.isSubset(of:permitted.union(deleted)) else{throw AskHostedError.selectionUnavailable}
         if let response=saved.finalResponse {return response}
@@ -74,30 +95,52 @@ struct AskAgentProvider:AskFeastProvider {
             let permitted=try await executor.permittedRecordIDs()
             let deleted=try await engine.recoveryDeletedRecordIDs(forTurn:saved.turnID,includingActionIDs:Set(actionIDs))
             guard Set(context.index.map(\.id)+saved.cities.map(\.id)).isSubset(of:permitted.union(deleted)) else{throw AskHostedError.selectionUnavailable}
+        },retainedHistoryVersion:saved.retainedHistoryVersion ?? 0,historyAccess:{actionIDs in
+            let permitted=try await adapter.readView().index.historyAccessIDs
+            let deleted=try await engine.recoveryDeletedRecordIDs(forTurn:saved.turnID,includingActionIDs:Set(actionIDs))
+            return permitted.union(deleted)
         }).answer(saved.request,context:context,cities:saved.cities,findings:saved.findings)
     }
     private func runAnswer(_ request:AskRequest,tools:AskReadTools)async throws->AskResponse {
 #if FEAST_AGENT_ROLLBACK
         return try await localOrConsent(request,tools:tools)
 #else
+        let remote=privacyCheckedRemote
         guard request.attachment==nil,!request.fromOCR,
               let planner=remote as? any AskAgentPlanning,await planner.agentAvailable(),let researcher=remote as? any AskBusinessResearching else {return try await localOrConsent(request,tools:tools)}
         let fullCollection:Bool
         if let hosted=remote as? AskHostedProvider {let version=await hosted.libraryPlanVersion();let allowed=await hosted.permission();fullCollection = version>=7 && allowed}else{fullCollection=false}
         // Freeze optional read-query support before building both the executor
         // and its model loop. Recovery keeps its existing query contract.
-        var queryVersion=0,nativeAvailable=false,useRecovery=false
+        var queryVersion=0,historyVersion=0,nativeAvailable=false,useRecovery=false
         if let conversational=remote as? any AskConversationPlanning {
             nativeAvailable=await conversational.nativeResearchAvailable()
             if nativeAvailable,recoveryStore != nil,request.performanceID != nil,request.conversationID != nil,AskProviderAttemptScope.lease != nil,let hosted=remote as? AskHostedProvider {
                 useRecovery=await hosted.recoveryEnabled()
             }
-            if !useRecovery,fullCollection,nativeAvailable {queryVersion=await conversational.collectionQueryVersion()==2 ? 2 : 0}
+            if !useRecovery,fullCollection,nativeAvailable {queryVersion=await conversational.collectionQueryVersion()==2 ? 2 : 0;historyVersion=await conversational.retainedHistoryVersion()==1 ? 1 : 0}
+            if useRecovery,fullCollection,let hosted=remote as? AskHostedProvider {historyVersion=await hosted.recoveryRetainedHistoryEnabled() ? 1 : 0}
         }
         let contextStarted=DispatchTime.now().uptimeNanoseconds
         var reading=request.collectionReadVersion()
         let current=try await adapter.readView(),snapshot=current.snapshot
+        AskConversationProjection.filterChannels(&reading,permitted:current.index.historyAccessIDs)
+        if let prior=reading.collectionContinuation,!AskConversationProjection.dependencies(prior).isSubset(of:current.index.historyAccessIDs) {reading.collectionContinuation=nil}
 
+        if let history=fullCollection ? reading.collectionHistory : reading.publicHistory {
+            let authorized=history.map {$0.permitted(current.index.historyAccessIDs)}
+            reading.collectionHistory=authorized
+            let indexed=try AskConversationProjection.indexedMessages(reading) ?? authorized
+            // Freeze this exact index domain once. Accepted recovery must not
+            // rebuild history indexes under a later app's projection algorithm.
+            reading.collectionHistory=indexed
+            reading.dialogue=indexed.map {message in .init(role:message.role,text:AskConversationProjection.excerpt(message.message.text,canPage:historyVersion==1))}
+            reading.collectionDialogue=reading.dialogue
+            reading.collectionDialogueIDs=Array(Set(indexed.flatMap {$0.fragments.flatMap(\.recordIDs)})).sorted()
+            let human=reading.dialogue.filter {$0.role=="user" && $0.text != AskConversationProjection.unavailableFragment && $0.text != AskConversationProjection.omittedHuman}
+            reading.recentQuestions=human.suffix(2).map {.init(question:$0.text,recordIDs:[])}
+        }else if !fullCollection {reading.collectionHistory=nil}
+        reading.publicHistory=nil
         var context=try AskSemanticContext.make(reading,catalog:snapshot,fullCollection:fullCollection)
         if !fullCollection {reading.collectionContinuation=nil}
         // The executor is an authorization boundary too: never give it the
@@ -106,7 +149,10 @@ struct AskAgentProvider:AskFeastProvider {
         reading.verifiedFindings=try reading.verifiedFindings.filter {
             identities[$0.recordID]==$0.identity && (fullCollection || $0.externallyReusable==true || (reading.agentTask?.privateSelection != true && reading.libraryContext?.excludesExternalReferences != true))
         }.map {try $0.validated()}
-        let executor=await AskAgentExecutor(adapter:adapter,engine:engine,request:reading,researcher:researcher,searchMaps:{query in try await searchMaps(query)},resolveMaps:resolveMaps,fullCollectionContext:fullCollection,supportsCollectionQueryV2:queryVersion==2)
+        // Only the conversation loop consumes full retained text. Keep it once
+        // in the checkpoint, not again in the executor's immutable request digest.
+        var executorRequest=reading;executorRequest.collectionHistory=nil
+        let executor=await AskAgentExecutor(adapter:adapter,engine:engine,request:executorRequest,researcher:researcher,searchMaps:{query in try await checkedMapsSearch(query)},resolveMaps:{id in try await checkedMapsResolution(id)},fullCollectionContext:fullCollection,supportsCollectionQueryV2:queryVersion==2)
         if fullCollection {
             let permitted=try await executor.permittedRecordIDs()
             if Set(reading.collectionDialogueIDs).isSubset(of:permitted) {reading.dialogue=reading.collectionDialogue.isEmpty ? reading.dialogue : reading.collectionDialogue}
@@ -142,12 +188,18 @@ struct AskAgentProvider:AskFeastProvider {
                 let permitted=try await executor.permittedRecordIDs()
                 let deleted=try await engine.recoveryDeletedRecordIDs(forTurn:request.performanceID ?? UUID(),includingActionIDs:Set(actionIDs))
                 guard recoveryContextIDs.isSubset(of:permitted.union(deleted)) else{throw AskHostedError.selectionUnavailable}
-            },collectionQueryVersion:queryVersion,nativeResearch:nativeAvailable)
+            },collectionQueryVersion:queryVersion,retainedHistoryVersion:historyVersion,historyAccess:{actionIDs in
+                let permitted=try await adapter.readView().index.historyAccessIDs
+                let deleted=try await engine.recoveryDeletedRecordIDs(forTurn:request.performanceID ?? UUID(),includingActionIDs:Set(actionIDs))
+                return permitted.union(deleted)
+            },nativeResearch:nativeAvailable)
             // Decide once, before the first request. No fallback after durable acceptance.
             if useRecovery,let recoveryStore,let hosted=remote as? AskHostedProvider,let turn=reading.performanceID,let chat=reading.conversationID,let lease=AskProviderAttemptScope.lease {
                 var checkpoint=AskTurnCheckpoint(turnID:turn,chatID:chat,attemptID:lease.attempt,endpoint:hosted.configuration.endpoint.absoluteString,request:reading,createdAt:Date())
                 try Task.checkCancellation()
-                checkpoint.userRequest=request
+                var userRequest=request;userRequest.collectionHistory=nil;userRequest.publicHistory=nil
+                checkpoint.userRequest=userRequest
+                checkpoint.retainedHistoryVersion=historyVersion==1 ? 1 : nil
                 checkpoint.executorRequest=executor.request
                 checkpoint.context=context;checkpoint.cities=cities;checkpoint.findings=findings
                 checkpoint.state.available=available

@@ -33,6 +33,8 @@ enum AskRecoveryOperationScope {
     private let humanReferenceDisplayOrder:[String]?
     private let humanReferenceSelection:[String]
     private let humanReferenceIsOrdered:Bool
+    private let humanReferenceSection:AskQuerySection?
+    private let unresolvedSectionReference:Bool
     private var selectionIsPrivate:Bool
     private var findings:[AskVerifiedFinding]
     private var maps:[String:ApplePlaceMatch]=[:]
@@ -48,26 +50,73 @@ enum AskRecoveryOperationScope {
     private var retainedPublicKeys=Set<String>()
     private var createdCities:[String:String]=[:]
     private var collectionPageProgress:[String:Int]=[:]
+    private var querySectionIDs=Set<String>()
     private var collectionPageDisplayOrders:[String:[String]]=[:]
     private var readContexts:[NSManagedObjectContext]=[]
+    private static let quotedTextPattern=#""[^"\n]*"|“[^”\n]*”|'[^'\n]*'|‘[^’\n]*’"#
+    private static func referenceText(_ question:String)->String {
+        // Remove values/names from the remaining grammar. humanSection checks
+        // quoted section-target spans before using this reduced text.
+        let unquoted=question.replacingOccurrences(of:quotedTextPattern,with:" ",options:.regularExpression)
+        return unquoted.replacingOccurrences(of:#"(?i)\b(?:named|called)\s+section\s+[0-9]+\b"#,with:" ",options:.regularExpression)
+    }
+    private static func humanSection(_ request:AskRequest)->AskQuerySection? {
+        guard request.referenceSectionsTurnID != nil,let sections=request.referenceSections else{return nil}
+        let shown=sections.filter(\.displayed)
+        guard shown.count>1 else{return nil}
+        // Section numbers are a bounded literal shortcut, not a guess about
+        // which historical answer the human meant. Accept one current-target
+        // command frame and an optional exact current-answer qualifier. Any
+        // other prose/source clause needs clarification, wherever it occurs.
+        // A quoted Section N might be a second target, not a note value or
+        // business name. Do not erase that ambiguity to authorize the remaining
+        // unquoted section. Independently named/quoted businesses still use the
+        // separate humanScopesAmbiguousSelection path.
+        guard let quotes=try? NSRegularExpression(pattern:quotedTextPattern) else{return nil}
+        let original=request.text as NSString
+        let sectionReference=#"(?i)(?<![\p{L}\p{N}])section\s+[0-9]+(?![\p{L}\p{N}])"#
+        guard !quotes.matches(in:request.text,range:NSRange(location:0,length:original.length)).contains(where:{original.substring(with:$0.range).range(of:sectionReference,options:.regularExpression) != nil}) else{return nil}
+        let reference=Self.referenceText(request.text).lowercased()
+        guard let regex=try? NSRegularExpression(pattern:#"(?<![\p{L}\p{N}])section[ \t]+([1-9][0-9]*)(?![\p{L}\p{N}])"#) else{return nil}
+        let text=reference as NSString,matches=regex.matches(in:reference,range:NSRange(location:0,length:text.length))
+        guard matches.count==1,let match=matches.first,let index=Int(text.substring(with:match.range(at:1))),index<=shown.count else{return nil}
+        var prefix=text.substring(to:match.range.location),suffix=text.substring(from:NSMaxRange(match.range))
+        let currentSource=#"(?:of|from|in)\s+(?:(?:the|your)\s+)?(?:current|latest|last|most\s+recent|immediately\s+preceding)\s+(?:answer|response|message|turn)"#
+        prefix=prefix.replacingOccurrences(of:#"^\s*"#+currentSource+#"\s*[,;:]?\s*"#,with:"",options:.regularExpression)
+        suffix=suffix.replacingOccurrences(of:#"^\s*"#+currentSource+#"\b"#,with:"",options:.regularExpression)
+        // Quoted values were removed by referenceText, so arbitrary note text
+        // cannot masquerade as a source qualifier or a second target. Ordinary
+        // named/filter writes use their existing independently scoped path.
+        let verbs=#"(?:show|list|read|describe|open|mark|set|change|update|delete|remove|undo|move|add|append|save|put|give)"#
+        let words=#"(?:me|the|a|all|every|each|both|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|last|one|two|three|four|five|six|seven|eight|nine|ten|[0-9]+(?:st|nd|rd|th)?|saved|place|places|result|results|item|items|one|ones|cafe|cafes|bar|bars|restaurant|restaurants|city|cities|neighborhood|neighborhoods|details|note|notes|tag|tags|status|website|instagram|of|for|in|from|at|to|as|and|position|positions|want|try|just|opened|been|love|regulars)"#
+        let frame=#"^\s*(?:please\s+)?"#+verbs+#"\s+(?:(?:"#+words+#"\s+)*(?:in|of|from)\s+)?$"#
+        let ending=#"^\s*(?:(?:as|to)\s+)?(?:(?:want\s+to\s+try|just\s+opened|been|love|regulars)\s*)?(?:please\s*)?[.!?]*\s*$"#
+        guard prefix.range(of:frame,options:.regularExpression) != nil,suffix.range(of:ending,options:.regularExpression) != nil else{return nil}
+        return shown[index-1]
+    }
     init(adapter:AskSavedCollection,engine:AskCollectionChangeEngine,request:AskRequest,researcher:any AskBusinessResearching,searchMaps:@escaping (String)async throws->[ApplePlaceMatch],resolveMaps:@escaping @MainActor @Sendable (String)async throws->ApplePlaceMatch? = {_ in nil},fullCollectionContext:Bool=false,supportsCollectionQueryV2:Bool=false) {
         self.fullCollectionContext=fullCollectionContext
         self.supportsCollectionQueryV2=fullCollectionContext && supportsCollectionQueryV2
         self.adapter=adapter;self.engine=engine;self.request=request;self.researcher=researcher;self.searchMaps=searchMaps;self.resolveMaps=resolveMaps
-        humanReferenceSelection=request.agentTask?.selectionIDs ?? request.agentTask?.orderedIDs ?? request.libraryContext?.selectionIDs ?? request.libraryContext?.ids ?? []
+        humanReferenceSection=Self.humanSection(request)
+        unresolvedSectionReference=humanReferenceSection==nil && Self.referenceText(request.text).range(of:"(?i)\\bsection[ \t]+[0-9]+\\b",options:.regularExpression) != nil
+        humanReferenceSelection=humanReferenceSection?.selectionIDs ?? request.agentTask?.selectionIDs ?? request.agentTask?.orderedIDs ?? request.libraryContext?.selectionIDs ?? request.libraryContext?.ids ?? []
         // Historical grouped archives have no trustworthy occurrence order.
         // Keep membership, but require a fresh list before any ordinal can write.
         let legacyGrouped=request.libraryContext.map {$0.filters.groupBy != nil && $0.displayOrder==nil && ![AskLibraryPlan.Operation.count,.group,.catalog].contains($0.filters.operation)} ?? false
-        humanReferenceIsOrdered=(request.agentTask.map {$0.selectionIDs == nil} ?? (request.libraryContext?.selectionIDs == nil)) && !legacyGrouped
+        humanReferenceIsOrdered=humanReferenceSection?.ordered ?? ((request.agentTask.map {$0.selectionIDs == nil} ?? (request.libraryContext?.selectionIDs == nil)) && !legacyGrouped)
         // Membership and order are one provenance unit. A task's nil occurrence
         // list means its own unique order, not an older native query's full list.
-        humanReferenceDisplayOrder=request.agentTask != nil ? request.agentTask?.displayOrder : request.libraryContext?.displayOrder
+        humanReferenceDisplayOrder=humanReferenceSection?.displayOrder ?? (request.agentTask != nil ? request.agentTask?.displayOrder : request.libraryContext?.displayOrder)
         displayOrder=humanReferenceDisplayOrder
         selectionIsOrdered=humanReferenceIsOrdered
         selection=humanReferenceSelection;selectionIsPrivate=(request.agentTask?.privateSelection ?? (request.agentTask?.sourcePolicy=="local_only")) || request.libraryContext?.excludesExternalReferences==true;findings=request.verifiedFindings
         maps=Dictionary(request.mapChoices.map {($0.id,$0.match)},uniquingKeysWith:{$1})
         mapsQuery=request.mapChoices.first?.query
-        if let response=request.collectionContinuation,let page=response.collectionPage,page.offset==0 {
+        if let sections=request.collectionContinuation?.querySections {
+            querySectionIDs=Set(sections.map(\.id))
+            for section in sections {if let page=section.page,page.offset==0 {collectionPageProgress[section.id]=page.returnedCount;collectionPageDisplayOrders[section.id]=section.context?.displayOrder ?? section.context?.ids ?? []}}
+        } else if let response=request.collectionContinuation,let page=response.collectionPage,page.offset==0 {
             collectionPageProgress[page.snapshot]=page.returnedCount
             collectionPageDisplayOrders[page.snapshot]=response.libraryContext?.displayOrder ?? response.libraryContext?.ids ?? []
         }
@@ -104,13 +153,14 @@ enum AskRecoveryOperationScope {
         let retainedPublicKeys:Set<String>,createdCities:[String:String],collectionPageProgress:[String:Int]
         var displayOrder:[String]? = nil
         var collectionPageDisplayOrders:[String:[String]]? = nil
+        var querySectionIDs:Set<String>? = nil
     }
     private func recoveryRequestDigest()throws->String {
         let encoder=JSONEncoder();encoder.outputFormatting = .sortedKeys
         return SHA256.hash(data:try encoder.encode(request)).map {String(format:"%02x",$0)}.joined()
     }
     func recoverySnapshot()throws->Data {
-        let value=RecoverySnapshot(requestDigest:try recoveryRequestDigest(),selection:selection,selectionIsOrdered:selectionIsOrdered,selectionIsPrivate:selectionIsPrivate,findings:findings,maps:maps.mapValues(RecoveryMap.init),mutationOrder:mutationOrder,mutationStates:mutationStates,completedLeaves:completedLeaves,frozenUndoActions:frozenUndoActions,mapsQuery:mapsQuery,researchCache:researchCache,researchOrder:researchOrder,researchResults:researchResults,researchFieldOrder:researchFieldOrder,retainedPublicKeys:retainedPublicKeys,createdCities:createdCities,collectionPageProgress:collectionPageProgress,displayOrder:displayOrder,collectionPageDisplayOrders:collectionPageDisplayOrders)
+        let value=RecoverySnapshot(requestDigest:try recoveryRequestDigest(),selection:selection,selectionIsOrdered:selectionIsOrdered,selectionIsPrivate:selectionIsPrivate,findings:findings,maps:maps.mapValues(RecoveryMap.init),mutationOrder:mutationOrder,mutationStates:mutationStates,completedLeaves:completedLeaves,frozenUndoActions:frozenUndoActions,mapsQuery:mapsQuery,researchCache:researchCache,researchOrder:researchOrder,researchResults:researchResults,researchFieldOrder:researchFieldOrder,retainedPublicKeys:retainedPublicKeys,createdCities:createdCities,collectionPageProgress:collectionPageProgress,displayOrder:displayOrder,collectionPageDisplayOrders:collectionPageDisplayOrders,querySectionIDs:querySectionIDs)
         try validateRecoverySnapshot(value)
         let data=try JSONEncoder().encode(value)
         guard data.count<=8*1024*1024 else {throw AskChangeError.journal}
@@ -134,7 +184,7 @@ enum AskRecoveryOperationScope {
         try validateRecoverySnapshot(value)
         let restoredMaps=try value.maps.mapValues {try $0.restored()}
         selection=value.selection;selectionIsOrdered=value.selectionIsOrdered;selectionIsPrivate=value.selectionIsPrivate;displayOrder=value.displayOrder
-        collectionPageDisplayOrders=value.collectionPageDisplayOrders ?? [:]
+        collectionPageDisplayOrders=value.collectionPageDisplayOrders ?? [:];querySectionIDs=value.querySectionIDs ?? []
         findings=value.findings;maps=restoredMaps;mutationOrder=value.mutationOrder;mutationStates=value.mutationStates
         completedLeaves=value.completedLeaves;frozenUndoActions=value.frozenUndoActions;mapsQuery=value.mapsQuery
         researchCache=value.researchCache;researchOrder=value.researchOrder;researchResults=value.researchResults;researchFieldOrder=value.researchFieldOrder
@@ -211,8 +261,11 @@ enum AskRecoveryOperationScope {
     private func resolved(_ permission:AskAgentPermission,reference:[String]?=nil)throws->[String] {
         // Capability fallback must not recover authority from a shortened list.
         // Conversation writes already passed their independent selector check.
-        if !conversationalExecution,request.agentTask?.referencesIncomplete==true,!permission.operations.allSatisfy({$0=="create"}) {
-            guard let selector=permission.selector,selector.scope != "previous",(selector.positions ?? []).isEmpty else{throw AskChangeError.invalid}
+        if !conversationalExecution,(request.agentTask?.referencesIncomplete==true && humanReferenceSection==nil || unresolvedSectionReference),!permission.operations.allSatisfy({$0=="create"}) {
+            guard let selector=permission.selector,selector.scope != "previous",(selector.positions ?? []).isEmpty,humanScopesAmbiguousSelection(selector) else{throw AskChangeError.invalid}
+        }
+        if let section=humanReferenceSection,!permission.operations.allSatisfy({$0=="create"}) {
+            guard permission.entity==section.entity,Set(permission.targetIDs).isSubset(of:Set(section.selectionIDs)) else{throw AskChangeError.invalid}
         }
         let selection=reference ?? self.selection
         let occurrenceOrder=(reference==nil ? displayOrder : humanReferenceDisplayOrder) ?? selection
@@ -265,6 +318,48 @@ enum AskRecoveryOperationScope {
         guard !values.isEmpty,values.count<=200 else {throw AskChangeError.invalid}
         return values.compactMap {($0.value(forKey:"id") as? UUID)?.uuidString}.sorted()
     }
+    private func humanScopesAmbiguousSelection(_ selector:AskAgentSelector)->Bool {
+        // Disclosure matching is necessary, not permission. Reference grammar
+        // takes precedence over a colliding model-supplied name such as "First".
+        let values=[selector.city,selector.name,selector.neighborhood,selector.cuisine,selector.status,selector.placeType].compactMap {$0}
+        func named(_ value:String)->Bool {
+            if AskConversationProjection.humanNamed(value,question:request.text,messages:[]) {return true}
+            guard value==selector.placeType else{return false}
+            let plural=value=="Bakery" ? "Bakeries" : value+"s"
+            return AskConversationProjection.humanNamed(plural,question:request.text,messages:[])
+        }
+        guard !values.isEmpty,values.allSatisfy(named) else{return false}
+        let locale=Locale(identifier:"en_US_POSIX")
+        var question=request.text.folding(options:[.caseInsensitive,.diacriticInsensitive],locale:locale)
+        // Remove only the exact independently named selector spans. A normal
+        // city/neighborhood such as First City is no more an ordinal than the
+        // business First Watch; pure reference-like names still need explicit
+        // named/quoted syntax below.
+        for supplied in values.sorted(by:{$0.count>$1.count}) {
+            let name=supplied.folding(options:[.caseInsensitive,.diacriticInsensitive],locale:locale)
+            let escaped=NSRegularExpression.escapedPattern(for:name)
+            let explicit=#"(?:\b(?:named|called)\s+"#+escaped+#"(?![\p{L}\p{N}])|["“'‘]"#+escaped+#"["”'’])"#
+            let proven=question.range(of:explicit,options:.regularExpression) != nil
+            let venues=#"(?:saved\s+)?(?:places?|results?|items?|ones?|cafes?|bars?|restaurants?|baker(?:y|ies)|desserts?|markets?|venues?|shops?|stores?)"#
+            let quantity=#"(?:one|two|three|four|five|six|seven|eight|nine|ten|[0-9]+)"#
+            let referenceName=#"^(?:the\s+)?(?:(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|last|next|previous|former|latter|[0-9]+(?:st|nd|rd|th))(?:\s+"#+quantity+#")?(?:\s+"#+venues+#")?|(?:all|both|those|these|them)(?:\s+(?:of\s+)?(?:those|these|the))?(?:\s+"#+venues+#")?|section\s+[0-9]+)$"#
+            if name.range(of:referenceName,options:.regularExpression) != nil {
+                guard proven else{return false}
+                question=question.replacingOccurrences(of:explicit,with:" ",options:.regularExpression)
+            }else {
+                question=question.replacingOccurrences(of:#"(?<![\p{L}\p{N}])"#+escaped+#"(?![\p{L}\p{N}])"#,with:" ",options:.regularExpression)
+            }
+        }
+        question=Self.referenceText(question)
+        let unresolved=#"\b(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|last|next|previous|former|latter|those|these|them|both|either)\b|\b[0-9]+(?:st|nd|rd|th)\b|\bsection\s+[0-9]+\b"#
+        guard question.range(of:unresolved,options:.regularExpression)==nil else{return false}
+        if selector.name != nil {return true}
+        return question.range(of:#"\b(all|every|each)\b"#,options:.regularExpression) != nil
+    }
+    private func invalidateNativeQueries(after execution:AskAgentExecution) {
+        guard execution.invalidatesNativeQueries else{return}
+        querySectionIDs=[];collectionPageProgress=[:];collectionPageDisplayOrders=[:]
+    }
     /// Called exactly once before external results can affect a tool decision.
     func prepare(_ intent:AskAgentInterpretation)throws {
         prepared=try intent.permissions.map {permission in (permission,try resolved(permission))}
@@ -302,7 +397,9 @@ enum AskRecoveryOperationScope {
             }
             // Pending previews can contain local-only values: never project their contents.
             selectionIsPrivate=true
-            return .init(output:.init(status:failure==nil ? "applied" : "unavailable",complete:failure==nil,totalCount:0,records:[],findings:[],message:failure==nil ? "changed" : "unavailable",localOnly:false),response:plain(failure ?? "Saved.",actions:applied,statusOnly:failure==nil),orderedIDs:selection,appendPreviousResults:true,selectionIsPrivate:true,outcomes:applied.flatMap {action in action.targetIDs.map {.init(id:$0,state:action.state.rawValue)}},selectionIsOrdered:selectionIsOrdered,displayOrder:selectionIsOrdered ? displayOrder : nil)
+            let execution=AskAgentExecution(output:.init(status:failure==nil ? "applied" : "unavailable",complete:failure==nil,totalCount:0,records:[],findings:[],message:failure==nil ? "changed" : "unavailable",localOnly:false),response:plain(failure ?? "Saved.",actions:applied,statusOnly:failure==nil),orderedIDs:selection,appendPreviousResults:true,selectionIsPrivate:true,outcomes:applied.flatMap {action in action.targetIDs.map {.init(id:$0,state:action.state.rawValue)}},selectionIsOrdered:selectionIsOrdered,displayOrder:selectionIsOrdered ? displayOrder : nil)
+            invalidateNativeQueries(after:execution)
+            return execution
         }
         if call.name=="propose_changes" {
             var proposal=try JSONDecoder().decode(AskChangeProposal.self,from:Data(call.arguments.utf8))
@@ -404,10 +501,16 @@ enum AskRecoveryOperationScope {
                     guard sources.count==Set(proposal.targetIDs).count,Set(sources.compactMap {($0.value(forKey:"feastList") as? FeastList)?.id?.uuidString})==[pinned.parent] else{throw AskChangeError.conflict}
                 }
             }
-            if proposal.operation != "create",request.agentTask?.referencesIncomplete==true {
+            if proposal.operation != "create",let section=humanReferenceSection {
+                let scoped=decision.targetSelector.map {$0.scope=="previous" || !($0.positions ?? []).isEmpty || humanScopesAmbiguousSelection($0)} ?? false
+                guard scoped,proposal.entity==section.entity,Set(proposal.targetIDs).isSubset(of:Set(section.selectionIDs)) else {
+                    return .init(output:.init(status:"needs_confirmation",complete:false,totalCount:0,records:[],findings:[],message:"needs_review",localOnly:false),response:plain("Which place in the selected section should I change? No change was applied."),orderedIDs:selection,selectionIsPrivate:selectionIsPrivate,selectionIsOrdered:selectionIsOrdered,displayOrder:selectionIsOrdered ? displayOrder : nil)
+                }
+            }
+            if proposal.operation != "create",(request.agentTask?.referencesIncomplete==true && humanReferenceSection==nil || unresolvedSectionReference) || (conversationalExecution && querySectionIDs.count>1 && humanReferenceSelection.isEmpty) {
                 // A missing selector cannot turn an ambiguous earlier answer into
                 // permission. Newly named targets can still resolve independently.
-                guard let selector=decision.targetSelector,selector.scope != "previous",(selector.positions ?? []).isEmpty else {
+                guard let selector=decision.targetSelector,selector.scope != "previous",(selector.positions ?? []).isEmpty,humanScopesAmbiguousSelection(selector) else {
                     return .init(output:.init(status:"needs_confirmation",complete:false,totalCount:0,records:[],findings:[],message:"needs_review",localOnly:false),response:plain("I couldn’t match every place in that earlier answer. Please name the places you want changed, or ask me to show the list again."),orderedIDs:selection,selectionIsPrivate:selectionIsPrivate,selectionIsOrdered:selectionIsOrdered,displayOrder:selectionIsOrdered ? displayOrder : nil)
                 }
             }
@@ -539,6 +642,9 @@ enum AskRecoveryOperationScope {
     /// The fingerprint pins membership, order AND current values across successive pages.
     private func collectionQuery(_ entity:String,plan:AskLibraryPlan,selectionIDs:[String]?)throws->AskAgentExecution {
         _ = try plan.validated()
+        if plan.scope == .previous,((request.agentTask?.referencesIncomplete==true && humanReferenceSection==nil || unresolvedSectionReference) || (conversationalExecution && querySectionIDs.count>1 && humanReferenceSelection.isEmpty)) {
+            return .init(output:.init(status:"ambiguous",complete:false,totalCount:0,records:[],findings:[],message:"ambiguous",localOnly:false),response:plain("Which result section or named places do you mean? The separate lists don’t share one order."),orderedIDs:[],selectionIsOrdered:false)
+        }
         guard plan.fieldPresence == nil || (supportsCollectionQueryV2 && entity=="place") else{throw AskError.invalidEvidence}
         let offset=plan.offset ?? 0,limit=plan.limit ?? 200
         let aggregate=[AskLibraryPlan.Operation.count,.group,.catalog].contains(plan.operation)
@@ -647,8 +753,23 @@ enum AskRecoveryOperationScope {
         guard offset<=records.count,(offset==0 || plan.snapshot==fingerprint),(plan.snapshot==nil || plan.snapshot==fingerprint) else {
             return .init(output:.init(status:"stale",complete:false,totalCount:records.count,records:[],findings:[],message:"target_mismatch",localOnly:false),response:plain("The collection changed while reading these results. Ask for the list again to get a complete current answer."),orderedIDs:[],selectionIsOrdered:false)
         }
+        var identity=plan;identity.offset=nil;identity.limit=nil;identity.snapshot=nil
+        struct SectionIdentity:Encodable {let entity:String,query:AskLibraryPlan,snapshot:String}
+        let sectionID=SHA256.hash(data:try encoder.encode(SectionIdentity(entity:entity,query:identity,snapshot:fingerprint))).map {String(format:"%02x",$0)}.joined()
+        // Compatibility for a single old paged archive without section metadata.
+        if collectionPageProgress[sectionID]==nil,let prior=request.collectionContinuation,prior.querySections==nil,let context=prior.libraryContext {
+            var old=context.filters;old.offset=nil;old.limit=nil;old.snapshot=nil
+            if old==identity,prior.collectionPage?.snapshot==fingerprint {collectionPageProgress[sectionID]=collectionPageProgress[fingerprint];collectionPageDisplayOrders[sectionID]=collectionPageDisplayOrders[fingerprint]}
+        }
+        func attachSection(_ response:inout AskResponse) {
+            response.paragraphs=response.paragraphs.enumerated().map {i,original in
+                original.renamed("q"+String(sectionID.prefix(24))+"-p"+String(offset)+"-r"+String(i))
+            }
+            response.querySections=[.init(id:sectionID,entity:entity,context:response.libraryContext,page:response.collectionPage,selectionIDs:selection,ordered:selectionIsOrdered,displayOrder:displayOrder,paragraphIDs:response.paragraphs.map(\.id),displayed:plan.operation != .answer)]
+            querySectionIDs.insert(sectionID)
+        }
         if aggregate {
-            let response:AskResponse
+            var response:AskResponse
             if let result {response=try AskLibraryReadTools.response(result,tools:AskReadTools(request:request.collectionReadVersion(),index:view.index))}
             else {response=plain("\(records.count) saved \(entity == "city" ? "cities" : "neighborhoods").")}
             let summary=response.paragraphs.flatMap(\.spans).compactMap {if case .text(let value)=$0{return value};return nil}.joined(separator:"\n")
@@ -656,6 +777,7 @@ enum AskRecoveryOperationScope {
             guard rendered,summary.utf16.count<=8000 else{return .init(output:.init(status:"partial",complete:false,totalCount:records.count,records:[],findings:[],message:"unavailable",localOnly:false),response:response,orderedIDs:[],selectionIsOrdered:false)}
             selection=records.map(\.id);selectionIsOrdered=false;displayOrder=nil;selectionIsPrivate=true
             let total=plan.operation == .catalog ? view.snapshot.totalCount : records.count
+            attachSection(&response)
             return .init(output:.init(status:total==0 ? "empty" : "success",complete:true,totalCount:total,records:[],findings:[],message:total==0 ? "not_found" : "ok",localOnly:false,summary:summary),response:response,orderedIDs:selection,selectionIsPrivate:true,presentation:.init(kind:plan.operation == .count && plan.groupBy==nil || plan.operation == .catalog ? "count" : "groups",requestedFields:plan.fields,returnedFields:plan.groupBy.map {[$0]} ?? [],complete:true,renderedLocally:true),selectionIsOrdered:false)
         }
         var page:[AskAgentRecord]=[],bytes=1500
@@ -681,18 +803,19 @@ enum AskRecoveryOperationScope {
         if plan.operation == .answer {response.paragraphs=[]}
         response.collectionPage = .init(snapshot:fingerprint,totalCount:records.count,offset:offset,returnedCount:page.count,nextOffset:next)
         // Keep the complete membership for scope=previous, even when transport is paged.
-        if offset==0 {collectionPageProgress[fingerprint]=0;collectionPageDisplayOrders[fingerprint]=[]}
-        if collectionPageProgress[fingerprint]==offset {
-            collectionPageProgress[fingerprint]=end
+        if offset==0 {collectionPageProgress[sectionID]=0;collectionPageDisplayOrders[sectionID]=[]}
+        if collectionPageProgress[sectionID]==offset {
+            collectionPageProgress[sectionID]=end
             let shown=response.libraryContext?.displayOrder ?? response.libraryContext?.ids ?? page.map(\.id)
-            collectionPageDisplayOrders[fingerprint,default:[]] += shown
+            collectionPageDisplayOrders[sectionID,default:[]] += shown
         }
-        selection=records.map(\.id);selectionIsOrdered=collectionPageProgress[fingerprint]==records.count && records.count<=AskCollectionPage.maximumRenderedRecords;selectionIsPrivate=true
+        selection=records.map(\.id);selectionIsOrdered=plan.operation != .answer && collectionPageProgress[sectionID]==records.count && records.count<=AskCollectionPage.maximumRenderedRecords;selectionIsPrivate=true
         displayOrder=nil
-        if selectionIsOrdered,let shown=collectionPageDisplayOrders[fingerprint],Set(shown)==Set(selection) {
+        if selectionIsOrdered,let shown=collectionPageDisplayOrders[sectionID],Set(shown)==Set(selection) {
             selection=shown.reduce(into:[String]()) {if !$0.contains($1) {$0.append($1)}}
             displayOrder=shown==selection ? nil : shown
         }
+        attachSection(&response)
         let output=AskAgentResult(status:records.isEmpty ? "empty" : "success",complete:offset==0 && next==nil,totalCount:records.count,records:page,findings:[],message:records.isEmpty ? "not_found" : "ok",localOnly:false,offset:offset,returnedCount:page.count,nextOffset:next,snapshot:fingerprint)
         return .init(output:output,response:response,orderedIDs:selection,selectionIsPrivate:true,presentation:.init(kind:plan.operation == .details || plan.operation == .compare ? "details" : "rows",requestedFields:plan.fields,returnedFields:plan.fields.filter {$0 != "address"},complete:offset==0 && next==nil,renderedLocally:plan.operation != .answer),selectionIsOrdered:selectionIsOrdered,displayOrder:selectionIsOrdered ? displayOrder : nil)
     }
@@ -1029,6 +1152,7 @@ enum AskRecoveryOperationScope {
         }
         }
         let execution=AskAgentExecution(output:ack,response:response,orderedIDs:selection,appendPreviousResults:true,selectionIsPrivate:selectionIsPrivate,outcomes:selection.compactMap {id in mutationStates[id].map {.init(id:id,state:$0)}},effectiveTargetIDs:p.targetIDs,selectionIsOrdered:selectionIsOrdered,displayOrder:selectionIsOrdered ? displayOrder : nil)
+        invalidateNativeQueries(after:execution)
         return execution
     }
     private static func trace(_ root:UUID,_ id:String)->UUID {

@@ -19,6 +19,8 @@ import CoreData
     @Published private(set) var libraryToolsVersion = 1
     @Published private(set) var publicBusinessAvailable = false
     @Published private(set) var nativeResearchAvailable = false
+    @Published private(set) var recoveryRetainedHistoryAvailable=false
+    @Published private(set) var retainedHistoryAvailable=false
     @Published private(set) var collectionQueriesAvailable = false
     @Published private(set) var recoveryAvailable = false
     private var changeEngine:AskCollectionChangeEngine?
@@ -66,6 +68,7 @@ import CoreData
             session?.refreshIndex={try adapter.index()}
             session?.collectionExecutor={id,undo in try engine.performExplicitAction(id,undo:undo)}
             session?.collectionStatus={id in try engine.actionStatus(id)}
+            session?.historyDeletedRecordIDs={turn,ids in try engine.recoveryDeletedRecordIDs(forTurn:turn,includingActionIDs:Set(ids))}
             session?.collectionReceipts={id in try engine.receipts(forTurn:id)}
             session?.collectionRecovery={chat in try engine.recoverableTurns(in:chat)}
             session?.collectionClear={chat in try engine.dismissRecovery(in:chat)}
@@ -105,8 +108,10 @@ import CoreData
               let info = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               AskPrivacy.onlineAllowed,capabilitiesEndpoint==expectedEndpoint else { return }
         recoveryAvailable = info["answerJobsVersion"] as? Int == 1
+        recoveryRetainedHistoryAvailable = recoveryAvailable && info["answerJobsRetainedHistoryVersion"] as? Int == 1
         nativeResearchAvailable = info["nativeResearchEnabled"] as? Bool == true && (info["agentProtocolVersions"] as? [Int])?.contains(10)==true
         collectionQueriesAvailable = nativeResearchAvailable && info["collectionQueryVersion"] as? Int == 2
+        retainedHistoryAvailable = nativeResearchAvailable && info["retainedHistoryVersion"] as? Int == 1
         screenshotSendingAvailable = info["selectedScreenshotEnabled"] as? Bool == true
         discoveryAvailable = info["webDiscoveryEnabled"] as? Bool == true
         libraryToolsAvailable = info["savedToolsEnabled"] as? Bool == true
@@ -155,12 +160,12 @@ import CoreData
             token: token, approve: { [weak self] request, evidence in
                 guard let self else { return false }
                 return await self.approveHosted(request, evidence: evidence)
-            }, send: send, webEnabled: { [weak self] in await self?.discoveryAvailable ?? false }, libraryToolsEnabled: { [weak self] in await self?.libraryToolsAvailable ?? false }, permission: { AskPrivacy.onlineAllowed },libraryPlanVersion:{ [weak self] in await self?.libraryToolsVersion ?? 1 },publicLookupEnabled:{[weak self] in await self?.publicBusinessAvailable ?? false},nativeResearchEnabled:{[weak self] in await self?.nativeResearchAvailable ?? false},collectionQueriesEnabled:{[weak self] in await self?.collectionQueriesAvailable ?? false},recoveryEnabled:{[weak self] in guard AskRecoveryFeature.enabled else{return false};return await self?.recoveryAvailable ?? false})
+            }, send: send, webEnabled: { [weak self] in await self?.discoveryAvailable ?? false }, libraryToolsEnabled: { [weak self] in await self?.libraryToolsAvailable ?? false }, permission: { AskPrivacy.onlineAllowed },libraryPlanVersion:{ [weak self] in await self?.libraryToolsVersion ?? 1 },publicLookupEnabled:{[weak self] in await self?.publicBusinessAvailable ?? false},nativeResearchEnabled:{[weak self] in await self?.nativeResearchAvailable ?? false},collectionQueriesEnabled:{[weak self] in await self?.collectionQueriesAvailable ?? false},retainedHistoryEnabled:{[weak self] in await self?.retainedHistoryAvailable ?? false},recoveryEnabled:{[weak self] in guard AskRecoveryFeature.enabled else{return false};return await self?.recoveryAvailable ?? false},recoveryRetainedHistoryEnabled:{[weak self] in await self?.recoveryRetainedHistoryAvailable ?? false})
     }
     func productionProvider(configuration: AskHostedConfiguration) -> AskHostedProvider {
         AskHostedProvider(configuration:configuration,token:{ try configuration.ownerValidation ? AskOwnerValidationAccess.credential() : AskProductionAccess.credential() },approve:{ [weak self] request,evidence in
             guard let self else { return false }; return await self.approveHosted(request,evidence:evidence,exactSelection:true)
-        },send:{ try await AskHostedHTTP.shared.send($0) },webEnabled:{ [weak self] in await self?.discoveryAvailable ?? false },libraryToolsEnabled:{ [weak self] in await self?.libraryToolsAvailable ?? false },permission:{ AskPrivacy.onlineAllowed },libraryPlanVersion:{ [weak self] in await self?.libraryToolsVersion ?? 1 },publicLookupEnabled:{[weak self] in await self?.publicBusinessAvailable ?? false},prepareCapabilities:{[weak self] in await self?.refreshHostedCapabilities(endpoint:configuration.endpoint)},nativeResearchEnabled:{[weak self] in await self?.nativeResearchAvailable ?? false},collectionQueriesEnabled:{[weak self] in await self?.collectionQueriesAvailable ?? false},recoveryEnabled:{[weak self] in guard AskRecoveryFeature.enabled else{return false};return await self?.recoveryAvailable ?? false},recoveryCleanupToken:{try configuration.ownerValidation ? AskOwnerValidationAccess.recoveryCleanupCredential(endpoint:configuration.endpoint) : AskProductionAccess.recoveryCleanupCredential(endpoint:configuration.endpoint)})
+        },send:{ try await AskHostedHTTP.shared.send($0) },webEnabled:{ [weak self] in await self?.discoveryAvailable ?? false },libraryToolsEnabled:{ [weak self] in await self?.libraryToolsAvailable ?? false },permission:{ AskPrivacy.onlineAllowed },libraryPlanVersion:{ [weak self] in await self?.libraryToolsVersion ?? 1 },publicLookupEnabled:{[weak self] in await self?.publicBusinessAvailable ?? false},prepareCapabilities:{[weak self] in await self?.refreshHostedCapabilities(endpoint:configuration.endpoint)},nativeResearchEnabled:{[weak self] in await self?.nativeResearchAvailable ?? false},collectionQueriesEnabled:{[weak self] in await self?.collectionQueriesAvailable ?? false},retainedHistoryEnabled:{[weak self] in await self?.retainedHistoryAvailable ?? false},recoveryEnabled:{[weak self] in guard AskRecoveryFeature.enabled else{return false};return await self?.recoveryAvailable ?? false},recoveryRetainedHistoryEnabled:{[weak self] in await self?.recoveryRetainedHistoryAvailable ?? false},recoveryCleanupToken:{try configuration.ownerValidation ? AskOwnerValidationAccess.recoveryCleanupCredential(endpoint:configuration.endpoint) : AskProductionAccess.recoveryCleanupCredential(endpoint:configuration.endpoint)})
     }
     func disableOnline() {
         session?.revokeRecovery(); session?.attachment = nil
