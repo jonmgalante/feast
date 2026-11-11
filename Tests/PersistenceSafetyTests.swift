@@ -20,6 +20,10 @@ final class FailingContext: NSManagedObjectContext, @unchecked Sendable {
             try await AskAnswerRetentionTests.run(model:model,directory:URL(fileURLWithPath:CommandLine.arguments[2]),selection:selected);return
         }
         if ProcessInfo.processInfo.environment["FEAST_DELETED_PROOF_ONLY"]=="1" {try AskDeletedRecordProofTests.run(model:model,directory:URL(fileURLWithPath:CommandLine.arguments[2]));return}
+        if ProcessInfo.processInfo.environment["FEAST_HISTORY_FOLLOWUP_ONLY"]=="1" {try await AskHistoryFollowupTests.run(directory:URL(fileURLWithPath:CommandLine.arguments[2]));return}
+        if ProcessInfo.processInfo.environment["FEAST_HISTORY_DELETE_ONLY"]=="1" {try await AskHistoryDeletionCleanupTests.run(model:model,directory:URL(fileURLWithPath:CommandLine.arguments[2]));try await AskHistoryFollowupTests.run(directory:URL(fileURLWithPath:CommandLine.arguments[2]));return}
+        if ProcessInfo.processInfo.environment["FEAST_NAVIGATION_REVIEW_ONLY"]=="1" {try await AskHistoryReviewRegressionTests.run(directory:URL(fileURLWithPath:CommandLine.arguments[2]));try AskHistoryCleanupTests.run(directory:URL(fileURLWithPath:CommandLine.arguments[2]));try await AskHistoryDeletionCleanupTests.run(model:model,directory:URL(fileURLWithPath:CommandLine.arguments[2]));try await AskHistoryFollowupTests.run(directory:URL(fileURLWithPath:CommandLine.arguments[2]));return}
+        if ProcessInfo.processInfo.environment["FEAST_NAVIGATION_ONLY"]=="1" {try await AskHistoryNavigationTests.run(model:model,directory:URL(fileURLWithPath:CommandLine.arguments[2]));try await AskHistoryPendingStoreTests.run(model:model,directory:URL(fileURLWithPath:CommandLine.arguments[2]));try await AskHistoryDestructiveTests.run(model:model,directory:URL(fileURLWithPath:CommandLine.arguments[2]));try await AskHistoryReviewRegressionTests.run(directory:URL(fileURLWithPath:CommandLine.arguments[2]));try AskHistoryCleanupTests.run(directory:URL(fileURLWithPath:CommandLine.arguments[2]));try await AskHistoryDeletionCleanupTests.run(model:model,directory:URL(fileURLWithPath:CommandLine.arguments[2]));try await AskHistoryFollowupTests.run(directory:URL(fileURLWithPath:CommandLine.arguments[2]));return}
         let url = URL(fileURLWithPath: CommandLine.arguments[2]).appendingPathComponent("synthetic.sqlite")
         func coordinator() throws -> NSPersistentStoreCoordinator {
             let coordinator = NSPersistentStoreCoordinator(managedObjectModel: model)
@@ -271,6 +275,13 @@ final class FailingContext: NSManagedObjectContext, @unchecked Sendable {
         try await AskConversationLoopTests.run()
         try await AskAnswerRetentionTests.run(model:model,directory:URL(fileURLWithPath:CommandLine.arguments[2]))
         try await AskRetryStorageTests.run(directory:URL(fileURLWithPath:CommandLine.arguments[2]))
+        try await AskHistoryNavigationTests.run(model:model,directory:URL(fileURLWithPath:CommandLine.arguments[2]))
+        try await AskHistoryPendingStoreTests.run(model:model,directory:URL(fileURLWithPath:CommandLine.arguments[2]))
+        try await AskHistoryDestructiveTests.run(model:model,directory:URL(fileURLWithPath:CommandLine.arguments[2]))
+        try await AskHistoryReviewRegressionTests.run(directory:URL(fileURLWithPath:CommandLine.arguments[2]))
+        try AskHistoryCleanupTests.run(directory:URL(fileURLWithPath:CommandLine.arguments[2]))
+        try await AskHistoryDeletionCleanupTests.run(model:model,directory:URL(fileURLWithPath:CommandLine.arguments[2]))
+        try await AskHistoryFollowupTests.run(directory:URL(fileURLWithPath:CommandLine.arguments[2]))
         try await AskLifecycleAdmissionTests.run(model:model,directory:URL(fileURLWithPath:CommandLine.arguments[2]))
         try await AskConversationPersistenceTests.run(model:model,directory:URL(fileURLWithPath:CommandLine.arguments[2]))
         try AskJournalCapacityTests.run(model:model,directory:URL(fileURLWithPath:CommandLine.arguments[2]))

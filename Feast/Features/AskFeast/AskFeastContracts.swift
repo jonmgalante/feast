@@ -587,12 +587,30 @@ struct AskTurn: Identifiable, Equatable {
     @Published private(set) var turns: [AskTurn] = []
     @Published private(set) var isLoading = false
     @Published private(set) var error: String?
+    @Published private(set) var historyWarning:String?
+    private struct VolatileScreen {let turns:[AskTurn],canRetry:[UUID:Bool]}
+    private var volatileScreens:[UUID:VolatileScreen]=[:]
+    private var unsavedChatIDs=Set<UUID>()
+    var unsavedHistoryChatIDs:Set<UUID> {unsavedChatIDs}
+#if FEAST_TESTS
+    var historyDestructiveInterruption:((String)->Bool)?
+#endif
+    private func interruptHistoryDestruction(_ point:String)->Bool {
+#if FEAST_TESTS
+        return historyDestructiveInterruption?(point) ?? false
+#else
+        return false
+#endif
+    }
     @Published private(set) var canRetry: [UUID: Bool] = [:]
     @Published private(set) var chats: [AskChatArchive] = []
     @Published private(set) var activeChatID = UUID()
     @Published private(set) var needsOnlineConsent = false
     private var consentTicket: UUID?
     private var historyMigration: AskChatMigration?
+    private var migrationCleanupWarning:String?
+    private var removalCleanupWarning:String?
+    private let historyWriterID=UUID()
     private var historyReadable = true
     private var history: AskConversationStore?
     private var historyTask: Task<Void, Never>?
@@ -631,8 +649,29 @@ struct AskTurn: Identifiable, Equatable {
     /// Hide only the identical error already attached to the latest turn, not
     /// unrelated current storage/admission errors after a historical failure.
     var composerError:String? {
-        guard let error else{return nil}
-        return turns.last?.status == .failed(error) ? nil : error
+        let current=error.flatMap {turns.last?.status == .failed($0) ? nil : $0}
+        return composedError(current)
+    }
+    // History does not show the inline failed turn, so retain its existing
+    // request error while also surfacing sticky history warnings.
+    var historyError:String? {composedError(error)}
+    private func composedError(_ current:String?)->String? {
+        let messages=[historyWarning,current==historyWarning ? nil : current].compactMap {$0}
+        return messages.isEmpty ? nil : messages.joined(separator:"\n")
+    }
+    private func combinedHistoryWarning(additional:String?=nil)->String? {
+        // Historical loss needs its own visible explanation even when current
+        // state is durable and an independent cleanup obligation remains.
+        var seen=Set<String>()
+        let messages=[history?.unsavedNotice,additional,history?.maintenanceWarning,migrationCleanupWarning,removalCleanupWarning].compactMap {$0}.filter {seen.insert($0).inserted}
+        if !messages.isEmpty {return messages.joined(separator:"\n")}
+        return history?.preservation == .pending ? "Your messages and draft are saved on this device in pending history. The regular history file is full or this draft exceeds its limits." : nil
+    }
+    var canDismissHistoryNotice:Bool {unsavedChatIDs.isEmpty && history?.unsavedNotice != nil}
+    func dismissHistoryNotice() {
+        guard canDismissHistoryNotice else{return}
+        guard history?.acknowledgeUnsavedNotice()==true else {error="This history notice couldn’t be cleared. Saved history is unchanged.";return}
+        historyWarning=combinedHistoryWarning()
     }
     private func admitNewTurn()->Bool {
         guard history == nil || turns.filter(\.isArchiveEligible).count < AskConversationSnapshot.maximumTurns else {
@@ -984,33 +1023,45 @@ struct AskTurn: Identifiable, Equatable {
         Task { await AskPerformanceRecorder.shared.record(.render, milliseconds: duration, traceID: id) }
     }
     func clearConversation() {
-        let removed=turns.map(\.id)
-        cancel(); historyTask?.cancel(); historyGeneration = UUID()
-        do {try stopRecoveryChat(activeChatID);try collectionClear?(activeChatID)}catch {self.error=error.localizedDescription;return}
-        if history != nil {
-            var next=currentChatSnapshot()
-            guard let i=next.firstIndex(where:{$0.id==activeChatID}) else{return}
-            next[i].conversation = .init()
-            guard commitChats(next,active:activeChatID) else{return}
-        }
-        deleteRetryContexts(removed);resetScreen(.init())
+        let oldID=activeChatID,removed=Array(Set(turns.map(\.id)+(chats.first(where:{$0.id==oldID})?.conversation.turns.map(\.id) ?? [])))
+        var next=currentChatSnapshot()
+        let replacement:AskChatArchive
+        if let i=next.firstIndex(where:{$0.id==oldID}) {
+            let old=next[i]
+            replacement = .init(id:UUID(),title:old.title,updatedAt:old.updatedAt,conversation:.init(),lastActivityAt:old.lastActivityAt)
+            next[i]=replacement
+        } else {replacement = .init(id:UUID(),title:"New chat",updatedAt:Date(),conversation:.init());next=[replacement]}
+        // No cancel/stop before commit: stopping can scrub a recovery checkpoint.
+        // A new durable chat identity is the bounded clear/recovery barrier.
+        guard commitChats(next,active:replacement.id,removing:[oldID]) else{return}
+        if interruptHistoryDestruction("clear-committed") {return}
+        historyTask?.cancel();historyGeneration=UUID();generation=UUID();task?.cancel();task=nil;activeID=nil;isLoading=false
+        volatileScreens.removeValue(forKey:oldID)
+        resetScreen(replacement.conversation);cleanupMigration(oldID)
+        cleanupRemovedChat(oldID,turns:removed)
     }
     private func actionReceiptResponse(_ actions:[AskCollectionAction])->AskResponse {
         let text="Changes recorded before this request stopped."
         return .init(summary:text,candidates:[],paragraphs:[.init(id:"action-recovery",spans:[.text(text)],sourceIDs:[],operationStatus:true)],listedCandidateIDs:[],usesLocalCatalog:true,agentTask:.init(action:"change",fields:[],orderedIDs:actions.flatMap(\.targetIDs),sourcePolicy:"local_only"),collectionActions:actions,executionStatus:"stopped")
     }
     private func resetScreen(_ value:AskConversationSnapshot) {
+        // The old screen's timestamp was captured with its snapshot. It must
+        // never be applied by a later draft-only save of the selected chat.
+        pendingActivityAt=nil
         if recoveryStore != nil {activeID=nil;isLoading=false;task=nil}
-        turns = value.turns.map { $0.turn }; acceptedAt = [:]; input = value.draft;fallbackDraftTurnID=value.fallbackDraftTurnID
+        let retained=volatileScreens[activeChatID]
+        let encoder=JSONEncoder();encoder.outputFormatting = .sortedKeys
+        let matches=retained.map {(try? encoder.encode($0.turns.filter(\.isArchiveEligible).map(AskArchivedTurn.init))) == (try? encoder.encode(value.turns))} ?? false
+        turns = matches ? retained!.turns : value.turns.map { $0.turn }; acceptedAt = [:]; input = value.draft;fallbackDraftTurnID=value.fallbackDraftTurnID
         if let collectionStatus {for i in turns.indices {guard var response=turns[i].response,var actions=response.collectionActions else{continue};for j in actions.indices {if let current=try? collectionStatus(actions[j].id) {actions[j]=current}else {actions[j].state = .unavailable;actions[j].undoable=false}};response.collectionActions=actions;response.refreshCollectionReviewStatus();turns[i].response=response}}
         if let fieldStatus {for i in turns.indices {guard var response=turns[i].response,let actions=response.fieldActions else{continue};response.fieldActions=actions.map {currentFieldAction($0)};turns[i].response=response}}
         if let recovered=try? collectionRecovery?(activeChatID) {
             for item in recovered where !turns.contains(where:{$0.id==item.id}) {
                 turns.append(.init(id:item.id,request:.init(mode:.collection,text:item.question,fromOCR:false),response:actionReceiptResponse(item.actions),sources:[],status:.complete))
-                if input==item.question {input=""}
+                if fallbackDraftTurnID==item.id,input==item.question {input=""}
             }
         }
-        attachment = nil; canRetry = [:]; error = nil; needsOnlineConsent = false
+        attachment = nil; canRetry = matches ? retained!.canRetry : [:]; error = nil; needsOnlineConsent = false
         mode = .collection; sourceOverride = nil; fromOCR = false
         restorePendingRecovery()
     }
@@ -1018,43 +1069,48 @@ struct AskTurn: Identifiable, Equatable {
         guard history == nil else { return }
         history = store
         do {
-            let library = try store.loadLibrary()
+            let library = try store.loadLibrary(forSession:historyWriterID)
             chats = library.chats; activeChatID = library.activeID;historyMigration = library.migration
+            historyWarning=combinedHistoryWarning()
             resetScreen(chats.first { $0.id == activeChatID }!.conversation)
+            // An absent migrated ID in the committed library is the prior
+            // explicit removal barrier, not permission to delete changed bytes.
+            if let migration=historyMigration,!chats.contains(where:{$0.id==migration.chatID}) {cleanupMigration(migration.chatID)}
         } catch { historyReadable = false; self.error = error.localizedDescription }
     }
-    private func commitChats(_ proposed:[AskChatArchive], active:UUID) -> Bool {
-        guard historyReadable else { error = AskHistoryError.unreadable.localizedDescription; return false }
-        guard (1...50).contains(proposed.count),proposed.allSatisfy({$0.conversation.turns.count <= AskConversationSnapshot.maximumTurns}) else { error = AskHistoryError.limit.localizedDescription;return false }
-        if let history, !history.saveLibrary(.init(activeID:active,chats:proposed,migration:historyMigration)) {
-            error = "Chat history couldn’t be saved. Nothing was deleted.";return false
+    /// True means the exact whole candidate is durable, never merely navigable.
+    private func commitChats(_ proposed:[AskChatArchive], active:UUID,allowVolatile:Bool=false,removing:Set<UUID>=[],changedChatIDs:Set<UUID>=[]) -> Bool {
+        guard historyReadable else {error=AskHistoryError.unreadable.localizedDescription;return false}
+        guard (1...50).contains(proposed.count),proposed.contains(where:{$0.id==active}) else {error=AskHistoryError.limit.localizedDescription;return false}
+        let outcome=history?.preserveLibrary(.init(activeID:active,chats:proposed,migration:historyMigration),removingChatIDs:removing,session:historyWriterID) ?? .canonical
+        if outcome == .unsaved {
+            // Recovery can finish in a nonselected chat while this candidate
+            // also captures newer edits on the visible screen.
+            unsavedChatIDs.formUnion(changedChatIDs.union([activeChatID,active]))
+            let count=proposed.filter {unsavedChatIDs.contains($0.id)}.count
+            var current="Changes in "+(count==1 ? "this chat are" : "\(max(count,1)) chats are")+" not saved. Keep the app open; you can return to them in History."
+            if let unresolved=history?.unresolvedRemovalWarning {current=unresolved+" "+current}
+            historyWarning=combinedHistoryWarning(additional:current)
+            error=historyWarning
+            guard allowVolatile else{return false}
+            volatileScreens[activeChatID] = .init(turns:turns,canRetry:canRetry)
+        } else {
+            if error==historyWarning {error=nil}
+            unsavedChatIDs=[]
+            historyWarning=combinedHistoryWarning()
         }
-        chats = proposed;activeChatID = active
-        // Read back the committed archive before releasing any redundant checkpoint.
-        // No history store (or failed/unreadable save) is not a durable archive commit.
-        if !retryArchiveTickets.isEmpty,let history,let verified=try? durableRetryArchive(history) {
+        chats=proposed;activeChatID=active
+        if outcome != .unsaved,!retryArchiveTickets.isEmpty,let history,let verified=try? durableRetryArchive(history) {
             for turn in verified.chats.flatMap({$0.conversation.turns}) {
-                guard let ticket=retryArchiveTickets[turn.id],
-                      proposed.contains(where:{$0.conversation.turns.contains(where:{$0.id==turn.id && $0.response==turn.response})}) else{continue}
+                guard let ticket=retryArchiveTickets[turn.id],proposed.contains(where:{$0.conversation.turns.contains(where:{$0.id==turn.id && $0.response==turn.response})}) else{continue}
                 Task { [weak self,providerAttempts] in
-                    if (try? await providerAttempts.archiveCommitted(ticket,response:turn.response))==true,
-                       self?.retryArchiveTickets[turn.id]==ticket {self?.retryArchiveTickets.removeValue(forKey:turn.id)}
+                    if (try? await providerAttempts.archiveCommitted(ticket,response:turn.response))==true,self?.retryArchiveTickets[turn.id]==ticket {self?.retryArchiveTickets.removeValue(forKey:turn.id)}
                 }
             }
         }
-        return true
+        return outcome != .unsaved
     }
-    private func durableRetryArchive(_ history:AskConversationStore)throws->AskChatLibrary {
-        // Readback alone could observe cached, nondurable bytes. Checkpoint deletion
-        // must never become durable before the archive that replaces its payload.
-        let handle=try FileHandle(forWritingTo:history.url);defer{try? handle.close()};try handle.synchronize()
-        let folder=history.url.deletingLastPathComponent()
-        for path in [folder,folder.deletingLastPathComponent()] {
-            let fd=Darwin.open(path.path,O_RDONLY);guard fd>=0 else{throw AskRetryError.storage};defer{Darwin.close(fd)}
-            guard fsync(fd)==0 else{throw AskRetryError.storage}
-        }
-        return try history.loadLibrary()
-    }
+    private func durableRetryArchive(_ history:AskConversationStore)throws->AskChatLibrary {try history.durableLibrary()}
     private func deleteRetryContexts(_ turns:[UUID]) {
         providerAttempts.markDeleted(turns)
         for id in turns {retryArchiveTickets.removeValue(forKey:id)}
@@ -1063,16 +1119,28 @@ struct AskTurn: Identifiable, Equatable {
             catch {self?.error="The chat was deleted, but some local retry context couldn’t be cleared. Its attempts remain blocked."}
         }
     }
+    private func prepareNavigation() {
+        if recoveryStore==nil {
+            if input.isEmpty,let activeID,let turn=turns.first(where:{$0.id==activeID}) {input=turn.request.text}
+            cancel(userInitiated:false)
+        }
+        historyTask?.cancel()
+    }
     @discardableResult func newChat() -> Bool {
-        suspend(); guard flushCurrentChat() else { return false }
-        let chat = AskChatArchive(id:UUID(),title:"New chat",updatedAt:Date(),conversation:.init())
-        guard commitChats(chats + [chat],active:chat.id) else { return false }
-        historyGeneration = UUID();resetScreen(chat.conversation);return true
+        prepareNavigation()
+        guard historyReadable else{return false}
+        guard chats.count<50 else {_ = flushCurrentChat();error=AskHistoryError.limit.localizedDescription;return false}
+        let chat=AskChatArchive(id:UUID(),title:"New chat",updatedAt:Date(),conversation:.init())
+        // Current screen and selection move form one exact whole-library commit.
+        _ = commitChats(currentChatSnapshot()+[chat],active:chat.id,allowVolatile:true)
+        guard activeChatID==chat.id else{return false}
+        historyGeneration=UUID();resetScreen(chat.conversation);return true
     }
     @discardableResult func openChat(_ id:UUID) -> Bool {
-        guard id != activeChatID,chats.contains(where:{$0.id == id}) else { return false }
-        suspend();guard flushCurrentChat(),commitChats(chats,active:id) else { return false }
-        historyGeneration = UUID();resetScreen(chats.first {$0.id == id}!.conversation);restorePendingRecovery(activityResume:true);return true
+        guard id != activeChatID,chats.contains(where:{$0.id==id}) else{return false}
+        prepareNavigation();_ = commitChats(currentChatSnapshot(),active:id,allowVolatile:true)
+        guard activeChatID==id else{return false}
+        historyGeneration=UUID();resetScreen(chats.first {$0.id==id}!.conversation);restorePendingRecovery(activityResume:true);return true
     }
     @discardableResult func renameChat(_ id:UUID,to name:String) -> Bool {
         let title = name.trimmingCharacters(in:.whitespacesAndNewlines)
@@ -1082,23 +1150,49 @@ struct AskTurn: Identifiable, Equatable {
         return commitChats(next,active:activeChatID)
     }
     @discardableResult func deleteChat(_ id:UUID) -> Bool {
-        guard let removedChat=chats.first(where:{$0.id == id}) else { return false }
-        let removed=Array(Set(removedChat.conversation.turns.map(\.id)+(id==activeChatID ? turns.map(\.id) : [])))
-        suspend()
-        do {try stopRecoveryChat(id);try collectionClear?(id)}catch {self.error=error.localizedDescription;return false}
-        var next = currentChatSnapshot().filter {$0.id != id}
-        if next.isEmpty { next = AskChatLibrary.empty().chats }
-        let active = id == activeChatID ? next[0].id : activeChatID
-        guard commitChats(next,active:active) else { return false }
-        deleteRetryContexts(removed)
-        historyGeneration = UUID();resetScreen(next.first {$0.id == active}!.conversation)
-        if let migration = historyMigration,migration.chatID == id,let history {
-            if history.removeMigrationCopy(migration) {
-                historyMigration = nil
-                _ = commitChats(chats,active:activeChatID)
-            } else { error = "The chat was deleted, but its changed or unreadable migration backup was kept." }
-        }
+        guard let removedChat=chats.first(where:{$0.id==id}) else{return false}
+        let wasActive=id==activeChatID,removed=Array(Set(removedChat.conversation.turns.map(\.id)+(wasActive ? turns.map(\.id) : [])))
+        var next=currentChatSnapshot().filter {$0.id != id}
+        if next.isEmpty {next=AskChatLibrary.empty().chats}
+        let active=wasActive ? next[0].id : activeChatID
+        guard commitChats(next,active:active,removing:[id]) else{return false}
+        if interruptHistoryDestruction("delete-committed") {return true}
+        historyTask?.cancel();historyGeneration=UUID()
+        if wasActive {generation=UUID();task?.cancel();task=nil;activeID=nil;isLoading=false}
+        volatileScreens.removeValue(forKey:id)
+        if wasActive {resetScreen(next.first {$0.id==active}!.conversation)}
+        cleanupMigration(id)
+        cleanupRemovedChat(id,turns:removed)
         return true
+    }
+    private func cleanupRemovedChat(_ id:UUID,turns:[UUID]) {
+        // Membership was already durably removed. Cleanup failure cannot restore
+        // old work into the replacement chat, and must not erase new-chat data.
+        if interruptHistoryDestruction("before-recovery-cleanup") {return}
+        // A nonactive chat can own an unarchived running turn. Capture its exact
+        // identities before stop/delete removes the recovery-to-chat binding.
+        var removed=Set(turns)
+        removed.formUnion(recoveryRequests.filter {$0.value.conversationID==id}.map(\.key))
+        if let recoveryStore {
+            do {removed.formUnion(try recoveryStore.checkpoints(chat:id).map(\.turnID))}
+            catch {recordRemovalCleanupFailure()}
+        }
+        do {try stopRecoveryChat(id)}catch {recordRemovalCleanupFailure()}
+        if interruptHistoryDestruction("before-journal-cleanup") {return}
+        do {try collectionClear?(id)}catch {recordRemovalCleanupFailure()}
+        if interruptHistoryDestruction("before-retry-cleanup") {return}
+        deleteRetryContexts(Array(removed))
+    }
+    private func recordRemovalCleanupFailure() {
+        // Later saves verify current history, not the removed chat's separate
+        // recovery/journal cleanup. Keep this live-session warning visible.
+        removalCleanupWarning="The chat was removed, but some older local recovery data couldn’t be cleared."
+        historyWarning=combinedHistoryWarning()
+    }
+    private func cleanupMigration(_ id:UUID) {
+        guard let migration=historyMigration,migration.chatID==id,let history else{return}
+        if history.removeMigrationCopy(migration) {historyMigration=nil;migrationCleanupWarning=nil;_ = commitChats(currentChatSnapshot(),active:activeChatID,allowVolatile:true)}
+        else {migrationCleanupWarning="The chat was removed, but its changed or unreadable migration backup was kept.";historyWarning=combinedHistoryWarning()}
     }
     func dismissConsent() { needsOnlineConsent = false;consentTicket = nil }
     func prepareConsentSend() -> UUID? {
@@ -1114,7 +1208,7 @@ struct AskTurn: Identifiable, Equatable {
         let completed = turns.filter(\.isArchiveEligible).map(AskArchivedTurn.init)
         let interrupted = turns.last(where: { $0.status == .loading && (try? recoveryStore?.checkpoint($0.id)) == nil })
         let fallback=input.isEmpty ? interrupted?.id : fallbackDraftTurnID
-        return .init(version: 1, draft: String((input.isEmpty ? interrupted?.request.text ?? "" : input).prefix(4000)), turns: completed,fallbackDraftTurnID:fallback)
+        return .init(version: 1, draft: input.isEmpty ? interrupted?.request.text ?? "" : input, turns: completed,fallbackDraftTurnID:fallback)
     }
     private func scheduleHistory(trace:AskPipelineTrace? = nil) {
         guard history != nil else { return }
@@ -1141,7 +1235,7 @@ struct AskTurn: Identifiable, Equatable {
     }
     @discardableResult private func flushCurrentChat() -> Bool {
         guard history != nil else { return true }
-        let saved=commitChats(currentChatSnapshot(),active:activeChatID)
+        let saved=commitChats(currentChatSnapshot(),active:activeChatID,allowVolatile:true)
         if saved {pendingActivityAt=nil}
         return saved
     }
@@ -1206,7 +1300,7 @@ struct AskTurn: Identifiable, Equatable {
         }
         next[position].lastActivityAt=activityNow();next[position].updatedAt=activityNow()
         if next[position].title=="New chat" {next[position].title=String(turn.request.text.prefix(80))}
-        return commitChats(next,active:activeChatID)
+        return commitChats(next,active:activeChatID,allowVolatile:true,changedChatIDs:[chat])
     }
     private func cancelRecoveryJob(_ turn:UUID) {
         guard let saved=try? recoveryStore?.checkpoint(turn),

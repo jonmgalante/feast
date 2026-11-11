@@ -446,7 +446,7 @@ private struct AskChatHistoryView: View {
                 }
             }
             ForEach(orderedChats) { chat in historyRow(chat) }
-            if let error = session.error { Text(error).font(.footnote).foregroundStyle(.secondary) }
+            if let error = session.historyError { Text(error).font(.footnote).foregroundStyle(.secondary) }
         }
     }
     private func historyRow(_ chat:AskChatArchive) -> some View {
@@ -458,13 +458,14 @@ private struct AskChatHistoryView: View {
                     Text(AskHistoryPresentation.title(chat)).foregroundStyle(.primary).lineLimit(2)
                     Text(AskHistoryPresentation.date(chat)).font(.caption).foregroundStyle(.secondary)
                     Text(AskHistoryPresentation.preview(chat)).font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
+                    if session.unsavedHistoryChatIDs.contains(chat.id) {Text("Not saved").font(.caption).foregroundStyle(.secondary)}
                 }
                 Spacer()
                 if chat.id == session.activeChatID { Image(systemName:"checkmark").accessibilityLabel("Current chat") }
             }
         }
-        .accessibilityLabel(AskHistoryPresentation.title(chat)+", "+AskHistoryPresentation.date(chat)+". "+AskHistoryPresentation.preview(chat))
-        .accessibilityHint("Open this saved conversation")
+        .accessibilityLabel(AskHistoryPresentation.title(chat)+", "+AskHistoryPresentation.date(chat)+". "+AskHistoryPresentation.preview(chat)+(session.unsavedHistoryChatIDs.contains(chat.id) ? ". Not saved" : ""))
+        .accessibilityHint(session.unsavedHistoryChatIDs.contains(chat.id) ? "Open this conversation. Newer changes are not saved." : "Open this saved conversation")
         .accessibilityActions {
             Button("Rename chat") {title=chat.title;renaming=chat.id;showingRename=true}
             Button("Delete chat") {deleting=chat.id;showingDelete=true}

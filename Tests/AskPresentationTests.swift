@@ -126,10 +126,20 @@ private actor PresentationGateProvider:AskFeastProvider {
         let privateChat=AskChatArchive(id:UUID(),title:privateTurn.question,updatedAt:t1,conversation:.init(turns:[privateTurn]))
         precondition(!AskHistoryPresentation.title(privateChat).contains("secret") && !AskHistoryPresentation.preview(privateChat).contains("Secret"))
         let badParent=directory.appendingPathComponent("not-a-history-directory");try Data("fixture".utf8).write(to:badParent)
-        let unsaved=AskSession(index:index,provider:PresentationProvider());unsaved.restoreHistory(from:AskConversationStore(url:badParent.appendingPathComponent("history.json")))
-        let untouchedDate=unsaved.chats[0].updatedAt
-        unsaved.activityNow={t3};unsaved.input="A genuine message whose history cannot persist";unsaved.run();while unsaved.isLoading {await Task.yield()};unsaved.flushHistory()
-        precondition(unsaved.error != nil && unsaved.chats[0].lastActivityAt==nil && unsaved.chats[0].updatedAt==untouchedDate)
+        let unreadable=AskSession(index:index,provider:PresentationProvider());unreadable.restoreHistory(from:AskConversationStore(url:badParent.appendingPathComponent("history.json")))
+        precondition(unreadable.chats.isEmpty && unreadable.error != nil && !unreadable.newChat(),"Unreadable startup must not adopt an invented empty archive")
+        let parent=directory.appendingPathComponent("history-fails-after-load"),historyURL=parent.appendingPathComponent("history.json"),historyStore=AskConversationStore(url:historyURL)
+        let unsaved=AskSession(index:index,provider:PresentationProvider());unsaved.restoreHistory(from:historyStore);unsaved.flushHistory()
+        let priorBytes=try Data(contentsOf:historyURL),priorDate=unsaved.chats[0].updatedAt,kept=directory.appendingPathComponent("verified-earlier-history")
+        try FileManager.default.moveItem(at:parent,to:kept);try Data("fixture write failure".utf8).write(to:parent)
+        unsaved.activityNow={t3};unsaved.input="A genuine message whose history cannot persist";unsaved.run();while unsaved.isLoading {await Task.yield()}
+        let retainedTurn=unsaved.turns.last!,unsavedDraft="Exact newer unsent draft e\u{301} 🧭  "
+        unsaved.input=unsavedDraft;unsaved.flushHistory()
+        precondition(Array(unsaved.chats[0].conversation.draft.utf8)==Array(unsavedDraft.utf8) && unsaved.chats[0].conversation.turns.last?.id==retainedTurn.id && unsaved.chats[0].conversation.turns.last?.response==retainedTurn.response)
+        precondition(unsaved.historyWarning?.contains("not saved")==true && unsaved.unsavedHistoryChatIDs.contains(unsaved.activeChatID) && unsaved.chats[0].lastActivityAt==t3 && unsaved.chats[0].updatedAt==t3 && unsaved.turns.last?.status == .complete,"Newest genuine activity belongs to the exact returnable RAM chat, without a durability claim")
+        let prior=try JSONDecoder().decode(AskChatLibrary.self,from:Data(contentsOf:kept.appendingPathComponent("history.json")))
+        let retainedBytes=try Data(contentsOf:kept.appendingPathComponent("history.json"))
+        precondition(retainedBytes==priorBytes && prior.chats[0].lastActivityAt==nil && prior.chats[0].updatedAt==priorDate,"Failed save never changes the prior durable activity/archive")
         print("PASS History genuine activity orders messages; passive open/flush/draft/rename/relaunch leave order unchanged; stable ties and missing legacy metadata remain truthful")
 
         var actions=[applied,AskCollectionAction(id:UUID(),title:"Second",targetIDs:[b],entity:"place",operation:"update",state:.applied,undoable:true)]

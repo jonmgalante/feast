@@ -191,6 +191,7 @@ struct AskSavedCollectionPanel: View {
                     .disabled(readingPhoto || (!session.isLoading && session.input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && session.attachment == nil))
             }
             if let error = session.composerError { Text(error).font(FeastTheme.Typography.caption) }
+            if session.canDismissHistoryNotice {Button("Dismiss history notice") {session.dismissHistoryNotice()}.font(FeastTheme.Typography.caption)}
             if let inputError { Text(inputError).font(FeastTheme.Typography.caption) }
         }
         .padding(FeastTheme.Spacing.medium)
