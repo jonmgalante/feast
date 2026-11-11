@@ -101,6 +101,16 @@ struct AskHostedProvider: AskFeastProvider {
     var recoveryEnabled:@Sendable ()async->Bool = {false}
     var recoveryRetainedHistoryEnabled:@Sendable ()async->Bool = {false}
     var recoveryCleanupToken:(@Sendable ()async throws->String)?=nil
+    var revalidatesHistoryAccess=false
+
+    /// Preserve the final dispatch fence without replacing the async URLRequest closure.
+    func sendWithHistoryAccessCheck(_ request:URLRequest)async throws->(Data,HTTPURLResponse) {
+        if revalidatesHistoryAccess {
+            let body=request.httpBody.flatMap {(try? JSONSerialization.jsonObject(with:$0)) as? [String:Any]}
+            if !["status","cancel","ack"].contains(body?["op"] as? String ?? "") {try await AskHistoryAccessScope.check()}
+        }
+        return try await send(request)
+    }
 
     func answer(_ request: AskRequest, tools: AskReadTools) async throws -> AskResponse {
         try configuration.validate()
@@ -148,7 +158,7 @@ struct AskHostedProvider: AskFeastProvider {
         http.setValue("Feast/1.0", forHTTPHeaderField: "User-Agent")
         http.setValue("Bearer " + credential, forHTTPHeaderField: "Authorization")
         let networkStart = DispatchTime.now().uptimeNanoseconds
-        let (data, response) = try await send(http)
+        let (data, response) = try await sendWithHistoryAccessCheck(http)
         let trace = request.performanceID ?? UUID()
         await AskPerformanceRecorder.shared.record(.network, milliseconds: AskPerformanceRecorder.milliseconds(since: networkStart), traceID: trace)
         await AskPerformanceRecorder.shared.recordServerTiming(response.value(forHTTPHeaderField: "Server-Timing"), traceID: trace)
@@ -204,7 +214,7 @@ struct AskHostedProvider: AskFeastProvider {
         http.setValue("Feast/1.0", forHTTPHeaderField: "User-Agent")
         http.setValue("Bearer " + credential, forHTTPHeaderField: "Authorization")
         let networkStart = DispatchTime.now().uptimeNanoseconds
-        let (data,response) = try await send(http)
+        let (data,response) = try await sendWithHistoryAccessCheck(http)
         let trace = request.performanceID ?? UUID()
         await AskPerformanceRecorder.shared.record(.network, milliseconds: AskPerformanceRecorder.milliseconds(since: networkStart), traceID: trace)
         await AskPerformanceRecorder.shared.recordServerTiming(response.value(forHTTPHeaderField: "Server-Timing"), traceID: trace)

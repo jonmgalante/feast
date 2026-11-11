@@ -422,7 +422,7 @@ extension AskHostedProvider:AskConversationPlanning {
         AskPipelineScope.record(.preparation,since:preparation)
         try Task.checkCancellation()
         let data:Data,response:HTTPURLResponse
-        do {(data,response)=try await send(http)}catch {
+        do {(data,response)=try await sendWithHistoryAccessCheck(http)}catch {
             AskPipelineScope.trace?.elapsed(.transport,since:started,counters:[.requestBytes:body.count])
             var receipt=AskConversationReceipt(requestID:payload["requestID"] as? String ?? "",mode:payload["mode"] as? String ?? "",step:payload["step"] as? Int,status:0,data:Data(),elapsed:AskPerformanceRecorder.milliseconds(since:started));receipt.code="network_interrupted";await AskConversationReceipts.shared.record(receipt);throw error
         }

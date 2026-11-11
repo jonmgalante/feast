@@ -13,12 +13,7 @@ struct AskAgentProvider:AskFeastProvider {
     /// hosted provider. Opaque recovery status/cleanup carries no retained data.
     private var privacyCheckedRemote:any AskFeastProvider {
         guard var hosted=remote as? AskHostedProvider else{return remote}
-        let send=hosted.send
-        hosted.send={request in
-            let body=request.httpBody.flatMap {(try? JSONSerialization.jsonObject(with:$0)) as? [String:Any]}
-            if !["status","cancel","ack"].contains(body?["op"] as? String ?? "") {try await AskHistoryAccessScope.check()}
-            return try await send(request)
-        }
+        hosted.revalidatesHistoryAccess=true
         return hosted
     }
     @MainActor private func checkedMapsSearch(_ query:String)async throws->[ApplePlaceMatch] {

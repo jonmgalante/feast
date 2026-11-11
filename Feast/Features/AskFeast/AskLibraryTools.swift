@@ -396,7 +396,7 @@ extension AskHostedProvider: AskLibraryIntentPlanning {
         http.setValue("application/json",forHTTPHeaderField:"Content-Type")
         http.setValue("Feast/1.0",forHTTPHeaderField:"User-Agent")
         http.setValue("Bearer " + credential,forHTTPHeaderField:"Authorization")
-        let (data,response) = try await send(http)
+        let (data,response) = try await sendWithHistoryAccessCheck(http)
         try Task.checkCancellation()
         guard response.statusCode == 200 else { throw AskHostedError.failure(status: response.statusCode, data: data) }
         guard response.url == configuration.endpoint, response.mimeType == "application/json", data.count <= 65536,

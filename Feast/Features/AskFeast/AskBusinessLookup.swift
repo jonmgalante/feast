@@ -49,7 +49,7 @@ extension AskHostedProvider:AskBusinessResearching {
         http.setValue("application/json",forHTTPHeaderField:"Content-Type");http.setValue("Bearer "+credential,forHTTPHeaderField:"Authorization");http.setValue("Feast/1.0",forHTTPHeaderField:"User-Agent")
         let networkStarted=DispatchTime.now().uptimeNanoseconds
         let bytes:Data,response:HTTPURLResponse
-        do {(bytes,response)=try await send(http)}catch {AskPipelineScope.trace?.elapsed(.transport,since:networkStarted,counters:[.requestBytes:data.count]);throw error}
+        do {(bytes,response)=try await sendWithHistoryAccessCheck(http)}catch {AskPipelineScope.trace?.elapsed(.transport,since:networkStarted,counters:[.requestBytes:data.count]);throw error}
         AskPipelineScope.trace?.elapsed(.transport,since:networkStarted,counters:[.requestBytes:data.count,.responseBytes:bytes.count])
         try Task.checkCancellation()
         guard response.statusCode==200 else {throw AskHostedError.failure(status: response.statusCode, data: data)}

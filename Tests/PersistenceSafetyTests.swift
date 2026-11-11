@@ -10,6 +10,7 @@ final class FailingContext: NSManagedObjectContext, @unchecked Sendable {
     @MainActor static func main() async throws {
         setbuf(stdout, nil)
         if CommandLine.arguments.count>1,CommandLine.arguments[1]=="--journal-crash-child" {try AskJournalFailureTests.child();return}
+        try await AskHistoryDispatchTests.run()
         try await MapPlaceLookupTests.run()
         let model = NSManagedObjectModel(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1]))!
         if CommandLine.arguments.count == 4 && CommandLine.arguments[3] == "--verify-real-copy" {

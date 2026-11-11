@@ -252,7 +252,7 @@ extension AskHostedProvider {
         http.setValue("10",forHTTPHeaderField:"X-Feast-Agent-Protocol");http.setValue("application/json",forHTTPHeaderField:"Content-Type");http.setValue("Feast/1.0",forHTTPHeaderField:"User-Agent");http.setValue("Bearer "+credential,forHTTPHeaderField:"Authorization")
         let started=DispatchTime.now().uptimeNanoseconds
         let data:Data,response:HTTPURLResponse
-        do {(data,response)=try await send(http)}catch {
+        do {(data,response)=try await sendWithHistoryAccessCheck(http)}catch {
             AskPipelineScope.trace?.elapsed(.transport,since:started,counters:[.requestBytes:body.count])
             var receipt=AskConversationReceipt(requestID:step.requestID,mode:"conversationStep",step:step.step,status:0,data:Data(),elapsed:AskPerformanceRecorder.milliseconds(since:started));receipt.code="recovery_network_interrupted";await AskConversationReceipts.shared.record(receipt);throw error
         }
