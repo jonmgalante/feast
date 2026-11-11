@@ -2,6 +2,7 @@
 
 Initial review: 2026-11-07 against source baseline `d600907c196dbc74016fc462efbd083569a1023c`.
 Updated 2026-11-09 for the local durable-recovery candidate based on `9a39ab3`.
+Updated 2026-11-11 for the existing local file-metadata API declaration omission.
 Scope: the production iPhone app and the proposed enabled Ask recovery path.
 Recovery remains disabled; its new Performance Data declaration prepares the
 bundled manifest for that rollout and does not claim it is currently deployed.
@@ -30,6 +31,29 @@ Identity linkage includes a device; hashing a persistent identity is not proof o
 unlinkability. App Functionality includes authentication, security and operation.
 Product Personalization includes recommendations customized to the user. These
 purposes are not interchangeable with behavioral Analytics.
+
+## Required-reason API correction: local file metadata
+
+The original conversation migration reads `contentModificationDateKey` to retain
+its saved date (`AskConversationStore.loadLibrary`). The accepted action journal
+also reads that key to verify its local migration backup (`AskActionJournal`).
+Those calls already require `NSPrivacyAccessedAPICategoryFileTimestamp`; this is
+not merely a dependency introduced by the pending navigation repair. That repair
+also uses `fstat`/`lstat` for bounded regular-file size/type checks.
+
+Apple's [required API category table](https://developer.apple.com/documentation/bundleresources/app-privacy-configuration/nsprivacyaccessedapitypes/nsprivacyaccessedapitype)
+was verified from its live documentation JSON on 2026-11-11. It lists all three
+APIs. The narrowly applicable reason is **C617.1**, covering metadata access within
+the app's own containers. Production paths are the app's history/journal files and
+migration backups, not arbitrary system files or document-picker access.
+
+The declaration corrects the bundled API-use record. It adds no file reads,
+transmission, fingerprinting, collection category, tracking, or new permission.
+Existing UserDefaults/SystemBootTime reasons and all nine collected-data entries
+remain byte-for-byte unchanged. No App Store Connect answers are changed.
+The strict checker now also rejects a missing/duplicate file-metadata category,
+a document-picker reason, or an additional unreviewed reason. Final built-bundle
+parity remains required; a source-only manifest is not a submission guarantee.
 
 ## Type / purpose / linkage matrix
 
@@ -138,8 +162,8 @@ the app is closed: local phone tool steps can still wait for foreground activity
 Run `plutil -lint Feast/PrivacyInfo.xcprivacy` and
 `python3 Tests/check-privacy-manifest.py`. The check validates the nine reviewed
 entries, exact TN3184 keys, Boolean linkage/tracking, purposes, duplicate rejection,
-unchanged required-reason APIs, and synchronized target resource membership.
-Fourteen in-memory negative cases ensure it rejects invalid/unreviewed declarations.
+the three exact reviewed required-reason API entries, and synchronized target resource membership.
+Eighteen in-memory negative cases ensure it rejects invalid/unreviewed declarations.
 It reads no app stores or credentials and makes no network requests.
 
 For the final built app or archive, run

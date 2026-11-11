@@ -26,6 +26,7 @@ EXPECTED = {
 REQUIRED_APIS = {
     "NSPrivacyAccessedAPICategoryUserDefaults": ["CA92.1"],
     "NSPrivacyAccessedAPICategorySystemBootTime": ["35F9.1"],
+    "NSPrivacyAccessedAPICategoryFileTimestamp": ["C617.1"],
 }
 
 
@@ -116,6 +117,23 @@ def check_rejected_mutations(manifest):
         performance = next(e for e in bad["NSPrivacyCollectedDataTypes"]
                            if e[TYPE] == TYPE + "PerformanceData")
         performance[key] = value; fixtures.append(bad)
+    # Local history migration and journal backup verification read file metadata.
+    # The narrowly supported reason is app-container access, not document-picker
+    # access, display of timestamps, or an unreviewed additional purpose.
+    category = "NSPrivacyAccessedAPICategoryFileTimestamp"
+    bad = copy.deepcopy(manifest)
+    bad["NSPrivacyAccessedAPITypes"] = [e for e in bad["NSPrivacyAccessedAPITypes"]
+                                      if e["NSPrivacyAccessedAPIType"] != category]
+    fixtures.append(bad)
+    for reasons in (["3B52.1"], ["C617.1", "DDA9.1"]):
+        bad = copy.deepcopy(manifest)
+        metadata = next(e for e in bad["NSPrivacyAccessedAPITypes"]
+                        if e["NSPrivacyAccessedAPIType"] == category)
+        metadata["NSPrivacyAccessedAPITypeReasons"] = reasons; fixtures.append(bad)
+    bad = copy.deepcopy(manifest)
+    metadata = next(e for e in bad["NSPrivacyAccessedAPITypes"]
+                    if e["NSPrivacyAccessedAPIType"] == category)
+    bad["NSPrivacyAccessedAPITypes"].append(copy.deepcopy(metadata)); fixtures.append(bad)
     for fixture in fixtures:
         try:
             validate(fixture)
@@ -133,7 +151,7 @@ def main():
     validate(manifest)
     check_resource_membership()
     check_rejected_mutations(manifest)
-    print("PASS nine reviewed collected types, purposes, linkage, no tracking, existing API reasons and target membership")
+    print("PASS nine reviewed collected types, purposes, linkage, no tracking, reviewed API reasons and target membership")
     if args.app:
         bundled = plistlib.loads((args.app / "PrivacyInfo.xcprivacy").read_bytes())
         validate(bundled)
