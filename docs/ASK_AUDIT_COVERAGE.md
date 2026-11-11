@@ -42,9 +42,24 @@ See `ASK_JOURNAL_V2.md` for migration, backup, rollback, evidence and limitation
 
 This is a scoped code milestone, not a live migration or release approval.
 Physical-device protection/backup restore and actual power-loss behavior remain
-separate acceptance checks. A forthcoming history-permission proof is a separate
-reviewed engine change, not covered by this journal signoff. Retention versus
-erasure remains a product decision; existing retention semantics are unchanged.
+separate acceptance checks. The separate history-permission proof below is not covered by the original
+journal signoff. Retention versus erasure remains a product decision; existing
+retention semantics are unchanged.
+
+## Reviewed deleted-history authority proof
+
+Integrated as `e31eb81` (source `b69c7ea`). An exact committed-deletion or
+undone-creation graph remains a prerequisite. Deleted IDs then receive read proof
+individually only with fresh original-store and parent authority, or the narrowly
+verified same-receipt owned-city graph. A revoked parent cannot be reauthorized
+by a stale receipt, while another permitted city in the same batch stays usable.
+Mutation, Undo, replay and journal storage semantics are unchanged.
+
+Independent exact-source review passed, along with 50 focused proof checks,
+600 default / 601 recovery checkpoints and an unsigned Debug build. The engine
+hash is `f06c50465e1ec5f95b48081f8ddf467adc0c794fb60b29bc8a3ec2f0dec57d08`.
+Consumer UI and history projection integration remains in the answer lane.
+See `ASK_DELETED_HISTORY_PROOF.md`.
 
 ## Reviewed additional answer milestone
 
@@ -65,20 +80,45 @@ both exit 0 with serialized runtimes and a verified post-run source manifest.
 Evidence is `/tmp/feast-integration-journal-answers.f6FEhZ`. The final full combined
 build/review gate still follows the remaining implementation below.
 
+## Reviewed accounting lifecycle milestone
+
+Integrated as `30b811d` (source `d815d3becb9c5514dd4233c9cc1364f838d4bfac`). Exact
+reservation recovery is separate from one-shot dispatch claims. Durable deadlines
+release active execution capacity without erasing holds; root/known native-turn
+fences and exact late settlement survive uncertainty. Attributable failures can
+be isolated only under the validated all-caller cutover contract; corruption and
+unexplained halts remain blocking. Historical keys, profiles and canonical bytes
+are preserved.
+
+New queued jobs persist bounded exact provider/count material before reservation
+and resume those original bytes across date/template changes. Authentic old jobs
+without that proof pause with their original state, payload, hold and TTL intact;
+Stop, expiry and known received receipts remain supported. Core migration requires
+reviewed never-enabled evidence or a complete drained recovery inventory. Preflight
+and drain must precede **source deployment**, not merely flag activation. Current
+OFF flags or a matching digest do not prove operational completeness/quiescence.
+
+The frozen milestone passed 388 Node tests, 65 production and 27 proxy Python
+tests, and four mocked real SQLite/workerd runs. Independent review reran 100
+focused tests plus four positive resume probes and approved this source scope.
+All 78 committed backend files were independently matched to the reviewed manifest
+before and after integration. Evidence is `/tmp/feast-lifecycle-final-bI2Tqo`;
+production manifest SHA-256 is
+`5f3cbf6703e27a44fcff6dd1f5cd19a8ce3e9e64f4be49b2b89554c7b821d72e`.
+See `Backend/feast-production/EXECUTION_LIFECYCLE.md` for the offline contract.
+
+Historical-scan scaling is deliberately **not** claimed by this milestone. No live
+ledger, queued job, provider, migration, deployment or recovery flag was touched.
+
 ## Continuing implementation, not yet integrated or verified
 
-### Accounting branch: `fix/ask-audit-accounting`
+### Accounting scaling branch: `fix/ask-audit-accounting`
 
-- Idempotent reservation recovery separated from one-time dispatch ownership.
-- Durable deadlines release active execution capacity without discarding holds.
-- Root/native-turn fences survive lost acknowledgments, crashes and late usage.
-- Isolate attributable staged uncertainty only after every caller is compatible;
-  corruption, unattributed uncertainty and unexplained legacy halts stay fail-closed.
-- Reviewed, revision-checked legacy inventory/migration and compatible rollback.
-- New queued jobs retain exact dispatch/count material. Historical jobs lacking
-  that proof require content-free preflight and verified drain/compatible handling
-  before source deployment, not merely before activation. This is still under review.
 - Historical-scan scaling without skipping records or trusting unverifiable totals.
+- Every writer must update validated aggregates, ownership and replay fences.
+- Revision-pinned bootstrap/activation and full audit need realistic runtime
+  resource checks and resumable staging if one-shot work cannot finish safely.
+- Independent review and final combined capability/body-binding gates remain.
 
 ### Answer/history branch: `fix/ask-audit-answers`
 
