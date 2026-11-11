@@ -33,6 +33,8 @@ parity. See the remediation document for compatibility and review limits.
 - Remove the artificial 200-entry/8 MiB *whole-history* lifetime limit via indexed,
   bounded-loading storage, not a larger cap or deleted receipts.
 - Make failed preparation/phase persistence transactional and recoverable.
+- Ensure a near-limit action advertised as Undoable remains representable when
+  its undo-after proof is recorded; avoid a new per-entry duplication ceiling.
 - Preserve every Undo/replay/deleted-record/intent identity through v1 migration,
   interruption and compatible rollback.
 - Make file protection and backup/restore behavior explicit without silently
