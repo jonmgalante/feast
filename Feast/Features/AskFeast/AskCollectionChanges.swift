@@ -52,7 +52,10 @@ struct AskChangeSnapshot:Codable,Equatable,Sendable {
     let strings:[String:String],dates:[String:Date],links:[String:String]
     func logicallyEquals(_ other:Self)->Bool {entity==other.entity && id==other.id && store==other.store && strings==other.strings && dates==other.dates && links==other.links}
 }
-private struct AskChangeEntry:Codable {
+struct AskChangeEntry:Codable {
+    // SQLite CAS metadata, deliberately absent from the legacy payload.
+    var revision:Int64=0
+    private enum CodingKeys:String,CodingKey {case id,proposal,action,before,after,phase,undoAfter,chatID,question,recoveryDismissed,recoveryOperationID,recoveryProposalDigest,findingIdentities}
     let id:UUID,proposal:AskChangeProposal
     var action:AskCollectionAction
     var before:[AskChangeSnapshot],after:[AskChangeSnapshot]
@@ -68,7 +71,7 @@ private struct AskChangeEntry:Codable {
     // Fresh identity at authorization, rechecked in the isolated commit context.
     var findingIdentities:[String:AskFindingIdentity]? = nil
 }
-private struct AskChangeArchive:Codable {var version=1;var entries:[AskChangeEntry]=[]}
+struct AskChangeArchive:Codable {var version=1;var entries:[AskChangeEntry]=[]}
 struct AskRecoveredActionTurn:Sendable {let id:UUID,question:String,actions:[AskCollectionAction]}
 enum AskChangeError:LocalizedError {
     case invalid,missing,conflict,permission,recoveryUnavailable,journal
@@ -80,16 +83,11 @@ enum AskChangeError:LocalizedError {
 @MainActor final class AskCollectionChangeEngine {
     let adapter:AskSavedCollection
     let journalURL:URL
-    private var archive=AskChangeArchive()
-    private var readable=true
+    let journal:AskActionJournal
     init(adapter:AskSavedCollection,journalURL:URL){
-        self.adapter=adapter;self.journalURL=journalURL
-        if FileManager.default.fileExists(atPath:journalURL.path) {
-            do {let data=try Data(contentsOf:journalURL);guard data.count<=8*1024*1024 else {throw AskChangeError.journal};archive=try JSONDecoder().decode(AskChangeArchive.self,from:data);guard archive.version==1,archive.entries.count<=200,Set(archive.entries.map(\.id)).count==archive.entries.count,archive.entries.allSatisfy(Self.validEntry),Set(archive.entries.compactMap(\.recoveryOperationID)).count==archive.entries.compactMap(\.recoveryOperationID).count else {throw AskChangeError.journal}}
-            catch {readable=false}
-        }
+        self.adapter=adapter;self.journalURL=journalURL;journal=AskActionJournal(url:journalURL)
     }
-    private static func validEntry(_ entry:AskChangeEntry)->Bool {
+    static func validEntry(_ entry:AskChangeEntry)->Bool {
         let p=entry.proposal
         if let key=entry.recoveryOperationID {
             guard key.count==64,key.allSatisfy({$0.isHexDigit}),let digest=entry.recoveryProposalDigest,digest.count==64,digest.allSatisfy({$0.isHexDigit}) else {return false}
@@ -100,18 +98,6 @@ enum AskChangeError:LocalizedError {
                 ["FeastList","ListSection","SavedPlace"].contains(image.entity) && UUID(uuidString:image.id) != nil && image.links.values.allSatisfy({UUID(uuidString:$0) != nil})
             }
         }
-    }
-    private func persist() throws {
-        guard readable,archive.entries.count<=200 else {throw AskChangeError.journal}
-        let data=try JSONEncoder().encode(archive);guard data.count<=8*1024*1024 else {throw AskChangeError.journal}
-        try FileManager.default.createDirectory(at:journalURL.deletingLastPathComponent(),withIntermediateDirectories:true)
-        try data.write(to:journalURL,options:.atomic)
-        let handle=try FileHandle(forWritingTo:journalURL)
-        do {try handle.synchronize();try handle.close()} catch {try? handle.close();throw error}
-        let directory=open(journalURL.deletingLastPathComponent().path,O_RDONLY)
-        guard directory>=0 else {throw AskChangeError.journal}
-        defer {close(directory)}
-        guard fsync(directory)==0 else {throw AskChangeError.journal}
     }
     private func entity(_ kind:String)throws->String {
         switch kind {case "city":return "FeastList";case "neighborhood":return "ListSection";case "place":return "SavedPlace";default:throw AskChangeError.invalid}
@@ -161,19 +147,20 @@ enum AskChangeError:LocalizedError {
         var seen=Set<NSManagedObjectID>();return values.filter {seen.insert($0.objectID).inserted}
     }
     func prepare(_ proposal:AskChangeProposal,question:String,authorization:AskChangeGrant,findings:[AskVerifiedFinding],turnID:UUID?=nil,chatID:UUID?=nil,recoveryOperationID:String?=nil)throws->AskCollectionAction {
+        return try journal.withLock {
         guard authorization.permits(proposal,question:question) else {throw AskChangeError.permission}
-        guard readable,!proposal.instructionQuote.isEmpty,question.contains(proposal.instructionQuote),["create","update","append","move","delete"].contains(proposal.operation),proposal.changes.count<=8,Set(proposal.changes.map(\.field)).count==proposal.changes.count else {throw AskChangeError.invalid}
+        guard !proposal.instructionQuote.isEmpty,question.contains(proposal.instructionQuote),["create","update","append","move","delete"].contains(proposal.operation),proposal.changes.count<=8,Set(proposal.changes.map(\.field)).count==proposal.changes.count else {throw AskChangeError.invalid}
         guard proposal.entity=="place" || ["create","update","delete"].contains(proposal.operation) else {throw AskChangeError.invalid}
         let recoveryDigest:String?
         if let key=recoveryOperationID {
             guard key.count==64,key.allSatisfy({$0.isHexDigit}) else {throw AskChangeError.journal}
             let encoder=JSONEncoder();encoder.outputFormatting = .sortedKeys
             recoveryDigest=SHA256.hash(data:try encoder.encode(proposal)).map {String(format:"%02x",$0)}.joined()
-            if let index=archive.entries.firstIndex(where:{$0.recoveryOperationID==key}) {
-                guard archive.entries[index].recoveryProposalDigest==recoveryDigest,archive.entries[index].question==question,archive.entries[index].action.originatingTurn==turnID,archive.entries[index].chatID==chatID else {throw AskChangeError.conflict}
+            if let id=try journal.recoveryID(key),let prior=try journal.load(id:id) {
+                guard prior.recoveryProposalDigest==recoveryDigest,prior.question==question,prior.action.originatingTurn==turnID,prior.chatID==chatID else {throw AskChangeError.conflict}
                 // Reuse the durable intent/receipt, including a creation's original
                 // ID. Never generate a second action or append the same note twice.
-                let existing=try reconciled(index)
+                let existing=try reconciled(id)
                 guard existing.action.state != .conflict else {throw AskChangeError.conflict}
                 return existing.action
             }
@@ -228,12 +215,13 @@ enum AskChangeError:LocalizedError {
         action.originatingTurn=turnID
         if !names.isEmpty {action.title=proposal.operation.capitalized+" "+names}
         action.detail=[names,values,proposal.operation=="delete" ? "Includes \(before.filter {$0.entity=="SavedPlace"}.count) saved places. You can undo this change." : ""].filter {!$0.isEmpty}.joined(separator:"\n")
-        archive.entries.append(.init(id:id,proposal:normalized,action:action,before:before,after:[],phase:"prepared",chatID:chatID,question:question,recoveryOperationID:recoveryOperationID,recoveryProposalDigest:recoveryDigest,findingIdentities:findingIdentities.isEmpty ? nil : findingIdentities));try persist();return action
+        try journal.insert(.init(id:id,proposal:normalized,action:action,before:before,after:[],phase:"prepared",chatID:chatID,question:question,recoveryOperationID:recoveryOperationID,recoveryProposalDigest:recoveryDigest,findingIdentities:findingIdentities.isEmpty ? nil : findingIdentities));return action
+        }
     }
     private func same(_ a:[AskChangeSnapshot],_ b:[AskChangeSnapshot])->Bool {a.count==b.count && zip(a,b).allSatisfy {$0.logicallyEquals($1)}}
     func apply(_ id:UUID,authorization:AskChangeGrant,confirmed:Bool=false,maps:[String:ApplePlaceMatch]=[:])throws->AskCollectionAction {
-        guard readable,let index=archive.entries.firstIndex(where:{$0.id==id}) else {throw AskChangeError.missing}
-        var entry=try reconciled(index)
+        return try journal.withLock {
+        var entry=try reconciled(id)
         guard authorization.boundProposal==entry.proposal,authorization.permits(entry.proposal,question:authorization.question) else {throw AskChangeError.permission}
         if entry.phase=="committed" {
             let context=try adapter.makeSaveContext()
@@ -258,7 +246,6 @@ enum AskChangeError:LocalizedError {
         }
         let affectedBefore=affected(targets,deleting:entry.proposal.operation=="delete")
         let repository=adapter.repository(context)
-        var intentReady=false
         var updated:[NSManagedObject]=[],inserted:[NSManagedObject]=[],deleted:[NSManagedObject]=[]
         var afterObjects:[NSManagedObject]=[]
         do {
@@ -277,15 +264,21 @@ enum AskChangeError:LocalizedError {
                 updated=Array(context.updatedObjects);inserted=Array(context.insertedObjects);deleted=Array(context.deletedObjects)
                 entry.after=try snapshots(afterObjects.filter {!$0.isDeleted})
                 if entry.proposal.operation=="create" {entry.action.targetIDs=entry.after.map(\.id)}
-                entry.phase="intent";archive.entries[index]=entry;try persist();intentReady=true
+                try journal.boundary("apply-before-intent")
+                entry.phase="intent";entry=try journal.replace(entry,expectedPhase:"prepared")
+                try journal.boundary("apply-after-intent")
             }
-        } catch {if !intentReady {archive.entries[index].phase="prepared";try? persist()};throw error}
-        entry.after=try snapshots(afterObjects.filter {!$0.isDeleted});entry.phase="committed";entry.action.state = .applied;entry.action.undoable = !same(entry.before,entry.after)
+        } catch {throw error} // The persisted prepared/intent row is authoritative.
+        try journal.boundary("apply-after-collection")
+        entry.phase="committed";entry.action.state = .applied;entry.action.undoable = !same(entry.before,entry.after)
         entry.action.committedChange=entry.action.undoable
         if entry.proposal.operation=="create" {entry.action.targetIDs=afterObjects.compactMap {($0.value(forKey:"id") as? UUID)?.uuidString}}
-        archive.entries[index]=entry;try? persist()
+        // The durable intent and verified collection commit are sufficient to
+        // recover this receipt. A final journal failure must not claim no write.
+        _ = try? journal.replace(entry,expectedPhase:"intent")
         NSManagedObjectContext.mergeChanges(fromRemoteContextSave:[NSUpdatedObjectsKey:updated.map(\.objectID),NSInsertedObjectsKey:inserted.map(\.objectID),NSDeletedObjectsKey:deleted.map(\.objectID)],into:[adapter.context])
         return entry.action
+        }
     }
     private func current(_ entry:AskChangeEntry,_ context:NSManagedObjectContext)throws->[AskChangeSnapshot] {
         let keys=entry.before+entry.after+(entry.undoAfter ?? [])
@@ -299,60 +292,77 @@ enum AskChangeError:LocalizedError {
         if entry.proposal.operation=="create" {objects=affected(objects,deleting:true)}
         return try snapshots(objects)
     }
-    private func reconciled(_ index:Int)throws->AskChangeEntry {
-        var entry=archive.entries[index]
+    private func reconciled(_ id:UUID)throws->AskChangeEntry {
+        guard var entry=try journal.load(id:id) else {throw AskChangeError.missing}
+        let previousPhase=entry.phase
         if entry.action.committedChange==nil,["committed","undone"].contains(entry.phase) {entry.action.committedChange = !same(entry.before,entry.after)}
         guard ["intent","undo-intent"].contains(entry.phase) else {return entry}
         let context=try adapter.makeSaveContext(),now=try current(entry,context)
-        if entry.phase=="intent",same(now,entry.after) {entry.phase="committed";entry.action.state = .applied;entry.action.undoable=true;if entry.proposal.operation=="create" {entry.action.targetIDs=entry.after.map(\.id)}}
+        if entry.phase=="intent",same(now,entry.after) {entry.phase="committed";entry.action.state = .applied;entry.action.undoable = !same(entry.before,entry.after);if entry.proposal.operation=="create" {entry.action.targetIDs=entry.after.map(\.id)}}
         else if entry.phase=="intent",same(now,entry.before) {entry.phase="prepared";entry.action.state = entry.proposal.operation=="delete" ? .needsConfirmation : .ready}
         else if entry.phase=="undo-intent",same(now,entry.undoAfter ?? []) {entry.phase="undone";entry.action.state = .undone;entry.action.undoable=false}
-        else if entry.phase=="undo-intent",same(now,entry.after) {entry.phase="committed";entry.action.state = .applied;entry.action.undoable=true}
+        else if entry.phase=="undo-intent",same(now,entry.after) {entry.phase="committed";entry.action.state = .applied;entry.action.undoable = !same(entry.before,entry.after)}
         else {entry.action.state = .conflict;entry.action.undoable=false}
         if entry.action.committedChange==nil,["committed","undone"].contains(entry.phase) {entry.action.committedChange = !same(entry.before,entry.after)}
-        archive.entries[index]=entry;try? persist();return entry
+        // Reconciliation can prove the collection outcome even when a receipt
+        // update is still unwritable. Keep that truth visible. A fresh mutation
+        // still needs the durable expected-phase CAS below, never this value.
+        return (try? journal.replace(entry,expectedPhase:previousPhase)) ?? entry
     }
     /// Retained context may mention a record this same turn just deleted. Such
     /// IDs can complete that turn's answer, but never authorize any new write.
     /// A revoked/missing record without a verified committed deletion is absent.
     func recoveryDeletedRecordIDs(forTurn turn:UUID,includingActionIDs:Set<UUID>=[])throws->Set<String> {
-        guard readable else {throw AskChangeError.journal}
-        var ids=Set<String>()
-        // Extra IDs must be this loop's LOCAL committed executor receipts, not
-        // model arguments. Confirmation and Undo may act on an earlier preview.
-        for index in archive.entries.indices where archive.entries[index].action.originatingTurn==turn || includingActionIDs.contains(archive.entries[index].id) {
-            let entry=try reconciled(index)
+        return try journal.withLock {
+        var ids=Set<String>(),visited=Set<UUID>()
+        @MainActor func include(_ id:UUID)throws {
+            guard visited.insert(id).inserted else {return}
+            let entry=try reconciled(id)
             let removed:[AskChangeSnapshot],expected:[AskChangeSnapshot]
             if entry.proposal.operation=="delete",entry.phase=="committed",entry.action.state == .applied {removed=entry.before;expected=entry.after}
             else if entry.proposal.operation=="create",entry.phase=="undone",entry.action.state == .undone,let undoAfter=entry.undoAfter {removed=entry.after;expected=undoAfter}
-            else {continue}
+            else {return}
             let context=try adapter.makeSaveContext()
-            guard same(try current(entry,context),expected) else{continue}
+            guard same(try current(entry,context),expected) else{return}
             let surviving=Set(expected.map(\.id))
             ids.formUnion(removed.map(\.id).filter {!surviving.contains($0)})
         }
+        try journal.visit(.turn(turn)) {id in try include(id);return true}
+        // Extra IDs are local executor receipts, never model arguments.
+        for id in includingActionIDs where !visited.contains(id) {
+            if try journal.load(id:id) != nil {try include(id)}
+        }
         return ids
+        }
     }
     func receipts(forTurn turn:UUID)throws->[AskCollectionAction] {
-        try archive.entries.indices.filter {archive.entries[$0].action.originatingTurn==turn && archive.entries[$0].phase != "prepared"}.compactMap {index in let entry=try reconciled(index);return entry.phase=="prepared" ? nil : entry.action}
+        return try journal.withLock {
+        var actions:[AskCollectionAction]=[]
+        try journal.visit(.turn(turn)) {id in
+            let entry=try reconciled(id)
+            if entry.phase != "prepared" {actions.append(entry.action)}
+            return true
+        }
+        return actions
+        }
     }
-    func dismissRecovery(in chat:UUID)throws {
-        for index in archive.entries.indices where archive.entries[index].chatID==chat {archive.entries[index].recoveryDismissed=true}
-        try persist()
-    }
+    func dismissRecovery(in chat:UUID)throws {try journal.withLock {try journal.dismiss(chat:chat)}}
     func recoverableTurns(in chat:UUID)throws->[AskRecoveredActionTurn] {
+        return try journal.withLock {
         var ordered:[UUID]=[],questions:[UUID:String]=[:],actions:[UUID:[AskCollectionAction]]=[:]
-        for index in archive.entries.indices where archive.entries[index].chatID==chat && archive.entries[index].phase != "prepared" && archive.entries[index].recoveryDismissed != true {
-            let entry=try reconciled(index)
-            guard entry.phase != "prepared",let turn=entry.action.originatingTurn else {continue}
+        try journal.visit(.chat(chat)) {id in
+            let entry=try reconciled(id)
+            guard entry.phase != "prepared",entry.recoveryDismissed != true,let turn=entry.action.originatingTurn else {return true}
             if actions[turn]==nil {ordered.append(turn);questions[turn]=entry.question ?? entry.proposal.instructionQuote}
-            actions[turn,default:[]].append(entry.action)
+            actions[turn,default:[]].append(entry.action);return true
         }
         return ordered.map {.init(id:$0,question:questions[$0] ?? "Saved change",actions:actions[$0] ?? [])}
+        }
     }
     func canReuseReceipt(_ id:UUID,fields:Set<String>=[])throws->Bool {
-        guard let index=archive.entries.firstIndex(where:{$0.id==id}) else{return false}
-        let entry=try reconciled(index)
+        return try journal.withLock {
+        guard try journal.load(id:id) != nil else{return false}
+        let entry=try reconciled(id)
         let now=try current(entry,adapter.makeSaveContext())
         if entry.phase=="undone",entry.action.state == .undone {return same(now,entry.undoAfter ?? [])}
         guard [.applied,.needsConfirmation,.ready].contains(entry.action.state) else{return false}
@@ -366,16 +376,18 @@ enum AskChangeError:LocalizedError {
             return zip(now,expected).allSatisfy {a,b in a.id==b.id && a.entity==b.entity && a.store==b.store && keys.allSatisfy {a.strings[$0]==b.strings[$0]}}
         }
         return same(now,expected)
+        }
     }
     func actionStatus(_ id:UUID)throws->AskCollectionAction {
-        guard let index=archive.entries.firstIndex(where:{$0.id==id}) else {throw AskChangeError.missing}
-        return try reconciled(index).action
+        return try journal.withLock {
+        return try reconciled(id).action
+        }
     }
     /// Only an explicit app action invokes this entry point. It authorizes the exact
     /// journaled preview, never a new model-supplied replacement or restored replay.
     func performExplicitAction(_ id:UUID,undo shouldUndo:Bool)throws->AskCollectionAction {
-        guard let index=archive.entries.firstIndex(where:{$0.id==id}) else {throw AskChangeError.missing}
-        let entry=try reconciled(index),p=entry.proposal
+        return try journal.withLock {
+        let entry=try reconciled(id),p=entry.proposal
         if shouldUndo {
             let proposal=AskChangeProposal(entity:p.entity,operation:"undo",targetIDs:entry.action.targetIDs,cityID:nil,sectionID:nil,mapMatchID:nil,changes:[],instructionQuote:"Undo this change")
             let grant=AskChangeGrant(question:"Undo this change",entity:p.entity,operations:["undo"],fields:[],targetIDs:Set(proposal.targetIDs),allowsCreation:false,boundProposal:proposal)
@@ -383,23 +395,30 @@ enum AskChangeError:LocalizedError {
         }
         let grant=AskChangeGrant(question:"Apply this exact reviewed change",entity:p.entity,operations:[p.operation],fields:Set(p.changes.map(\.field)),targetIDs:Set(p.targetIDs),allowsCreation:p.operation=="create",cityIDs:Set(p.cityID.map {[$0]} ?? []),sectionIDs:Set(p.sectionID.map {[$0]} ?? []),mapMatchIDs:Set(p.mapMatchID.map {[$0]} ?? []),boundProposal:p,allowsReplacement:true)
         return try apply(id,authorization:grant,confirmed:true)
+        }
     }
     func undoDescriptor(for action:AskCollectionAction)throws->AskUndoDescriptor {
-        guard let entry=archive.entries.first(where:{$0.id==action.id}) else{throw AskChangeError.missing}
+        return try journal.withLock {
+        guard let entry=try journal.load(id:action.id) else{throw AskChangeError.missing}
         let p=entry.proposal
         let clearing=p.operation=="update" && !p.changes.isEmpty && p.changes.allSatisfy {$0.source=="user" && $0.value==nil && ($0.values==nil || $0.values!.isEmpty) && $0.findingID==nil}
         return .init(entity:p.entity,operation:p.operation,effect:clearing ? "clear" : p.operation,fields:p.changes.map(\.field).sorted())
+        }
     }
     func latestAction(for target:String)throws->AskCollectionAction? {
-        for index in archive.entries.indices.reversed() {
-            let entry=try reconciled(index)
-            if entry.action.targetIDs.contains(target),entry.phase=="committed",entry.action.undoable {return entry.action}
+        return try journal.withLock {
+        var result:AskCollectionAction?
+        try journal.visit(.target(target),descending:true) {id in
+            let entry=try reconciled(id)
+            if entry.action.targetIDs.contains(target),entry.phase=="committed",entry.action.undoable {result=entry.action;return false}
+            return true
         }
-        return nil
+        return result
+        }
     }
     func undo(_ id:UUID,authorization:AskChangeGrant)throws->AskCollectionAction {
-        guard readable,let index=archive.entries.firstIndex(where:{$0.id==id}) else {throw AskChangeError.missing}
-        var entry=try reconciled(index)
+        return try journal.withLock {
+        var entry=try reconciled(id)
         let undo=AskChangeProposal(entity:entry.action.entity,operation:"undo",targetIDs:entry.action.targetIDs,cityID:nil,sectionID:nil,mapMatchID:nil,changes:[],instructionQuote:authorization.question)
         guard authorization.boundProposal==undo,authorization.permits(undo,question:authorization.question) else {throw AskChangeError.permission}
         if entry.phase=="undone" {return entry.action}
@@ -509,11 +528,16 @@ enum AskChangeError:LocalizedError {
             guard !adapter.context.registeredObjects.contains(where:{ids.contains($0.objectID)&&$0.hasChanges}) else {throw AskChangeError.conflict}
             updated=Array(context.updatedObjects);inserted=Array(context.insertedObjects);deleted=Array(context.deletedObjects);undoSurvivors=Array(objects.values).filter {!$0.isDeleted}
             try context.obtainPermanentIDs(for:Array(context.insertedObjects))
-            entry.undoAfter=try snapshots(undoSurvivors);entry.phase="undo-intent";archive.entries[index]=entry;try persist()
+            try journal.boundary("undo-before-intent")
+            entry.undoAfter=try snapshots(undoSurvivors);entry.phase="undo-intent";entry=try journal.replace(entry,expectedPhase:"committed")
+            try journal.boundary("undo-after-intent")
         }
-        entry.undoAfter=try snapshots(undoSurvivors);entry.phase="undone";entry.action.state = .undone;entry.action.undoable=false;archive.entries[index]=entry;try? persist()
+        try journal.boundary("undo-after-collection")
+        entry.phase="undone";entry.action.state = .undone;entry.action.undoable=false
+        _ = try? journal.replace(entry,expectedPhase:"undo-intent")
         NSManagedObjectContext.mergeChanges(fromRemoteContextSave:[NSUpdatedObjectsKey:updated.map(\.objectID),NSInsertedObjectsKey:inserted.map(\.objectID),NSDeletedObjectsKey:deleted.map(\.objectID)],into:[adapter.context])
         return entry.action
+        }
     }
     private static func findingIdentity(_ place:SavedPlace)->AskFindingIdentity {
         .init(name:place.displayNameSnapshot ?? "",city:place.feastList?.name ?? "",website:place.websiteURL,applePlaceID:place.applePlaceID)

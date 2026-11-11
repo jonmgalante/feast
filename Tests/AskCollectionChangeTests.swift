@@ -66,13 +66,13 @@ import Foundation
         do {_ = try engine.performExplicitAction(created.id,undo:true);preconditionFailure("Undo creation overwrote newer move")}catch {}
         do {_ = try engine.performExplicitAction(newCity.id,undo:true);preconditionFailure("Undo city creation removed a newer neighborhood")}catch {}
         let interrupted=try commit(.init(entity:"city",operation:"create",targetIDs:[],cityID:nil,sectionID:nil,mapMatchID:nil,changes:[.init(field:"name",value:"Recovery city",values:nil,findingID:nil)],instructionQuote:"Create Recovery city"))
-        var archive=try JSONSerialization.jsonObject(with:Data(contentsOf:url)) as! [String:Any]
-        var entries=archive["entries"] as! [[String:Any]]
-        let crashIndex=entries.firstIndex {(($0["id"] as? String)?.lowercased())==interrupted.id.uuidString.lowercased()}!
-        entries[crashIndex]["phase"]="intent"
-        var crashAction=entries[crashIndex]["action"] as! [String:Any];crashAction["targetIDs"]=[];entries[crashIndex]["action"]=crashAction
-        archive["entries"]=entries;try JSONSerialization.data(withJSONObject:archive).write(to:url,options:.atomic)
-        let crashEngine=AskCollectionChangeEngine(adapter:adapter,journalURL:url)
+        let crashURL=url.appendingPathExtension("intent-v1")
+        try AskJournalTestSupport.legacyCopy(from:engine,to:crashURL) {entries in
+            let crashIndex=entries.firstIndex {(($0["id"] as? String)?.lowercased())==interrupted.id.uuidString.lowercased()}!
+            entries[crashIndex]["phase"]="intent"
+            var action=entries[crashIndex]["action"] as! [String:Any];action["targetIDs"]=[];entries[crashIndex]["action"]=action
+        }
+        let crashEngine=AskCollectionChangeEngine(adapter:adapter,journalURL:crashURL)
         let recoveredCreation=try crashEngine.latestAction(for:interrupted.targetIDs[0])
         precondition(recoveredCreation?.targetIDs==interrupted.targetIDs)
         _ = try crashEngine.performExplicitAction(interrupted.id,undo:true)
@@ -101,17 +101,17 @@ import Foundation
         let createKey=try AskRecoveryOperationIdentity(turnID:turn,step:2,callID:"fixture-create").key(entity:"place",target:nil)
         let readyCreation=try reloaded.prepare(creation,question:creation.instructionQuote,authorization:recoveryGrant(creation),findings:[],turnID:turn,chatID:chat,recoveryOperationID:createKey)
         let createdOnce=try reloaded.apply(readyCreation.id,authorization:recoveryGrant(creation),maps:[match.id:match])
-        var interruptedArchive=try JSONSerialization.jsonObject(with:Data(contentsOf:dedupURL)) as! [String:Any]
-        var interruptedEntries=interruptedArchive["entries"] as! [[String:Any]]
-        let intentIndex=interruptedEntries.firstIndex {($0["id"] as? String)==createdOnce.id.uuidString}!
-        interruptedEntries[intentIndex]["phase"]="intent"
-        interruptedArchive["entries"]=interruptedEntries;try JSONSerialization.data(withJSONObject:interruptedArchive).write(to:dedupURL,options:.atomic)
-        let afterCreationCrash=AskCollectionChangeEngine(adapter:adapter,journalURL:dedupURL)
+        let dedupCrashURL=dedupURL.appendingPathExtension("intent-v1")
+        try AskJournalTestSupport.legacyCopy(from:reloaded,to:dedupCrashURL) {entries in
+            let i=entries.firstIndex {($0["id"] as? String)==createdOnce.id.uuidString}!
+            entries[i]["phase"]="intent"
+        }
+        let afterCreationCrash=AskCollectionChangeEngine(adapter:adapter,journalURL:dedupCrashURL)
         let recoveredIntent=try afterCreationCrash.prepare(creation,question:creation.instructionQuote,authorization:recoveryGrant(creation),findings:[],turnID:turn,chatID:chat,recoveryOperationID:createKey)
         let createdAgain=try afterCreationCrash.apply(recoveredIntent.id,authorization:recoveryGrant(creation),maps:[match.id:match])
         precondition(createdAgain.id==createdOnce.id && createdAgain.targetIDs==createdOnce.targetIDs)
         _ = try afterCreationCrash.performExplicitAction(createdOnce.id,undo:true)
-        let afterUndo=AskCollectionChangeEngine(adapter:adapter,journalURL:dedupURL)
+        let afterUndo=AskCollectionChangeEngine(adapter:adapter,journalURL:dedupCrashURL)
         let undoneIntent=try afterUndo.prepare(creation,question:creation.instructionQuote,authorization:recoveryGrant(creation),findings:[],turnID:turn,chatID:chat,recoveryOperationID:createKey)
         let noRecreation=try afterUndo.apply(undoneIntent.id,authorization:recoveryGrant(creation),maps:[match.id:match])
         precondition(noRecreation.state == .undone)
@@ -124,7 +124,7 @@ import Foundation
         _ = try afterUndo.apply(readyDelete.id,authorization:recoveryGrant(ownDelete),confirmed:true)
         let deletedProof=try afterUndo.recoveryDeletedRecordIDs(forTurn:turn),otherTurnProof=try afterUndo.recoveryDeletedRecordIDs(forTurn:UUID())
         precondition(deletedProof.contains(createdID) && otherTurnProof.isEmpty)
-        let restoredDeletionEngine=AskCollectionChangeEngine(adapter:adapter,journalURL:dedupURL)
+        let restoredDeletionEngine=AskCollectionChangeEngine(adapter:adapter,journalURL:dedupCrashURL)
         let restoredProof=try restoredDeletionEngine.recoveryDeletedRecordIDs(forTurn:turn);precondition(restoredProof.contains(createdID))
         let confirmationTurn=UUID()
         let confirmedDeletionProof=try restoredDeletionEngine.recoveryDeletedRecordIDs(forTurn:confirmationTurn,includingActionIDs:[readyDelete.id])
@@ -277,25 +277,23 @@ import Foundation
         let oldFinding=AskVerifiedFinding(id:UUID(),recordID:op.id!.uuidString,identity:.init(oldRecord),field:"website",value:oldSite,evidenceURL:oldSite,verification:"cited_search",originatingTurn:UUID())
         let oldProposal=AskChangeProposal(entity:"place",operation:"update",targetIDs:[op.id!.uuidString],cityID:nil,sectionID:nil,mapMatchID:nil,changes:[.init(field:"website",value:oldSite,values:nil,findingID:oldFinding.id.uuidString)],instructionQuote:"Save old-format website")
         let oldReady=try oldFormat.engine.prepare(oldProposal,question:oldProposal.instructionQuote,authorization:oldFormat.grant(oldProposal),findings:[oldFinding])
-        func removeIdentityBindings()throws {
-            var archive=try JSONSerialization.jsonObject(with:Data(contentsOf:oldFormat.engine.journalURL)) as! [String:Any]
-            var entries=archive["entries"] as! [[String:Any]]
-            for i in entries.indices {entries[i].removeValue(forKey:"findingIdentities")}
-            archive["entries"]=entries;try JSONSerialization.data(withJSONObject:archive).write(to:oldFormat.engine.journalURL,options:.atomic)
+        func oldIdentityFixture(_ engine:AskCollectionChangeEngine)throws->URL {
+            let url=temporaryDirectory.appendingPathComponent("old-identity-"+UUID().uuidString+".json")
+            try AskJournalTestSupport.legacyCopy(from:engine,to:url) {entries in
+                for i in entries.indices {entries[i].removeValue(forKey:"findingIdentities")}
+            }
+            return url
         }
-        try removeIdentityBindings()
-        let oldPrepared=AskCollectionChangeEngine(adapter:oldFormat.adapter,journalURL:oldFormat.engine.journalURL)
+        let oldPrepared=AskCollectionChangeEngine(adapter:oldFormat.adapter,journalURL:try oldIdentityFixture(oldFormat.engine))
         var unboundRejected=false;do {_ = try oldPrepared.apply(oldReady.id,authorization:oldFormat.grant(oldProposal))}catch {unboundRejected=true}
         check(unboundRejected && op.websiteURL==nil,"old unbound researched preview safely refuses")
         _ = try oldFormat.engine.apply(oldReady.id,authorization:oldFormat.grant(oldProposal))
-        try removeIdentityBindings()
-        let oldCommitted=AskCollectionChangeEngine(adapter:oldFormat.adapter,journalURL:oldFormat.engine.journalURL)
+        let oldCommitted=AskCollectionChangeEngine(adapter:oldFormat.adapter,journalURL:try oldIdentityFixture(oldFormat.engine))
         _ = try oldCommitted.apply(oldReady.id,authorization:oldFormat.grant(oldProposal))
         _ = try oldCommitted.performExplicitAction(oldReady.id,undo:true)
         check(op.websiteURL==nil,"old committed researched receipt and Undo remain compatible")
         let ordinary=proposal(op,"name","Ordinary restored preview"),ordinaryReady=try oldCommitted.prepare(ordinary,question:ordinary.instructionQuote,authorization:oldFormat.grant(ordinary),findings:[])
-        try removeIdentityBindings()
-        let oldOrdinary=AskCollectionChangeEngine(adapter:oldFormat.adapter,journalURL:oldFormat.engine.journalURL)
+        let oldOrdinary=AskCollectionChangeEngine(adapter:oldFormat.adapter,journalURL:try oldIdentityFixture(oldCommitted))
         _ = try oldOrdinary.apply(ordinaryReady.id,authorization:oldFormat.grant(ordinary))
         check(op.displayName=="Ordinary restored preview","old ordinary prepared preview remains compatible")
         // A whole deleted flat graph can contain losslessly restored duplicate
@@ -313,14 +311,14 @@ import Foundation
             let action=try cascade.commit(deleteCity)
             // Simulate exit after the atomic store save but before the journal's
             // final receipt update. The pre-save graph must reconcile exactly.
-            var journal=try JSONSerialization.jsonObject(with:Data(contentsOf:cascade.engine.journalURL)) as! [String:Any]
-            var entries=journal["entries"] as! [[String:Any]]
-            let i=entries.firstIndex {($0["id"] as? String)==action.id.uuidString}!
-            check((entries[i]["after"] as? [Any])?.isEmpty==true,"cascade intent records no deleted children as survivors")
-            entries[i]["phase"]="intent"
-            var receipt=entries[i]["action"] as! [String:Any];receipt["state"]="needsConfirmation";receipt["undoable"]=false;entries[i]["action"]=receipt
-            journal["entries"]=entries;try JSONSerialization.data(withJSONObject:journal).write(to:cascade.engine.journalURL,options:.atomic)
-            let afterCrash=AskCollectionChangeEngine(adapter:cascade.adapter,journalURL:cascade.engine.journalURL)
+            let crashURL=cascade.engine.journalURL.appendingPathExtension("cascade-intent-v1")
+            try AskJournalTestSupport.legacyCopy(from:cascade.engine,to:crashURL) {entries in
+                let i=entries.firstIndex {($0["id"] as? String)==action.id.uuidString}!
+                check((entries[i]["after"] as? [Any])?.isEmpty==true,"cascade intent records no deleted children as survivors")
+                entries[i]["phase"]="intent"
+                var receipt=entries[i]["action"] as! [String:Any];receipt["state"]="needsConfirmation";receipt["undoable"]=false;entries[i]["action"]=receipt
+            }
+            let afterCrash=AskCollectionChangeEngine(adapter:cascade.adapter,journalURL:crashURL)
             _ = try afterCrash.performExplicitAction(action.id,undo:true);cascadeRestored=true
         }catch {}
         let restoredCities=try cascade.repository.fetchFeastLists(),restoredPlaces=try cascade.repository.fetchSavedPlaces()

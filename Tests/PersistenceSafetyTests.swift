@@ -9,11 +9,13 @@ final class FailingContext: NSManagedObjectContext, @unchecked Sendable {
 @main struct PersistenceSafetyTests {
     @MainActor static func main() async throws {
         setbuf(stdout, nil)
+        if CommandLine.arguments.count>1,CommandLine.arguments[1]=="--journal-crash-child" {try AskJournalFailureTests.child();return}
         try await MapPlaceLookupTests.run()
         let model = NSManagedObjectModel(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1]))!
         if CommandLine.arguments.count == 4 && CommandLine.arguments[3] == "--verify-real-copy" {
             try RealStoreUpgradeCheck.run(model:model,directory:URL(fileURLWithPath:CommandLine.arguments[2]));return
         }
+        if ProcessInfo.processInfo.environment["FEAST_JOURNAL_ONLY"]=="1" {try AskJournalCapacityTests.run(model:model,directory:URL(fileURLWithPath:CommandLine.arguments[2]));try AskJournalFailureTests.run(model:model,directory:URL(fileURLWithPath:CommandLine.arguments[2]));return}
         let url = URL(fileURLWithPath: CommandLine.arguments[2]).appendingPathComponent("synthetic.sqlite")
         func coordinator() throws -> NSPersistentStoreCoordinator {
             let coordinator = NSPersistentStoreCoordinator(managedObjectModel: model)
@@ -266,6 +268,8 @@ final class FailingContext: NSManagedObjectContext, @unchecked Sendable {
         try await AskRetryStorageTests.run(directory:URL(fileURLWithPath:CommandLine.arguments[2]))
         try await AskLifecycleAdmissionTests.run(model:model,directory:URL(fileURLWithPath:CommandLine.arguments[2]))
         try await AskConversationPersistenceTests.run(model:model,directory:URL(fileURLWithPath:CommandLine.arguments[2]))
+        try AskJournalCapacityTests.run(model:model,directory:URL(fileURLWithPath:CommandLine.arguments[2]))
+        try AskJournalFailureTests.run(model:model,directory:URL(fileURLWithPath:CommandLine.arguments[2]))
         try AskCollectionChangeTests.run(model:model,temporaryDirectory:URL(fileURLWithPath:CommandLine.arguments[2]))
         try await AskFieldActionTests.run(model:model,temporaryDirectory:URL(fileURLWithPath:CommandLine.arguments[2]))
         try await AskBusinessLookupTests.run()
