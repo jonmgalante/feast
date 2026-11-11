@@ -146,6 +146,23 @@ This approves backend integration only. App-side permission projection, legacy
 history compatibility, independent sections and navigation remain below. No live
 capability or deployment was activated.
 
+## Reviewed local file-metadata privacy declaration
+
+Integrated as `42271976fefc9fa4d2a47781d9b19fea1e6ddbaa`. Existing history migration
+and journal backup verification already read file modification metadata inside
+Application Support. Apple classifies that API under FileTimestamp; the narrowly
+applicable app-container reason C617.1 was missing. The pending navigation
+candidate's descriptor-based size/type reads use the same category.
+
+Only that manifest block was added. All prior API and collected-data declarations
+remain unchanged, with no new runtime read, collection, tracking or permission.
+The strict checker first rejected the old manifest, then passed with 18 negative
+fixtures. An unsigned Debug build and exact bundled-manifest parity passed.
+Independent review reran the checker, original rejection and bundle comparison,
+and verified the official API documentation and exact source snapshot. Evidence
+is `/tmp/feast-file-metadata-privacy.erBewu`; Release/recovery bundle parity still
+belongs to the final combined gate. See `PRIVACY_MANIFEST_REVIEW.md`.
+
 ## Continuing implementation, not yet integrated or verified
 
 ### Accounting scaling branch: `fix/ask-audit-accounting`
