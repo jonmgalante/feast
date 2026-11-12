@@ -629,6 +629,8 @@ struct AskTurn: Identifiable, Equatable {
     var response: AskResponse?
     var sources: [AskSource] = []
     var status: AskTurnStatus = .loading
+    var wasInterrupted = false
+    var stoppedMessage: String {wasInterrupted ? "Answer interrupted. Keep Ask Feast open until it finishes." : "Stopped."}
     var isArchiveEligible:Bool {status != .loading && request.attachment == nil}
     var readContextMode:AskMode {response?.usesLocalCatalog == true && response?.libraryContext != nil ? .collection : request.mode}
 }
@@ -1098,7 +1100,10 @@ struct AskTurn: Identifiable, Equatable {
             if let receipts=try? collectionReceipts?(activeID),!receipts.isEmpty,let position=turns.firstIndex(where:{$0.id==activeID}) {
                 turns[position].response=actionReceiptResponse(receipts)
                 setStatus(activeID,.complete)
-            }else {setStatus(activeID,.stopped)}
+            }else {
+                if let position=turns.firstIndex(where:{$0.id==activeID}) {turns[position].wasInterrupted = !userInitiated}
+                setStatus(activeID,.stopped)
+            }
             if userInitiated {markConversationActivity()}
         }
         if let id=activeID,let trace=pipelineTraces[id] {trace.elapsed(.stopRequested,since:trace.started);trace.finish(.cancelled)}

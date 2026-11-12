@@ -16,10 +16,38 @@ private actor PresentationGateProvider:AskFeastProvider {
     func release(){gate?.resume();gate=nil}
 }
 @MainActor enum AskPresentationTests {
+    private static func stoppedMessages(directory:URL) async throws {
+        let index=AskLocalIndex(records:[],visibleCityIDs:[],visibleNoteIDs:[],scope:.savedMetadata)
+        for interrupted in [false,true] {
+            let gate=PresentationGateProvider(),session=AskSession(index:index,provider:gate)
+            let store=AskConversationStore(url:directory.appendingPathComponent("stop-copy-\(interrupted).json"))
+            session.restoreHistory(from:store)
+            session.input="A pending question";session.run()
+            while !(await gate.hasStarted()) {await Task.yield()}
+            let id=session.turns.last!.id,retry=session.canRetry[id]
+            if interrupted {session.suspend()}else{session.cancel()}
+            let expected=interrupted ? "Answer interrupted. Keep Ask Feast open until it finishes." : "Stopped."
+            precondition(session.turns.last?.status == .stopped && session.turns.last?.stoppedMessage==expected)
+            precondition(!session.isLoading && session.canRetry[id]==retry)
+            precondition(session.input == (interrupted ? "A pending question" : ""))
+            session.flushHistory()
+            let restored=AskSession(index:index,provider:PresentationProvider());restored.restoreHistory(from:store)
+            precondition(restored.turns.last?.status == .stopped && restored.turns.last?.stoppedMessage==expected)
+            var legacy=try JSONSerialization.jsonObject(with:JSONEncoder().encode(AskArchivedTurn(session.turns.last!))) as! [String:Any]
+            legacy.removeValue(forKey:"interrupted")
+            let old=try JSONDecoder().decode(AskArchivedTurn.self,from:JSONSerialization.data(withJSONObject:legacy))
+            precondition(old.turn.status == .stopped && old.turn.stoppedMessage=="Stopped.")
+            await gate.release()
+            for _ in 0..<20 {await Task.yield()}
+            precondition(session.turns.last?.status == .stopped && session.turns.last?.response==nil)
+        }
+        print("PASS explicit stop and passive interruption copy, persisted causes, neutral legacy fallback, unchanged retry/draft and late-answer rejection")
+    }
     static func run(model:NSManagedObjectModel,directory:URL)async throws {
         try markdownProjection(directory:directory)
         try navigationLinks(directory:directory)
         try await historyTitles(directory:directory)
+        try await stoppedMessages(directory:directory)
         let a=UUID().uuidString,b=UUID().uuidString,turn=UUID()
         let applied=AskCollectionAction(id:UUID(),title:"Update one",targetIDs:[a],entity:"place",operation:"update",state:.applied,undoable:true)
         let anotherField=AskCollectionAction(id:UUID(),title:"Another field",targetIDs:[a],entity:"place",operation:"update",state:.applied,undoable:true)

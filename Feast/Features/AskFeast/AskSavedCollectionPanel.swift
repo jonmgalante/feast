@@ -93,7 +93,7 @@ struct AskSavedCollectionPanel: View {
                                 switch turn.status {
                                 case .loading: ProgressView(session.progressLabel).accessibilityLabel(session.progressLabel)
                                 case .failed(let message): retry(message, id: turn.id)
-                                case .stopped: retry("Stopped. A request already sent may still finish on the service.", id: turn.id)
+                                case .stopped: retry(turn.stoppedMessage, id: turn.id)
                                 case .complete: EmptyView()
                                 }
                             }.id(turn.id)

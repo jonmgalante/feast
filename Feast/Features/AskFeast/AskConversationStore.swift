@@ -12,13 +12,16 @@ struct AskArchivedTurn: Codable {
     let sources: [AskSource]
     let failure:String?
     let stopped:Bool?
+    // Absent in older histories: use neutral stopped copy rather than guessing a cause.
+    let interrupted:Bool?
     init(_ turn: AskTurn) {
         id = turn.id; mode = turn.request.mode; question = turn.request.text; context = turn.request.previousQuestion
         response = turn.response ?? .init(summary: "", candidates: []); sources = turn.sources
         if case .failed(let message)=turn.status {failure=String(message.prefix(2000))}else{failure=nil}
         stopped=turn.status == .stopped ? true : nil
+        interrupted=turn.status == .stopped && turn.wasInterrupted ? true : nil
     }
-    var turn: AskTurn { .init(id: id, request: .init(mode: mode, text: question, fromOCR: false, previousQuestion: context,performanceID:id), response: response, sources: sources, status: failure.map { .failed($0) } ?? (stopped==true ? .stopped : .complete)) }
+    var turn: AskTurn { .init(id: id, request: .init(mode: mode, text: question, fromOCR: false, previousQuestion: context,performanceID:id), response: response, sources: sources, status: failure.map { .failed($0) } ?? (stopped==true ? .stopped : .complete), wasInterrupted: interrupted == true) }
 }
 struct AskConversationSnapshot: Codable {
     static let maximumTurns=100
