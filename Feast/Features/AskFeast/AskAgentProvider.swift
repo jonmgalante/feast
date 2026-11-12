@@ -57,6 +57,9 @@ struct AskAgentProvider:AskFeastProvider {
         if let hosted=remote as? AskHostedProvider,await hosted.permission(),let turn=request.performanceID {
             let lease=try await hosted.prepareProviderAttempt(turn:turn,retrying:request.providerRetry)
             do {
+                try Task.checkCancellation()
+                if request.providerRetry {try await AskProviderAttemptScope.validateExplicitRetry?()}
+                try Task.checkCancellation()
                 var resumed=request
                 if request.providerRetry,let context=try await AskProviderAttemptScope.store.readContext(for:lease) {
                     resumed.publicResearch=context.publicResearch ?? resumed.publicResearch

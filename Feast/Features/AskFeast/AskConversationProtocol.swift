@@ -81,9 +81,10 @@ actor AskConversationReceipts {
 #endif
     }
 }
-struct AskProviderAttemptLease:Sendable {let turn:UUID;let attempt:UUID}
+struct AskProviderAttemptLease:Sendable {let turn:UUID;let attempt:UUID;var accountingTurn:UUID?=nil}
 enum AskProviderAttemptScope {
     @TaskLocal static var lease:AskProviderAttemptLease?
+    @TaskLocal static var validateExplicitRetry:(@Sendable ()async throws->Void)?
     @TaskLocal static var store:AskProviderAttempts = .shared
 }
 enum AskRetryError:LocalizedError,Equatable {
@@ -103,6 +104,8 @@ actor AskProviderAttempts {
         var attempt:UUID;var roots:[UUID];var frozen:Bool;var checkpoint:AskResponse?=nil
         // Optional for existing small v1 files. A new checkpoint always gets a new revision.
         var checkpointRevision:UUID?=nil
+        var pendingSuccessor:UUID?=nil
+        var accountingTurn:UUID?=nil
     }
     struct ArchiveTicket:Equatable,Sendable {let turn:UUID,attempt:UUID;let revision:UUID?}
     /// Synchronous session deletion fences even a preflight that has not reached this actor yet.
@@ -145,9 +148,11 @@ actor AskProviderAttempts {
             guard let size=try file.resourceValues(forKeys:[.fileSizeKey]).fileSize,size<=Self.maximumBytes else{throw AskRetryError.capacity}
             let data=try Data(contentsOf:file);guard data.count<=Self.maximumBytes else{throw AskRetryError.capacity}
             var entry=try JSONDecoder().decode(Entry.self,from:data)
-            guard entry.roots.count<=64,Set(entry.roots).count==entry.roots.count else{throw AskRetryError.storage}
+            guard entry.roots.count<=64,Set(entry.roots).count==entry.roots.count,
+                  entry.accountingTurn==nil || entry.accountingTurn==entry.attempt,
+                  entry.pendingSuccessor.map({entry.frozen && !entry.roots.isEmpty && $0 != entry.attempt && !entry.roots.contains($0)}) ?? true else{throw AskRetryError.storage}
             if let cached=entries[turn] {
-                guard cached.attempt==entry.attempt,cached.roots==entry.roots,cached.checkpointRevision==entry.checkpointRevision else{throw AskRetryError.storage}
+                guard cached.attempt==entry.attempt,cached.roots==entry.roots,cached.checkpointRevision==entry.checkpointRevision,cached.pendingSuccessor==entry.pendingSuccessor,cached.accountingTurn==entry.accountingTurn else{throw AskRetryError.storage}
                 entry.frozen = entry.frozen || cached.frozen
             }
             cache(entry,turn:turn);return entry
@@ -195,13 +200,22 @@ actor AskProviderAttempts {
         }
         return false
     }
-    func begin(turn:UUID,retrying:Bool,legacySettled:Bool,fence:@Sendable ([UUID])async throws->Void)async throws->AskProviderAttemptLease {
+    func begin(turn:UUID,retrying:Bool,legacySettled:Bool,restart:(@Sendable ([UUID],UUID)async throws->Void)?=nil,fence:@Sendable ([UUID])async throws->Void)async throws->AskProviderAttemptLease {
         guard !deleted(turn),!preparing.contains(turn) else{throw AskRetryError.active}
         let previous=try load(turn)
+        var successor:UUID?
         preparing.insert(turn);defer{preparing.remove(turn)}
         if var old=previous {
-            old.frozen=true;try save(old,turn:turn)
-            if !old.roots.isEmpty {try await fence(old.roots)}
+            old.frozen=true
+            if retrying, restart != nil, !old.roots.isEmpty {
+                old.pendingSuccessor=old.pendingSuccessor ?? UUID()
+                successor=old.pendingSuccessor
+            }
+            try save(old,turn:turn)
+            if !old.roots.isEmpty {
+                if let successor,let restart {try await restart(old.roots,successor)}
+                else {try await fence(old.roots)}
+            }
         }else if retrying {
             guard legacySettled else{throw AskRetryError.unverified}
             try save(Entry(attempt:turn,roots:[turn],frozen:true),turn:turn)
@@ -209,10 +223,14 @@ actor AskProviderAttempts {
         }
         // Fence awaits are reentrant: deletion or an old completion must never revive this turn.
         guard !deleted(turn) else{throw AskRetryError.active}
-        let attempt=UUID()
-        let entry=Entry(attempt:attempt,roots:[],frozen:false,checkpoint:previous?.checkpoint,checkpointRevision:previous?.checkpointRevision)
+        try Task.checkCancellation()
+        // A retry prepared but never dispatched keeps its already authorized identity.
+        let reusable=retrying && previous?.roots.isEmpty==true ? previous?.accountingTurn : nil
+        let attempt=successor ?? reusable ?? UUID()
+        let accountingTurn=successor ?? reusable
+        let entry=Entry(attempt:attempt,roots:[],frozen:false,checkpoint:previous?.checkpoint,checkpointRevision:previous?.checkpointRevision,accountingTurn:accountingTurn)
         try save(entry,turn:turn);running[turn]=attempt
-        return .init(turn:turn,attempt:attempt)
+        return .init(turn:turn,attempt:attempt,accountingTurn:accountingTurn)
     }
     func readContext(for lease:AskProviderAttemptLease)throws->AskResponse? {
         guard !deleted(lease.turn) else{throw AskRetryError.active}
@@ -393,7 +411,11 @@ extension AskHostedProvider:AskConversationPlanning {
         let started=DispatchTime.now().uptimeNanoseconds
         defer {AskPipelineScope.record(retrying ? .retry : .reconciliation,since:started)}
         let legacy=await AskConversationReceipts.shared.legacyStoppedAndSettled(turn)
-        return try await AskProviderAttemptScope.store.begin(turn:turn,retrying:retrying,legacySettled:legacy){roots in
+        return try await AskProviderAttemptScope.store.begin(turn:turn,retrying:retrying,legacySettled:legacy,restart:{ roots,successor in
+            struct Restart:Decodable {let version:Int;let state:String;let roots:[UUID];let successor:UUID}
+            let result=try await conversationRequest(["version":9,"mode":"retryRestart","roots":roots.map {$0.uuidString},"successor":successor.uuidString],as:Restart.self)
+            guard result.version==9,result.state=="restarted",Set(result.roots)==Set(roots),result.successor==successor else{throw AskRetryError.unverified}
+        }){roots in
             struct Fence:Decodable {let version:Int;let state:String;let roots:[UUID]}
             do {let result=try await conversationRequest(["version":9,"mode":"retryFence","roots":roots.map {$0.uuidString}],as:Fence.self)
                 guard result.version==9,result.state=="fenced",Set(result.roots)==Set(roots) else{throw AskRetryError.unverified}

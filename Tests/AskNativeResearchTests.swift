@@ -99,6 +99,21 @@ extension AskNativeResearchTests {
         precondition(!(restored.publicResearch?.first?.projection.contains("DO_NOT_REPLAY") ?? true))
         let steps=await planner.captured()
         precondition(steps.count==2 && steps.allSatisfy {$0.version==10 && $0.turnID==turn.uuidString})
+        let retryPlanner=NativeLoopFixture(evidence),retryAttempts=AskProviderAttempts()
+        let oldLease=try await retryAttempts.begin(turn:turn,retrying:false,legacySettled:false){_ in}
+        try await retryAttempts.register(oldLease.attempt,lease:oldLease)
+        await retryAttempts.finish(oldLease)
+        let retryLease=try await retryAttempts.begin(turn:turn,retrying:true,legacySettled:false,restart:{_,_ in}){_ in preconditionFailure()}
+        let successor=retryLease.attempt
+        _ = try await AskProviderAttemptScope.$store.withValue(retryAttempts) {
+            try await AskProviderAttemptScope.$lease.withValue(retryLease) {
+                try await AskConversationLoop(planner:retryPlanner,availableCandidates:[:],execute:{_ in .init(output:.init(status:"local_only",complete:true,totalCount:0,records:[],findings:[],message:"empty",localOnly:true),response:nil,orderedIDs:[],selectionIsPrivate:true)}).answer(request,context:.init(index:[],recent:[]),cities:[],findings:[])
+            }
+        }
+        let retrySteps=await retryPlanner.captured()
+        precondition(retrySteps.count==2 && retrySteps.allSatisfy {$0.requestID==successor.uuidString && $0.turnID==successor.uuidString})
+        precondition(request.performanceID==turn)
+        print("PASS explicit retry uses its authorized accounting generation while preserving the original visual turn")
         precondition(steps[0].webAllowed==true && steps[1].webAllowed==false)
         precondition(output.publicResearch?.count==1 && output.publicResearch?.first?.result.nativeEvidence==evidence)
         precondition(output.paragraphs.first?.citations.first?.url==url && output.paragraphs.first?.citationsAreResearchPool==false)

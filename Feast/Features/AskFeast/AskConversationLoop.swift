@@ -634,7 +634,7 @@ struct AskConversationLoop:Sendable {
             let reply:AskConversationReply
             do {
                 var payload=AskConversationStep(requestID:root,step:step,text:request.text,context:context,cities:cities,task:task,findings:findings,history:Array(request.dialogue.suffix(12)),continuation:state.continuation,result:state.result,historyCount:indexedHistory?.count ?? request.dialogue.count)
-                if native {payload.version=10;payload.webAllowed = (fullCollection || !state.currentPrivateTool) && !state.localOnlyTool;payload.turnID=(request.performanceID ?? UUID(uuidString:root)!).uuidString;payload.collectionQueryVersion=queryVersion==2 ? 2 : nil;payload.retainedHistoryVersion=historyVersion==1 ? 1 : nil}
+                if native {payload.version=10;payload.webAllowed = (fullCollection || !state.currentPrivateTool) && !state.localOnlyTool;payload.turnID=(AskProviderAttemptScope.lease?.accountingTurn ?? request.performanceID ?? UUID(uuidString:root)!).uuidString;payload.collectionQueryVersion=queryVersion==2 ? 2 : nil;payload.retainedHistoryVersion=historyVersion==1 ? 1 : nil}
                 reply=try await AskHistoryAccessScope.$revalidate.withValue(historyFence) {try await planner.conversationStep(payload)}
             }
             catch {

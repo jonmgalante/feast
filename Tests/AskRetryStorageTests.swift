@@ -13,14 +13,16 @@ private actor RetryStorageProvider:AskFeastProvider {
     let finalResponse:AskResponse
     let preflight:RetryStorageGate?
     let fails:Bool
+    let revalidateRetry:Bool
     private(set) var requests:[AskRequest]=[]
     private(set) var resumedContexts:[AskResponse?]=[]
-    init(attempts:AskProviderAttempts,checkpoint:AskResponse,finalResponse:AskResponse?=nil,preflight:RetryStorageGate?=nil,fails:Bool=false) {
-        self.attempts=attempts;self.checkpoint=checkpoint;self.finalResponse=finalResponse ?? checkpoint;self.preflight=preflight;self.fails=fails
+    init(attempts:AskProviderAttempts,checkpoint:AskResponse,finalResponse:AskResponse?=nil,preflight:RetryStorageGate?=nil,fails:Bool=false,revalidateRetry:Bool=false) {
+        self.attempts=attempts;self.checkpoint=checkpoint;self.finalResponse=finalResponse ?? checkpoint;self.preflight=preflight;self.fails=fails;self.revalidateRetry=revalidateRetry
     }
     func answer(_ request:AskRequest,tools:AskReadTools)async throws->AskResponse {
         requests.append(request)
         if let preflight {await preflight.wait()}
+        if request.providerRetry,revalidateRetry {try await AskProviderAttemptScope.validateExplicitRetry?()}
         let lease=try await attempts.begin(turn:request.performanceID!,retrying:request.providerRetry,legacySettled:false){_ in}
         do {
             resumedContexts.append(try await attempts.readContext(for:lease))
@@ -37,8 +39,8 @@ private actor RetryStorageProvider:AskFeastProvider {
         .init(summary:"Retained public results.",candidates:[],listedCandidateIDs:[],usesLocalCatalog:true,
               publicResearch:[.init(id:researchID,originatingTurn:turn,query:"Public fixture",result:.init(text:text,citations:[]))])
     }
-    private static func path(_ base:URL,_ turn:UUID)->URL {base.appendingPathComponent(turn.uuidString+".json")}
-    private static func read(_ base:URL,_ turn:UUID)throws->AskProviderAttempts.Entry {
+    nonisolated private static func path(_ base:URL,_ turn:UUID)->URL {base.appendingPathComponent(turn.uuidString+".json")}
+    nonisolated private static func read(_ base:URL,_ turn:UUID)throws->AskProviderAttempts.Entry {
         try JSONDecoder().decode(AskProviderAttempts.Entry.self,from:Data(contentsOf:path(base,turn)))
     }
     private static func rejects(_ expected:AskRetryError,_ work:()async throws->Void)async throws {
@@ -61,6 +63,61 @@ private actor RetryStorageProvider:AskFeastProvider {
         let base=directory.appendingPathComponent("retry-storage-"+UUID().uuidString)
         try FileManager.default.createDirectory(at:base,withIntermediateDirectories:true)
         defer {try? FileManager.default.removeItem(at:base)}
+        // Explicit retry persists its proposed successor before network I/O. A
+        // lost acknowledgement cannot authorize a second replacement generation.
+        let retryFiles=base.appendingPathComponent("explicit-retry"),retryTurn=UUID()
+        let firstStore=AskProviderAttempts(url:retryFiles,requirePersistence:true)
+        let original=try await firstStore.begin(turn:retryTurn,retrying:false,legacySettled:false){_ in preconditionFailure()}
+        try await firstStore.register(original.attempt,lease:original)
+        try await firstStore.keepReadContext(fixture("Retained read"),lease:original)
+        await firstStore.finish(original)
+        do {
+            _ = try await firstStore.begin(turn:retryTurn,retrying:true,legacySettled:false,restart:{roots,successor in
+                check(roots==[original.attempt] && successor != original.attempt)
+                check(try read(retryFiles,retryTurn).pendingSuccessor==successor)
+                throw URLError(.networkConnectionLost)
+            }){_ in preconditionFailure("Explicit retry must use restart")}
+            preconditionFailure()
+        }catch is URLError {}
+        let pending=try read(retryFiles,retryTurn).pendingSuccessor!
+        let afterLoss=AskProviderAttempts(url:retryFiles,requirePersistence:true)
+        let successor=try await afterLoss.begin(turn:retryTurn,retrying:true,legacySettled:false,restart:{roots,id in
+            check(roots==[original.attempt] && id==pending)
+        }){_ in preconditionFailure()}
+        check(successor.turn==retryTurn && successor.attempt==pending && successor.accountingTurn==pending)
+        check(try await afterLoss.readContext(for:successor)?.publicResearch?.first?.result.text=="Retained read")
+        let beforeDispatch=AskProviderAttempts(url:retryFiles,requirePersistence:true)
+        let reused=try await beforeDispatch.begin(turn:retryTurn,retrying:true,legacySettled:false,restart:{_,_ in preconditionFailure()}){_ in preconditionFailure()}
+        check(reused.attempt==pending && reused.accountingTurn==pending)
+        try await beforeDispatch.register(pending,lease:reused)
+        let next=try await beforeDispatch.begin(turn:retryTurn,retrying:true,legacySettled:false,restart:{roots,id in
+            check(roots==[pending] && id != pending)
+        }){_ in preconditionFailure()}
+        check(next.attempt != pending && next.accountingTurn==next.attempt && next.turn==retryTurn)
+        print("PASS explicit Retry preserves visual identity/read context; lost acknowledgement and pre-dispatch restart reuse one durable successor")
+
+        for corruptMode in 0..<3 {
+            let corruptFiles=base.appendingPathComponent("retry-corrupt-"+String(corruptMode))
+            try FileManager.default.createDirectory(at:corruptFiles,withIntermediateDirectories:true)
+            var corrupt=try read(retryFiles,retryTurn)
+            if corruptMode==0 {corrupt.accountingTurn=UUID()}
+            if corruptMode==1 {corrupt.pendingSuccessor=corrupt.attempt}
+            if corruptMode==2 {corrupt.pendingSuccessor=UUID();corrupt.frozen=false}
+            try JSONEncoder().encode(corrupt).write(to:path(corruptFiles,retryTurn))
+            try await rejects(.storage) {_ = try await AskProviderAttempts(url:corruptFiles,requirePersistence:true).begin(turn:retryTurn,retrying:true,legacySettled:false,restart:{_,_ in preconditionFailure()}){_ in preconditionFailure()}}
+        }
+        print("PASS corrupt retry successor/accounting identities fail closed before any server call")
+
+        let cancelStore=AskProviderAttempts(url:base.appendingPathComponent("cancel-retry"),requirePersistence:true),cancelTurn=UUID(),gate=RetryStorageGate()
+        let cancelOriginal=try await cancelStore.begin(turn:cancelTurn,retrying:false,legacySettled:false){_ in}
+        try await cancelStore.register(cancelOriginal.attempt,lease:cancelOriginal)
+        let preparing=Task {try await cancelStore.begin(turn:cancelTurn,retrying:true,legacySettled:false,restart:{_,_ in await gate.wait()}){_ in}}
+        while !(await gate.entered) {await Task.yield()}
+        preparing.cancel();await gate.open()
+        do {_ = try await preparing.value;preconditionFailure()}catch is CancellationError {}
+        check(try read(base.appendingPathComponent("cancel-retry"),cancelTurn).attempt==cancelOriginal.attempt)
+        print("PASS cancelled explicit retry never dispatches or replaces the original entry after fence acknowledgement")
+
         let files=base.appendingPathComponent("attempts"),attempts=AskProviderAttempts(url:files,requirePersistence:true)
         let turn=UUID(),researchID=UUID()
         let lease=try await attempts.begin(turn:turn,retrying:false,legacySettled:false){_ in preconditionFailure("Fresh turn")}
@@ -257,6 +314,22 @@ private actor RetryStorageProvider:AskFeastProvider {
         try await waitForDeletion(files,turn)
         check(try read(files,turn).roots.count==1)
         print("PASS real session archive failure/failed clear preserve retry context; verified save compacts even updated final task; archived retry reuses request evidence; chat deletion fences IDs")
+
+        let receiptGate=RetryStorageGate(),receiptTurn=UUID()
+        let guardedProvider=RetryStorageProvider(attempts:attempts,checkpoint:checkpoint,preflight:receiptGate,revalidateRetry:true)
+        let guarded=AskSession(index:index,provider:guardedProvider,providerAttempts:attempts)
+        let guardedHistory=AskConversationStore(url:directory.appendingPathComponent("receipt-after-fence.json"))
+        check(guardedHistory.save(.init(turns:[AskArchivedTurn(.init(id:receiptTurn,request:.init(mode:.collection,text:"Retry safely",fromOCR:false),status:.stopped))])))
+        guarded.restoreHistory(from:guardedHistory)
+        var journalUnavailable=false
+        guarded.collectionReceipts={_ in if journalUnavailable {throw AskRetryError.unverified};return []}
+        guarded.retry(receiptTurn)
+        while !(await receiptGate.entered) {await Task.yield()}
+        journalUnavailable=true
+        await receiptGate.open();try await waitForSession(guarded)
+        check(guarded.error==AskRetryError.unverified.localizedDescription)
+        check(!FileManager.default.fileExists(atPath:files.appendingPathComponent(receiptTurn.uuidString+".json").path))
+        print("PASS retry rechecks action-journal safety after its awaited fence before starting new work")
 
         let failedProvider=RetryStorageProvider(attempts:attempts,checkpoint:checkpoint,fails:true)
         let failedSession=AskSession(index:index,provider:failedProvider,providerAttempts:attempts)

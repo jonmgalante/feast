@@ -268,7 +268,7 @@ final class AskHostedHTTP: @unchecked Sendable {
     func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         let body=request.httpBody.flatMap {(try? JSONSerialization.jsonObject(with:$0)) as? [String:Any]}
         if let lease=AskProviderAttemptScope.lease,request.httpMethod=="POST",request.url?.path=="/v1/answer",
-           body?["mode"] as? String != "retryFence",let raw=body?["requestID"] as? String,let root=UUID(uuidString:raw) {
+           !(["retryFence","retryRestart"].contains(body?["mode"] as? String ?? "")),let raw=body?["requestID"] as? String,let root=UUID(uuidString:raw) {
             try await AskProviderAttemptScope.store.register(root,lease:lease)
         }
         if request.httpMethod=="POST",request.url?.path=="/v1/answer",let mode=body?["mode"] as? String,["conversationStep","authorizeChange","webSearch"].contains(mode) {

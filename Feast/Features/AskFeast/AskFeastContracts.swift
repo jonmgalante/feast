@@ -884,6 +884,15 @@ struct AskTurn: Identifiable, Equatable {
         }
         start(id: id, request: request)
     }
+    private func validateRetryAfterFence(_ id:UUID,token:UUID)throws {
+        try Task.checkCancellation()
+        guard generation==token,activeID==id,isLoading else{throw CancellationError()}
+        do {if let receipts=try collectionReceipts?(id),!receipts.isEmpty {throw AskRetryError.mutations}}
+        catch let error as AskRetryError {throw error}
+        catch {throw AskRetryError.unverified}
+        guard let turn=turns.first(where:{$0.id==id}) else{throw CancellationError()}
+        if !(turn.response?.collectionActions ?? []).isEmpty || (turn.response?.fieldActions ?? []).contains(where:{$0.outcome == .saved}) {throw AskRetryError.mutations}
+    }
     private func start(id: UUID, request original: AskRequest) {
         retryArchiveTickets.removeValue(forKey:id)
         var request=original
@@ -911,7 +920,12 @@ struct AskTurn: Identifiable, Equatable {
             defer {if trace.snapshot().outcome == .running {trace.finish(Task.isCancelled ? .cancelled : .failed)};trace.elapsed(.taskExit,since:startedAt);Task {await AskPerformanceRecorder.shared.recordPipeline(trace.snapshot())}}
             do {
                 let result = try await AskProviderAttemptScope.$store.withValue(providerAttempts) {
-                    try await AskPipelineScope.$trace.withValue(trace) {try await provider.answer(request, tools: tools)}
+                    try await AskProviderAttemptScope.$validateExplicitRetry.withValue({ [weak self] in
+                        guard let self else{throw CancellationError()}
+                        try await self.validateRetryAfterFence(id,token:token)
+                    }) {
+                        try await AskPipelineScope.$trace.withValue(trace) {try await provider.answer(request, tools: tools)}
+                    }
                 }
                 let retryTicket=try? await providerAttempts.archiveTicket(turn:id)
                 try Task.checkCancellation()
