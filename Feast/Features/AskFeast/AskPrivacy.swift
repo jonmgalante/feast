@@ -17,7 +17,7 @@ enum AskPrivacy {
     static func accept() { UserDefaults.standard.set(true,forKey:onlineKey) }
     static func withdraw() { UserDefaults.standard.set(false,forKey:onlineKey) }
     static var onlineAllowed: Bool { UserDefaults.standard.bool(forKey: onlineKey) }
-    static let disclosure = "To answer your questions, Feast sends your questions, recent conversation, chosen images and relevant collection details to OpenAI through Cloudflare. Details include place names, cities, neighborhoods, categories, cuisines, statuses, tags and notes, including notes others shared in collections you can access. Relevant note details may also be sent to search providers or public sites, which may retain queries. To help resume interrupted answers, Feast temporarily stores request data and answers on Cloudflare with a 24-hour recovery window."
+    static let disclosure = "To answer, Feast sends your questions, recent conversation and relevant collection details, including shared notes, to OpenAI through Cloudflare. Relevant details may also be sent to search providers or public websites, which may retain them."
 }
 
 /// Release configuration is nonsecret bundle metadata, never a hardcoded development token.

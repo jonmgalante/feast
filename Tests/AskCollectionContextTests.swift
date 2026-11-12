@@ -72,7 +72,9 @@ private actor CollectionQueryHTTPFixture {
         // absent recovery-inclusive grant.
         precondition(olderKeys.allSatisfy {defaults.bool(forKey:$0)})
         defaults.removeObject(forKey:AskPrivacy.onlineKey);precondition(!AskPrivacy.onlineAllowed)
-        for term in ["Cloudflare","OpenAI","notes","tags","statuses","shared","temporarily stores request data and answers","24-hour recovery window"] {precondition(AskPrivacy.disclosure.contains(term))}
+        for term in ["Cloudflare","OpenAI","questions","recent conversation","relevant collection details","shared notes","search providers","public websites","may retain"] {precondition(AskPrivacy.disclosure.contains(term))}
+        for term in ["chosen images","24-hour","recovery window","temporarily stores"] {precondition(!AskPrivacy.disclosure.contains(term))}
+        print("PASS recovery-off disclosure states essential external data sharing without inactive image/recovery claims; existing consent behavior unchanged")
         print("PASS recovery-inclusive v6 consent defaults off, does not migrate v4/v5 grants, and preserves explicit accept/withdraw behavior")
         let coordinator=NSPersistentStoreCoordinator(managedObjectModel:model)
         _ = try coordinator.addPersistentStore(ofType:NSSQLiteStoreType,configurationName:nil,at:temporaryDirectory.appendingPathComponent("rich-collection.sqlite"))
