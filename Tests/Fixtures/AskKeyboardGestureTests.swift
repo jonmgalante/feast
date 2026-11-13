@@ -4,13 +4,18 @@ final class KeyboardGestureTests: XCTestCase {
     @MainActor private func open(_ arguments:[String] = []) -> (XCUIApplication,XCUIElement) {
         let app=XCUIApplication();app.launchArguments=arguments;app.launch()
         let input=app.descendants(matching:.any).matching(identifier:"qa.composer").firstMatch
-        XCTAssertTrue(input.waitForExistence(timeout:12));input.tap()
+        XCTAssertTrue(input.waitForExistence(timeout:12));XCTAssertEqual(input.label,"Message Ask Feast");input.tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout:5),"Software keyboard must be visible")
         return (app,input)
     }
     @MainActor private func drag(_ input:XCUIElement,dx:CGFloat=0,dy:CGFloat=100,hold:TimeInterval=0.01) {
         let from=input.coordinate(withNormalizedOffset:CGVector(dx:0.4,dy:0.5))
         from.press(forDuration:hold,thenDragTo:from.withOffset(CGVector(dx:dx,dy:dy)),withVelocity:.fast,thenHoldForDuration:0)
+    }
+    @MainActor private func dismissInput(_ app:XCUIApplication,input:XCUIElement,velocity:XCUIGestureVelocity = .fast) {
+        let from=input.coordinate(withNormalizedOffset:CGVector(dx:0.8,dy:0.5))
+        let to=app.coordinate(withNormalizedOffset:CGVector(dx:0.8,dy:0.97))
+        from.press(forDuration:0.01,thenDragTo:to,withVelocity:velocity,thenHoldForDuration:0)
     }
     @MainActor private func dragTranscriptDown(_ app:XCUIApplication, input:XCUIElement) {
         let transcript=app.scrollViews.matching(identifier:"qa.transcript").firstMatch
@@ -20,12 +25,12 @@ final class KeyboardGestureTests: XCTestCase {
         let top=max(frame.minY,navigation.exists ? navigation.frame.maxY : app.frame.minY)+16
         let bottom=min(frame.maxY,input.frame.minY)-24
         guard bottom-top>60 else { XCTFail("Transcript must have a usable visible viewport"); return }
-        // ScrollView bounds can extend behind navigation chrome. Keep both
-        // touch coordinates inside the unobscured transcript, above the input.
+        // Native interactive dismissal follows the finger toward the keyboard.
+        // Start in unobscured transcript and drag through the keyboard area.
         let origin=app.coordinate(withNormalizedOffset:.zero)
         let from=origin.withOffset(CGVector(dx:frame.midX-app.frame.minX,dy:top+(bottom-top)*0.2-app.frame.minY))
-        let to=origin.withOffset(CGVector(dx:frame.midX-app.frame.minX,dy:top+(bottom-top)*0.8-app.frame.minY))
-        from.press(forDuration:0.01,thenDragTo:to,withVelocity:.fast,thenHoldForDuration:0)
+        let to=origin.withOffset(CGVector(dx:frame.midX-app.frame.minX,dy:app.frame.height-25))
+        from.press(forDuration:0.01,thenDragTo:to,withVelocity:.slow,thenHoldForDuration:0)
     }
     @MainActor private func hidden(_ app:XCUIApplication) {
         expectation(for:NSPredicate(format:"exists == false"),evaluatedWith:app.keyboards.firstMatch);waitForExpectations(timeout:4)
@@ -33,8 +38,42 @@ final class KeyboardGestureTests: XCTestCase {
     @MainActor private func screenshot(_ app:XCUIApplication) {
         let shot=XCTAttachment(screenshot:app.screenshot());shot.lifetime = .keepAlways;add(shot)
     }
+
+    @MainActor func testShortInputSlowNativeDrag() {
+        let (app,input)=open()
+        dismissInput(app,input:input,velocity:.slow)
+        hidden(app);XCTAssertEqual(input.value as? String,"Unsent synthetic draft");screenshot(app)
+    }
+    @MainActor func testEmptyDraftNativeDismissalAndPlaceholder() {
+        let (app,input)=open(["-emptyDraft"])
+        XCTAssertEqual(input.value as? String,"")
+        XCTAssertGreaterThan(input.frame.height,25);XCTAssertLessThan(input.frame.height,50)
+        screenshot(app);dismissInput(app,input:input);hidden(app)
+        XCTAssertEqual(input.value as? String,"")
+    }
+    @MainActor func testComposerOneToFiveLineSizing() {
+        var heights:[CGFloat]=[]
+        for lines in [1,5,6] {
+            let (app,input)=open(["-draftLines=\(lines)"])
+            heights.append(input.frame.height)
+            XCTAssertEqual(input.value as? String,(1...lines).map {"Line \($0)"}.joined(separator:"\n"))
+            screenshot(app);app.terminate()
+        }
+        XCTAssertGreaterThan(heights[1],heights[0]+50)
+        XCTAssertEqual(heights[1],heights[2],accuracy:1,"Composer stops growing after five lines")
+        XCTAssertLessThan(heights[2],130)
+    }
+    @MainActor func testTrailingNewlineGrowsComposerAndEditingWorks() {
+        let (app,input)=open(["-draftLines=1"]);let height=input.frame.height
+        input.typeText("\n")
+        XCTAssertEqual(input.value as? String,"Line 1\n")
+        XCTAssertGreaterThan(input.frame.height,height+10)
+        input.typeText("Second line")
+        XCTAssertEqual(input.value as? String,"Line 1\nSecond line");screenshot(app)
+    }
+
     @MainActor func testShortInputDownSwipe() {
-        let (app,input)=open();drag(input);hidden(app)
+        let (app,input)=open();dismissInput(app,input:input);hidden(app)
         XCTAssertEqual(input.value as? String,"Unsent synthetic draft");screenshot(app)
     }
     @MainActor func testShortInputUpAndHorizontalPreserveEditing() {
@@ -64,7 +103,7 @@ final class KeyboardGestureTests: XCTestCase {
         XCTAssertEqual(input.value as? String,draft);screenshot(app)
     }
     @MainActor func testAccessibilityInputDownSwipe() {
-        let (app,input)=open(["-accessibility"]);drag(input);hidden(app)
+        let (app,input)=open(["-accessibility"]);dismissInput(app,input:input);hidden(app)
         XCTAssertEqual(input.value as? String,"Unsent synthetic draft");screenshot(app)
     }
     @MainActor func testAccessibilityLongDraftScroll() {
@@ -85,21 +124,17 @@ final class KeyboardGestureTests: XCTestCase {
         XCTAssertTrue(transcript.exists);dragTranscriptDown(app,input:input);hidden(app)
         XCTAssertEqual(input.value as? String,draft);screenshot(app)
     }
-    @MainActor func testLongDraftReturnsToTopThenDismisses() {
+    @MainActor func testLongDraftNativeDismissalPreservesText() {
         let (app,input)=open(["-longDraft"]);let draft=input.value as? String
-        input.swipeUp(velocity:.slow);input.swipeUp(velocity:.slow)
-        var attempts=0
-        while app.keyboards.firstMatch.exists && attempts<16 { drag(input,dy:100);attempts+=1 }
-        XCTAssertGreaterThan(attempts,1,"Scrolled text must be revealed before dismissal")
-        hidden(app);XCTAssertEqual(input.value as? String,draft);screenshot(app)
+        input.swipeUp(velocity:.slow)
+        dismissInput(app,input:input);hidden(app)
+        XCTAssertEqual(input.value as? String,draft);screenshot(app)
     }
-    @MainActor func testAccessibilityLongDraftReturnsToTopThenDismisses() {
+    @MainActor func testAccessibilityLongDraftNativeDismissalPreservesText() {
         let (app,input)=open(["-accessibility","-longDraft"]);let draft=input.value as? String
-        input.swipeUp(velocity:.slow);input.swipeUp(velocity:.slow)
-        var attempts=0
-        while app.keyboards.firstMatch.exists && attempts<25 { drag(input,dy:100);attempts+=1 }
-        XCTAssertGreaterThan(attempts,1)
-        hidden(app);XCTAssertEqual(input.value as? String,draft);screenshot(app)
+        input.swipeUp(velocity:.slow)
+        dismissInput(app,input:input);hidden(app)
+        XCTAssertEqual(input.value as? String,draft);screenshot(app)
     }
     @MainActor func testTranscriptDismissesAtMiddleAndTop() {
         let (app,input)=open();let draft=input.value as? String
@@ -138,7 +173,7 @@ final class KeyboardGestureTests: XCTestCase {
         XCTAssertTrue(app.buttons["Stop"].waitForExistence(timeout:3))
         input.tap();XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout:3))
         input.typeText("Next unsent draft")
-        drag(input);hidden(app)
+        dismissInput(app,input:input);hidden(app)
         XCTAssertTrue(app.buttons["Stop"].exists,"Dismissal must not cancel the active request")
         XCTAssertEqual(input.value as? String,"Next unsent draft")
         XCTAssertTrue(app.staticTexts["Synthetic answer complete. The keyboard gesture did not send or cancel anything."].waitForExistence(timeout:25))

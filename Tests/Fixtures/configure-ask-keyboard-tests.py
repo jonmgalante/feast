@@ -36,5 +36,5 @@ p=r/'Feast.xcodeproj/xcshareddata/xcschemes/Feast.xcscheme';s=p.read_text().repl
 p=r/'Feast/Features/AskFeast/AskSavedCollectionPanel.swift';s=p.read_text().replace('.accessibilityLabel("Message Ask Feast")','.accessibilityLabel("Message Ask Feast").accessibilityIdentifier("qa.composer")');p.write_text(s)
 
 p=r/'Feast/Features/AskFeast/AskSavedCollectionPanel.swift'
-s=p.read_text().replace('.scrollDismissesKeyboard(.immediately)', '.scrollDismissesKeyboard(.immediately)\n                .accessibilityIdentifier("qa.transcript")')
+s=p.read_text().replace('.scrollDismissesKeyboard(.interactively)', '.scrollDismissesKeyboard(.interactively)\n                .accessibilityIdentifier("qa.transcript")', 1)
 p.write_text(s)

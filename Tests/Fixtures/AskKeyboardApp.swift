@@ -28,7 +28,11 @@ private struct OfflineKeyboardProvider: AskFeastProvider {
         let response=AskResponse(summary:"Synthetic answer",candidates:[],paragraphs:paragraphs)
         let count=ProcessInfo.processInfo.arguments.contains("-empty") ? 0 : 24
         let turns=(0..<count).map {n in AskArchivedTurn(AskTurn(id:UUID(),request:.init(mode:.discovery,text:"Synthetic question \(n)",fromOCR:false),response:response,status:.complete))}
-        let draft=ProcessInfo.processInfo.arguments.contains("-longDraft") ? (1...18).map {"Draft line \($0): preserve multiline editing."}.joined(separator:"\n") : "Unsent synthetic draft"
+        var draft=ProcessInfo.processInfo.arguments.contains("-longDraft") ? (1...18).map {"Draft line \($0): preserve multiline editing."}.joined(separator:"\n") : "Unsent synthetic draft"
+        if ProcessInfo.processInfo.arguments.contains("-emptyDraft") { draft="" }
+        if let argument=ProcessInfo.processInfo.arguments.first(where:{$0.hasPrefix("-draftLines=")}),let lines=Int(argument.dropFirst("-draftLines=".count)) {
+            draft=(1...lines).map {"Line \($0)"}.joined(separator:"\n")
+        }
         let chat=AskChatArchive(id:UUID(),title:"Keyboard long chat",updatedAt:Date(),conversation:.init(draft:draft,turns:turns))
         let other=AskChatArchive(id:UUID(),title:"Other synthetic chat",updatedAt:Date().addingTimeInterval(-10),conversation:.init(draft:"Other preserved draft",turns:Array(turns.prefix(2))))
         guard let store=AskConversationStore.applicationStore(),store.saveLibrary(.init(activeID:chat.id,chats:[chat,other])) else {throw AskError.invalidEvidence}

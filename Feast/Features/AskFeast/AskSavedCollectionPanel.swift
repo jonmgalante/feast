@@ -103,12 +103,7 @@ struct AskSavedCollectionPanel: View {
                     }.padding(FeastTheme.Spacing.large)
                 }
                 .defaultScrollAnchor(.bottom, for: .initialOffset)
-                .scrollDismissesKeyboard(.immediately)
-                .onScrollPhaseChange { _, phase in
-                    // The composer is a sibling, so the scroll view's keyboard
-                    // dismissal mode alone does not reliably clear its focus.
-                    if phase == .interacting && focused.wrappedValue { focused.wrappedValue = false }
-                }
+                .scrollDismissesKeyboard(.interactively)
                 .onChange(of: session.activeChatID) { _, _ in proxy.scrollTo("bottom", anchor: .bottom) }
                 .onChange(of: session.turns.count) { _, _ in proxy.scrollTo("bottom", anchor: .bottom) }
                 .onChange(of: session.isLoading) { _, loading in if !loading { proxy.scrollTo("bottom", anchor: .bottom) } }
@@ -166,7 +161,7 @@ struct AskSavedCollectionPanel: View {
             if dynamicTypeSize.isAccessibilitySize {
                 TextEditor(text: $session.input)
                     .font(FeastTheme.Typography.supporting).focused(focused)
-                    .gesture(AskComposerKeyboardDismissal { focused.wrappedValue = false })
+                    .scrollDismissesKeyboard(.interactively)
                     .frame(height: 140).scrollContentBackground(.hidden)
                     .accessibilityLabel("Message Ask Feast")
                     .accessibilityAction(named:Text("Open chat history")) {showHistory()}
@@ -175,12 +170,30 @@ struct AskSavedCollectionPanel: View {
                         if session.input.isEmpty { Text("Ask Feast…").font(FeastTheme.Typography.supporting).foregroundStyle(FeastTheme.AdaptiveColors.secondaryText).allowsHitTesting(false).accessibilityHidden(true) }
                     }
             } else {
-                TextField("Message", text: $session.input, prompt: Text("Ask Feast…"), axis: .vertical)
-                    .lineLimit(1...5).focused(focused)
-                    .gesture(AskComposerKeyboardDismissal { focused.wrappedValue = false }).font(FeastTheme.Typography.supporting)
-                    .accessibilityLabel("Message Ask Feast")
-                    .accessibilityAction(named:Text("Open chat history")) {showHistory()}
-                    .accessibilityAction(named:Text("Start new chat")) {_ = session.newChat()}
+                // Text supplies the existing one-to-five-line height. TextEditor
+                // owns native scrolling, selection and interactive dismissal.
+                Text(session.input + "\u{200B}")
+                    .font(FeastTheme.Typography.supporting).lineLimit(1...5)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 5).padding(.vertical, 8)
+                    .hidden()
+                    .overlay {
+                        TextEditor(text: $session.input)
+                            .font(FeastTheme.Typography.supporting).focused(focused)
+                            .scrollDismissesKeyboard(.interactively)
+                            .scrollContentBackground(.hidden)
+                            .accessibilityLabel("Message Ask Feast")
+                            .accessibilityAction(named:Text("Open chat history")) {showHistory()}
+                            .accessibilityAction(named:Text("Start new chat")) {_ = session.newChat()}
+                            .overlay(alignment: .topLeading) {
+                                if session.input.isEmpty {
+                                    Text("Ask Feast…").font(FeastTheme.Typography.supporting)
+                                        .foregroundStyle(FeastTheme.AdaptiveColors.secondaryText)
+                                        .padding(.horizontal, 5).padding(.vertical, 8)
+                                        .allowsHitTesting(false).accessibilityHidden(true)
+                                }
+                            }
+                    }
             }
             HStack {
                 if state.screenshotSendingAvailable {
