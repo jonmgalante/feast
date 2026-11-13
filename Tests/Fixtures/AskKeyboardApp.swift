@@ -13,7 +13,11 @@ private struct OfflineKeyboardProvider: AskFeastProvider {
 @MainActor enum KeyboardQA {
     static let persistence=PersistenceController(inMemory:true,cloudKitSyncConfiguration:nil)
     static let directory=FileManager.default.urls(for:.documentDirectory,in:.userDomainMask)[0]
+    static var fixtureAccess = true
+    static var collectionPlace: SavedPlace?
     static var last=""
+    static var fittingMinimumOffset: CGFloat = 0
+    static var fittingMaximumOffset: CGFloat = 0
     static func log(_ value:String) {
         let file=directory.appendingPathComponent("keyboard.log")
         let line="\(Date().timeIntervalSince1970) \(value)\n"
@@ -24,10 +28,33 @@ private struct OfflineKeyboardProvider: AskFeastProvider {
         AskPrivacy.accept()
         let context=persistence.viewContext
         let city=FeastList(context:context);city.id=UUID();city.name="Synthetic City";city.createdAt=Date();city.updatedAt=Date();try context.save()
+        let place=SavedPlace(context:context)
+        place.id=UUID();place.applePlaceID="synthetic-keyboard-place";place.displayNameSnapshot="Synthetic Cafe";place.feastList=city
+        place.status=PlaceStatus.wantToTry.rawValue;place.placeType=PlaceType.cafe.rawValue;place.createdAt=Date();place.updatedAt=Date();try context.save()
+        collectionPlace=place
+        let adapter=AskSavedCollection(context:context,canMutate:{_,_,_ in true},visibleCities:{fixtureAccess ? [city.id!] : []})
+        var collectionAction: AskCollectionAction?
+        // Same journal location used by the real state wiring, inside this disposable app identity.
+        let support=FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0]
+        let testEngine=AskCollectionChangeEngine(adapter:adapter,journalURL:support.appendingPathComponent("AskFeast/collection-actions-v1.json"))
+        if ProcessInfo.processInfo.arguments.contains("-collectionAction") {
+            let id=place.id!.uuidString
+            let proposal=AskChangeProposal(entity:"place",operation:"update",targetIDs:[id],cityID:nil,sectionID:nil,mapMatchID:nil,changes:[.init(field:"name",value:"Updated synthetic cafe",values:nil,findingID:nil)],instructionQuote:"Rename this synthetic cafe")
+            let grant=AskChangeGrant(question:proposal.instructionQuote,entity:"place",operations:["update"],fields:["name"],targetIDs:[id],allowsCreation:false,boundProposal:proposal)
+            let ready=try testEngine.prepare(proposal,question:proposal.instructionQuote,authorization:grant,findings:[])
+            collectionAction=try testEngine.apply(ready.id,authorization:grant)
+        }
         let paragraphs=(0..<3).map {n in AskAnswerParagraph(id:"p\(n)",spans:[.text("Synthetic answer paragraph \(n). Keep selection, copying, and normal transcript scrolling working. This is disposable fixture text, not a real place or query.")],sourceIDs:[])}
-        let response=AskResponse(summary:"Synthetic answer",candidates:[],paragraphs:paragraphs)
-        let count=ProcessInfo.processInfo.arguments.contains("-empty") ? 0 : 24
-        let turns=(0..<count).map {n in AskArchivedTurn(AskTurn(id:UUID(),request:.init(mode:.discovery,text:"Synthetic question \(n)",fromOCR:false),response:response,status:.complete))}
+
+        let requestedCount=ProcessInfo.processInfo.arguments.first {$0.hasPrefix("-turnCount=")}.flatMap {Int($0.dropFirst("-turnCount=".count))} ?? 24
+        let count=ProcessInfo.processInfo.arguments.contains("-empty") ? 0 : requestedCount
+        let turns=(0..<count).map {n in
+            let tail=AskAnswerParagraph(id:"tail",spans:[.text("ANSWER TAIL \(n)")],sourceIDs:[])
+            var response=AskResponse(summary:"Synthetic answer",candidates:[],paragraphs:paragraphs+[tail])
+            if n == count-1,let collectionAction {response.collectionActions=[collectionAction];response.usesLocalCatalog=true}
+            if ProcessInfo.processInfo.arguments.contains("-projection") { response.historyRecordIDs=[place.id!.uuidString] }
+            return AskArchivedTurn(AskTurn(id:UUID(),request:.init(mode:.discovery,text:"Synthetic question \(n)",fromOCR:false),response:response,status:.complete))
+        }
         var draft=ProcessInfo.processInfo.arguments.contains("-longDraft") ? (1...18).map {"Draft line \($0): preserve multiline editing."}.joined(separator:"\n") : "Unsent synthetic draft"
         if ProcessInfo.processInfo.arguments.contains("-wrappedDraft") { draft=String(repeating:"The native editor keeps wrapped text intact. ",count:12) }
         if ProcessInfo.processInfo.arguments.contains("-emptyDraft") { draft="" }
@@ -35,9 +62,8 @@ private struct OfflineKeyboardProvider: AskFeastProvider {
             draft=(1...lines).map {"Line \($0)"}.joined(separator:"\n")
         }
         let chat=AskChatArchive(id:UUID(),title:"Keyboard long chat",updatedAt:Date(),conversation:.init(draft:draft,turns:turns))
-        let other=AskChatArchive(id:UUID(),title:"Other synthetic chat",updatedAt:Date().addingTimeInterval(-10),conversation:.init(draft:"Other preserved draft",turns:Array(turns.prefix(2))))
+        let other=AskChatArchive(id:UUID(),title:"Other synthetic chat",updatedAt:Date().addingTimeInterval(-10),conversation:.init(draft:"Other preserved draft",turns:ProcessInfo.processInfo.arguments.contains("-equalCount") ? Array(turns.reversed()) : Array(turns.prefix(2))))
         guard let store=AskConversationStore.applicationStore(),store.saveLibrary(.init(activeID:chat.id,chats:[chat,other])) else {throw AskError.invalidEvidence}
-        let adapter=AskSavedCollection(context:context,visibleCities:{[city.id!]})
         state.prepareSavedCollection(adapter,provider:OfflineKeyboardProvider())
         guard let session=state.session else {throw AskError.invalidEvidence}
         _=session.replaceProviderWhenIdle(OfflineKeyboardProvider())
@@ -62,7 +88,11 @@ private struct OfflineKeyboardProvider: AskFeastProvider {
                 if let text=scroll as? UITextView {
                     let contentHeight = text.contentSize.height + text.adjustedContentInset.top + text.adjustedContentInset.bottom
                     let overflow = contentHeight > text.bounds.height + 0.01
-                    editorMetrics = "overflow=\(overflow) scrolling=\(text.isScrollEnabled) indicator=\(text.showsVerticalScrollIndicator) viewport=\(text.bounds.height) content=\(contentHeight)"
+                    if !overflow {
+                        fittingMinimumOffset = min(fittingMinimumOffset, text.contentOffset.y)
+                        fittingMaximumOffset = max(fittingMaximumOffset, text.contentOffset.y)
+                    }
+                    editorMetrics = "overflow=\(overflow) scrolling=\(text.isScrollEnabled) indicator=\(text.showsVerticalScrollIndicator) viewport=\(text.bounds.height) content=\(contentHeight) offset=\(text.contentOffset.y) minFit=\(fittingMinimumOffset) maxFit=\(fittingMaximumOffset) bounce=\(text.bounces) alwaysBounce=\(text.alwaysBounceVertical)"
                     info += " selection=\(text.selectedRange) \(editorMetrics)"
                 }
                 lines.append(info)
@@ -80,6 +110,8 @@ struct KeyboardRoot:View {
     @State private var ready=false
     @State private var tab=2
     @State private var editorMetrics="unavailable"
+    @State private var access = true
+    @State private var collectionName = ""
     var body:some View {
         Group {
             if ready {
@@ -92,9 +124,18 @@ struct KeyboardRoot:View {
         }
         // Test-only observable geometry. No editor delegate or gesture is replaced.
         .overlay(alignment: .topLeading) {
-            Text(editorMetrics).font(.system(size: 1)).foregroundStyle(.clear)
+            VStack {
+                Text(collectionName).accessibilityIdentifier("qa.collectionName")
+                Text(editorMetrics).accessibilityIdentifier("qa.editorMetrics")
+            }.font(.system(size: 1)).foregroundStyle(.clear)
                 .frame(width: 1, height: 1).allowsHitTesting(false)
-                .accessibilityIdentifier("qa.editorMetrics")
+        }
+        .overlay(alignment: .topTrailing) {
+            if ProcessInfo.processInfo.arguments.contains("-projection") {
+                Button(access ? "Hide synthetic saved details" : "Restore synthetic saved details") {
+                    access.toggle();KeyboardQA.fixtureAccess=access;try? state.refreshSavedCollection()
+                }.padding(.top,100).font(.caption).accessibilityIdentifier("qa.access")
+            }
         }
         .environment(\.dynamicTypeSize,KeyboardQA.dynamicTypeSize)
         .environment(\.managedObjectContext,KeyboardQA.persistence.viewContext)
@@ -104,6 +145,8 @@ struct KeyboardRoot:View {
             while !Task.isCancelled {
                 let metrics=KeyboardQA.snapshot(state,tab:tab)
                 if metrics != editorMetrics {editorMetrics=metrics}
+                let name=KeyboardQA.collectionPlace?.displayNameSnapshot ?? ""
+                if name != collectionName {collectionName=name}
                 try? await Task.sleep(for:.milliseconds(150))
             }
         }

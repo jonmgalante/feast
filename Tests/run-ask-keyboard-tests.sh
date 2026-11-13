@@ -53,5 +53,5 @@ xcodebuild test -project "$work/source/Feast.xcodeproj" -scheme Feast \
   -configuration "${FEAST_TEST_CONFIGURATION:-Debug}" -destination "platform=iOS Simulator,id=$sim" \
   -derivedDataPath "$work/DerivedData" CODE_SIGNING_ALLOWED=NO CODE_SIGN_ENTITLEMENTS= \
   INFOPLIST_KEY_FeastCloudKitContainerIdentifier= -parallel-testing-enabled NO \
-  -only-testing:KeyboardGestureTests -resultBundlePath "$work/KeyboardTests.xcresult" > "$work/tests.log" 2>&1
+  ${=FEAST_UI_TEST_FILTER:--only-testing:KeyboardGestureTests} -resultBundlePath "$work/KeyboardTests.xcresult" > "$work/tests.log" 2>&1
 print "PASS native Ask keyboard touch regressions"

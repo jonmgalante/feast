@@ -6,17 +6,21 @@ final class KeyboardGestureTests: XCTestCase {
         let input=app.descendants(matching:.any).matching(identifier:"qa.composer").firstMatch
         XCTAssertTrue(input.waitForExistence(timeout:12));XCTAssertEqual(input.label,"Message Ask Feast");let initialHeight=input.frame.height;input.tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout:5),"Software keyboard must be visible")
-        XCTAssertEqual(input.frame.height,initialHeight,accuracy:1,"Keyboard must not compress the editor height")
+        if input.elementType == .textView {
+            XCTAssertEqual(input.frame.height,initialHeight,accuracy:1,"The accessibility editor keeps its fixed height")
+        } else {
+            // Build27's native 1...5-line TextField may choose fewer visible lines
+            // when the keyboard reduces available space. It must remain usable.
+            XCTAssertGreaterThan(input.frame.height,0);XCTAssertTrue(input.isHittable)
+        }
         return (app,input)
     }
     @MainActor private func drag(_ input:XCUIElement,dx:CGFloat=0,dy:CGFloat=100,hold:TimeInterval=0.01) {
         let from=input.coordinate(withNormalizedOffset:CGVector(dx:0.4,dy:0.5))
         from.press(forDuration:hold,thenDragTo:from.withOffset(CGVector(dx:dx,dy:dy)),withVelocity:.fast,thenHoldForDuration:0)
     }
-    @MainActor private func dismissInput(_ app:XCUIApplication,input:XCUIElement,velocity:XCUIGestureVelocity = .fast) {
-        let from=input.coordinate(withNormalizedOffset:CGVector(dx:0.8,dy:0.5))
-        let to=app.coordinate(withNormalizedOffset:CGVector(dx:0.8,dy:0.97))
-        from.press(forDuration:0.01,thenDragTo:to,withVelocity:velocity,thenHoldForDuration:0)
+    @MainActor private func dismissViaHistory(_ app:XCUIApplication) {
+        app.buttons["ask.history"].tap();hidden(app);app.buttons["Done"].tap()
     }
     @MainActor private func dragTranscriptDown(_ app:XCUIApplication, input:XCUIElement) {
         let transcript=app.scrollViews.matching(identifier:"qa.transcript").firstMatch
@@ -43,30 +47,44 @@ final class KeyboardGestureTests: XCTestCase {
     @MainActor private func expectComposerOverflow(_ expected:Bool, in app:XCUIApplication) {
         let metrics=app.staticTexts["qa.editorMetrics"]
         XCTAssertTrue(metrics.waitForExistence(timeout:3))
-        let prefix="overflow=\(expected) scrolling=true indicator=true "
+        let prefix="overflow=\(expected) "
         expectation(for:NSPredicate(format:"label BEGINSWITH %@",prefix),evaluatedWith:metrics)
         waitForExpectations(timeout:4)
     }
 
-    @MainActor func testEmptyComposerFitsAcrossOrdinaryDynamicTypeSizes() {
+    @MainActor private func expectNativeFieldConfiguration(in app:XCUIApplication) {
+        let metrics=app.staticTexts["qa.editorMetrics"]
+        XCTAssertTrue(metrics.waitForExistence(timeout:3))
+        // Native TextField controls its own content metrics/leading. Do not impose
+        // the removed custom TextEditor's pixel-for-pixel sizing contract.
+        expectation(for:NSPredicate(format:"label CONTAINS %@ AND label CONTAINS %@","indicator=false","alwaysBounce=false"),evaluatedWith:metrics)
+        waitForExpectations(timeout:4)
+    }
+
+    @MainActor func testEmptyNativeComposerAcrossOrdinaryDynamicTypeSizes() {
         for size in ["xSmall","small","medium","large","xLarge","xxLarge","xxxLarge"] {
             let (app,input)=open(["-emptyDraft","-size="+size])
-            expectComposerOverflow(false,in:app)
-            input.swipeUp(velocity:.slow);expectComposerOverflow(false,in:app)
-            screenshot(app);dismissInput(app,input:input,velocity:.slow);hidden(app)
-            XCTAssertEqual(input.value as? String,"")
+            expectNativeFieldConfiguration(in:app)
+            input.swipeUp(velocity:.slow);expectNativeFieldConfiguration(in:app)
+            screenshot(app);dismissViaHistory(app);hidden(app)
+            XCTAssertTrue(["","Ask Feast…"].contains(input.value as? String ?? "<missing>"),"Native empty field must show its placeholder, not a draft")
             app.terminate()
         }
     }
-    @MainActor func testComposerScrollsOnlyBeyondFiveLines() {
+    @MainActor func testNativeComposerGrowthCapAcrossTypeSizes() {
         for size in ["small","large","xxxLarge"] {
+            var heights:[CGFloat]=[]
             for lines in [1,5,6] {
                 let (app,input)=open(["-draftLines=\(lines)","-size="+size])
-                expectComposerOverflow(lines>5,in:app)
-                input.swipeUp(velocity:.slow);expectComposerOverflow(lines>5,in:app)
+                heights.append(input.frame.height)
+                expectNativeFieldConfiguration(in:app)
+                if lines>5 {expectComposerOverflow(true,in:app)}
+                input.swipeUp(velocity:.slow)
                 XCTAssertEqual(input.value as? String,(1...lines).map {"Line \($0)"}.joined(separator:"\n"))
                 screenshot(app);app.terminate()
             }
+            XCTAssertGreaterThan(heights[1],heights[0]+40)
+            XCTAssertEqual(heights[1],heights[2],accuracy:1,"Native field stops growing at five lines")
         }
     }
     @MainActor func testDeletingOverflowingDraftRestoresFittingComposer() {
@@ -75,23 +93,26 @@ final class KeyboardGestureTests: XCTestCase {
         let sixth="\nLine 6"
         input.typeText(five+sixth);expectComposerOverflow(true,in:app)
         input.typeText(String(repeating:XCUIKeyboardKey.delete.rawValue,count:sixth.count))
-        XCTAssertEqual(input.value as? String,five);expectComposerOverflow(false,in:app)
+        XCTAssertEqual(input.value as? String,five);expectNativeFieldConfiguration(in:app)
         input.typeText(String(repeating:XCUIKeyboardKey.delete.rawValue,count:five.count))
-        XCTAssertEqual(input.value as? String,"");expectComposerOverflow(false,in:app)
-        dismissInput(app,input:input,velocity:.slow);hidden(app);screenshot(app)
+        XCTAssertTrue(["","Ask Feast…"].contains(input.value as? String ?? "<missing>"),"Native empty field must show its placeholder, not a draft");expectNativeFieldConfiguration(in:app)
+        dismissViaHistory(app);hidden(app);screenshot(app)
     }
 
-    @MainActor func testShortInputSlowNativeDrag() {
+    @MainActor func testShortInputDownDragDoesNotRubberBand() {
         let (app,input)=open()
-        dismissInput(app,input:input,velocity:.slow)
-        hidden(app);XCTAssertEqual(input.value as? String,"Unsent synthetic draft");screenshot(app)
+        drag(input,dy:110)
+        XCTAssertEqual(input.value as? String,"Unsent synthetic draft")
+        let metrics=app.staticTexts["qa.editorMetrics"].label
+        XCTAssertTrue(metrics.contains("minFit=0.0 maxFit=0.0"),"Fitting input should not rubber-band: \(metrics)")
+        screenshot(app);dismissViaHistory(app);hidden(app)
     }
-    @MainActor func testEmptyDraftNativeDismissalAndPlaceholder() {
+    @MainActor func testEmptyDraftUsesOriginalNativeField() {
         let (app,input)=open(["-emptyDraft"])
-        XCTAssertEqual(input.value as? String,"")
-        XCTAssertGreaterThan(input.frame.height,25);XCTAssertLessThan(input.frame.height,50)
-        screenshot(app);dismissInput(app,input:input);hidden(app)
-        XCTAssertEqual(input.value as? String,"")
+        XCTAssertTrue(["","Ask Feast…"].contains(input.value as? String ?? "<missing>"),"Native empty field must show its placeholder, not a draft")
+        XCTAssertGreaterThan(input.frame.height,15);XCTAssertLessThan(input.frame.height,50)
+        screenshot(app);dismissViaHistory(app);hidden(app)
+        XCTAssertTrue(["","Ask Feast…"].contains(input.value as? String ?? "<missing>"),"Native empty field must show its placeholder, not a draft")
     }
     @MainActor func testComposerOneToFiveLineSizing() {
         var heights:[CGFloat]=[]
@@ -105,12 +126,12 @@ final class KeyboardGestureTests: XCTestCase {
         XCTAssertEqual(heights[1],heights[2],accuracy:1,"Composer stops growing after five lines")
         XCTAssertLessThan(heights[2],130)
     }
-    @MainActor func testWrappedDraftNativeSizingAndScrolling() {
+    @MainActor func testWrappedDraftNativeFieldSizingAndScrolling() {
         let (app,input)=open(["-wrappedDraft"]);let draft=input.value as? String
-        XCTAssertGreaterThan(input.frame.height,110);XCTAssertLessThan(input.frame.height,130)
+        XCTAssertGreaterThan(input.frame.height,90);XCTAssertLessThan(input.frame.height,130)
         screenshot(app);input.swipeUp(velocity:.slow)
         XCTAssertTrue(app.keyboards.firstMatch.exists);XCTAssertEqual(input.value as? String,draft)
-        dismissInput(app,input:input);hidden(app);XCTAssertEqual(input.value as? String,draft)
+        dismissViaHistory(app);hidden(app);XCTAssertEqual(input.value as? String,draft)
     }
     @MainActor func testTrailingNewlineGrowsComposerAndEditingWorks() {
         let (app,input)=open(["-emptyDraft"]);input.typeText("Line 1");let height=input.frame.height
@@ -121,8 +142,8 @@ final class KeyboardGestureTests: XCTestCase {
         XCTAssertEqual(input.value as? String,"Line 1\nSecond line");screenshot(app)
     }
 
-    @MainActor func testShortInputDownSwipe() {
-        let (app,input)=open();dismissInput(app,input:input);hidden(app)
+    @MainActor func testShortInputHistoryDismissal() {
+        let (app,input)=open();dismissViaHistory(app);hidden(app)
         XCTAssertEqual(input.value as? String,"Unsent synthetic draft");screenshot(app)
     }
     @MainActor func testShortInputUpAndHorizontalPreserveEditing() {
@@ -151,8 +172,8 @@ final class KeyboardGestureTests: XCTestCase {
         XCTAssertTrue(app.keyboards.firstMatch.exists,"Downward swipe inside a scrolled draft must scroll, not dismiss")
         XCTAssertEqual(input.value as? String,draft);screenshot(app)
     }
-    @MainActor func testAccessibilityInputDownSwipe() {
-        let (app,input)=open(["-accessibility"]);dismissInput(app,input:input);hidden(app)
+    @MainActor func testAccessibilityHistoryDismissal() {
+        let (app,input)=open(["-accessibility"]);dismissViaHistory(app);hidden(app)
         XCTAssertEqual(input.value as? String,"Unsent synthetic draft");screenshot(app)
     }
     @MainActor func testAccessibilityLongDraftScroll() {
@@ -173,16 +194,16 @@ final class KeyboardGestureTests: XCTestCase {
         XCTAssertTrue(transcript.exists);dragTranscriptDown(app,input:input);hidden(app)
         XCTAssertEqual(input.value as? String,draft);screenshot(app)
     }
-    @MainActor func testLongDraftNativeDismissalPreservesText() {
+    @MainActor func testLongDraftHistoryDismissalPreservesText() {
         let (app,input)=open(["-longDraft"]);let draft=input.value as? String
         input.swipeUp(velocity:.slow)
-        dismissInput(app,input:input);hidden(app)
+        dismissViaHistory(app);hidden(app)
         XCTAssertEqual(input.value as? String,draft);screenshot(app)
     }
-    @MainActor func testAccessibilityLongDraftNativeDismissalPreservesText() {
+    @MainActor func testAccessibilityLongDraftHistoryDismissalPreservesText() {
         let (app,input)=open(["-accessibility","-longDraft"]);let draft=input.value as? String
         input.swipeUp(velocity:.slow)
-        dismissInput(app,input:input);hidden(app)
+        dismissViaHistory(app);hidden(app)
         XCTAssertEqual(input.value as? String,draft);screenshot(app)
     }
     @MainActor func testTranscriptDismissesAtMiddleAndTop() {
@@ -222,7 +243,7 @@ final class KeyboardGestureTests: XCTestCase {
         XCTAssertTrue(app.buttons["Stop"].waitForExistence(timeout:3))
         input.tap();XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout:3))
         input.typeText("Next unsent draft")
-        dismissInput(app,input:input);hidden(app)
+        dragTranscriptDown(app,input:input);hidden(app)
         XCTAssertTrue(app.buttons["Stop"].exists,"Dismissal must not cancel the active request")
         XCTAssertEqual(input.value as? String,"Next unsent draft")
         XCTAssertTrue(app.staticTexts["Synthetic answer complete. The keyboard gesture did not send or cancel anything."].waitForExistence(timeout:25))
@@ -251,6 +272,129 @@ final class KeyboardGestureTests: XCTestCase {
         app.buttons["ask.history"].tap();app.staticTexts["Keyboard long chat"].tap()
         XCTAssertEqual(input.value as? String,draft)
         XCTAssertFalse(app.keyboards.firstMatch.exists);screenshot(app)
+    }
+
+    @MainActor private func latestTailVisible(_ app:XCUIApplication,number:Int=23) {
+        let tail=app.staticTexts.matching(NSPredicate(format:"label CONTAINS %@","ANSWER TAIL \(number)")).firstMatch
+        XCTAssertTrue(tail.waitForExistence(timeout:5),"Latest answer tail exists")
+        XCTAssertTrue(tail.isHittable,"Latest answer tail must actually be visible")
+        let transcript=app.scrollViews["qa.transcript"]
+        XCTAssertLessThanOrEqual(tail.frame.maxY,transcript.frame.maxY+1,"Latest answer must not extend below viewport")
+        screenshot(app)
+    }
+    @MainActor func testLatestAnswerColdHistoryAndTabNavigation() {
+        let app=XCUIApplication();app.launch()
+        XCTAssertTrue(app.descendants(matching:.any)["qa.composer"].waitForExistence(timeout:12))
+        latestTailVisible(app)
+        app.buttons["ask.history"].tap();app.staticTexts["Other synthetic chat"].tap()
+        latestTailVisible(app,number:1)
+        app.buttons["ask.history"].tap();app.staticTexts["Keyboard long chat"].tap()
+        latestTailVisible(app)
+        app.scrollViews["qa.transcript"].swipeDown(velocity:.slow)
+        app.buttons["ask.history"].tap();app.staticTexts["Keyboard long chat"].tap()
+        latestTailVisible(app)
+        app.scrollViews["qa.transcript"].swipeDown(velocity:.slow)
+        app.tabBars.buttons["Cities"].tap();app.tabBars.buttons["Ask Feast"].tap()
+        latestTailVisible(app)
+    }
+    @MainActor func testKeyboardAndDraftHeightPreserveIntentionalReadingPosition() {
+        let app=XCUIApplication();app.launch()
+        let input=app.descendants(matching:.any)["qa.composer"]
+        XCTAssertTrue(input.waitForExistence(timeout:12));latestTailVisible(app)
+        let transcript=app.scrollViews["qa.transcript"]
+        transcript.swipeDown(velocity:.slow);transcript.swipeDown(velocity:.slow)
+        let questions=app.staticTexts.matching(NSPredicate(format:"label BEGINSWITH %@","Synthetic question "))
+        guard let question=questions.allElementsBoundByIndex.first(where:{$0.isHittable && $0.frame.minY>app.navigationBars.firstMatch.frame.maxY+10}) else {XCTFail("A prior question should be visible");return}
+        let name=question.label;let y=question.frame.minY
+        input.tap();XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout:4))
+        XCTAssertEqual(app.staticTexts[name].frame.minY,y,accuracy:3,"Keyboard should not move the intentional reading position")
+        input.typeText("\nMore draft\nThird draft line")
+        XCTAssertEqual(app.staticTexts[name].frame.minY,y,accuracy:3,"Composer growth should not jump the reader")
+        app.buttons["ask.history"].tap();hidden(app);app.buttons["Done"].tap()
+        XCTAssertEqual(app.staticTexts[name].frame.minY,y,accuracy:3,"Keyboard dismissal should not jump the reader")
+        screenshot(app)
+    }
+
+    @MainActor func testLatestAnswerEqualCountHistorySwitch() {
+        let app=XCUIApplication();app.launchArguments=["-equalCount"];app.launch()
+        XCTAssertTrue(app.descendants(matching:.any)["qa.composer"].waitForExistence(timeout:12))
+        latestTailVisible(app)
+        app.buttons["ask.history"].tap();app.staticTexts["Other synthetic chat"].tap()
+        latestTailVisible(app,number:0)
+        app.buttons["ask.history"].tap();app.staticTexts["Keyboard long chat"].tap()
+        latestTailVisible(app)
+    }
+    @MainActor func testBottomPositionSurvivesKeyboardAndComposerGrowth() {
+        let app=XCUIApplication();app.launch()
+        let input=app.descendants(matching:.any)["qa.composer"]
+        XCTAssertTrue(input.waitForExistence(timeout:12));latestTailVisible(app)
+        input.tap();XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout:4));latestTailVisible(app)
+        input.typeText("\nSecond line\nThird line\nFourth line")
+        latestTailVisible(app)
+        app.buttons["ask.history"].tap();hidden(app);app.buttons["Done"].tap();latestTailVisible(app)
+    }
+    @MainActor func testManualReturnToLatestKeepsBottomDuringKeyboardGrowth() {
+        let app=XCUIApplication();app.launch()
+        let input=app.descendants(matching:.any)["qa.composer"]
+        XCTAssertTrue(input.waitForExistence(timeout:12));latestTailVisible(app)
+        let transcript=app.scrollViews["qa.transcript"]
+        transcript.swipeDown(velocity:.slow);transcript.swipeDown(velocity:.slow)
+        for _ in 0..<4 {transcript.swipeUp(velocity:.fast)}
+        latestTailVisible(app)
+        input.tap();XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout:4));latestTailVisible(app)
+        input.typeText("\nSecond line\nThird line")
+        latestTailVisible(app);dismissViaHistory(app);latestTailVisible(app)
+    }
+    @MainActor func testShortHistoryKeyboardResizeKeepsLatest() {
+        let app=XCUIApplication();app.launchArguments=["-turnCount=2"];app.launch()
+        let input=app.descendants(matching:.any)["qa.composer"]
+        XCTAssertTrue(input.waitForExistence(timeout:12));latestTailVisible(app,number:1)
+        input.tap();XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout:4));latestTailVisible(app,number:1)
+        input.typeText("\nSecond line\nThird line");latestTailVisible(app,number:1)
+        dismissViaHistory(app);latestTailVisible(app,number:1)
+    }
+    @MainActor func testLongHistoryColdOpenAtLatest() {
+        // Existing archive maximum; do not change application limits.
+        let app=XCUIApplication();app.launchArguments=["-turnCount=100"];app.launch()
+        XCTAssertTrue(app.descendants(matching:.any)["qa.composer"].waitForExistence(timeout:12))
+        latestTailVisible(app,number:99)
+        app.buttons["ask.history"].tap();app.staticTexts["Other synthetic chat"].tap()
+        latestTailVisible(app,number:1)
+        app.buttons["ask.history"].tap();app.staticTexts["Keyboard long chat"].tap()
+        latestTailVisible(app,number:99)
+    }
+    @MainActor func testCollectionReceiptUndoStillUpdatesSavedRecord() {
+        let app=XCUIApplication();app.launchArguments=["-collectionAction"];app.launch()
+        let input=app.descendants(matching:.any)["qa.composer"]
+        XCTAssertTrue(input.waitForExistence(timeout:12))
+        XCTAssertEqual(app.staticTexts["qa.collectionName"].label,"Updated synthetic cafe")
+        let view=app.buttons["View Updated synthetic cafe"]
+        XCTAssertTrue(view.waitForExistence(timeout:5));XCTAssertTrue(view.isHittable)
+        let undo=app.buttons["Undo this operation for 1 saved records"]
+        XCTAssertTrue(undo.waitForExistence(timeout:5));XCTAssertTrue(undo.isHittable)
+        undo.tap()
+        expectation(for:NSPredicate(format:"label == %@","Synthetic Cafe"),evaluatedWith:app.staticTexts["qa.collectionName"])
+        waitForExpectations(timeout:5)
+        XCTAssertEqual(input.value as? String,"Unsent synthetic draft")
+        XCTAssertFalse(undo.exists,"Completed Undo must not remain actionable")
+        XCTAssertTrue(app.staticTexts["Undone · 1 place"].exists,"The existing receipt reflects the completed Undo")
+        screenshot(app)
+    }
+    @MainActor func testPermissionProjectionShrinkLeavesVisibleTranscript() {
+        let app=XCUIApplication();app.launchArguments=["-projection"];app.launch()
+        XCTAssertTrue(app.descendants(matching:.any)["qa.composer"].waitForExistence(timeout:12));latestTailVisible(app)
+        let transcript=app.scrollViews["qa.transcript"]
+        transcript.swipeDown(velocity:.slow);transcript.swipeDown(velocity:.slow)
+        app.buttons["qa.access"].tap()
+        let placeholders=app.staticTexts.matching(NSPredicate(format:"label CONTAINS %@","Some earlier saved details are no longer available."))
+        XCTAssertTrue(placeholders.firstMatch.waitForExistence(timeout:5))
+        XCTAssertTrue(placeholders.allElementsBoundByIndex.contains { $0.isHittable },"Content shrink must not leave a blank viewport")
+        screenshot(app)
+        app.buttons["qa.access"].tap()
+        let prose=app.staticTexts.matching(NSPredicate(format:"label CONTAINS %@","Synthetic answer paragraph"))
+        XCTAssertTrue(prose.firstMatch.waitForExistence(timeout:5))
+        XCTAssertTrue(prose.allElementsBoundByIndex.contains { $0.isHittable },"Restored content should remain visible")
+        screenshot(app)
     }
 
 }

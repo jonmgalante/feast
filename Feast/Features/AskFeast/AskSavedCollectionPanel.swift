@@ -9,9 +9,15 @@ struct AskSavedCollectionPanel: View {
     @ObservedObject var state: AskFeastTabState
     @ObservedObject var session: AskSession
     var focused: FocusState<Bool>.Binding
+    var scrollToLatestRequest = 0
     var showHistory:()->Void = {}
     var invitationRequired=false
     var enterInvitation:()->Void = {}
+    private struct TranscriptSize: Equatable {
+        let content: CGSize
+        let viewport: CGSize
+    }
+    @State private var transcriptPosition = ScrollPosition(edge: .bottom)
     @State private var photo: PhotosPickerItem?
     @State private var photoTask: Task<Void, Never>?
     @State private var readingPhoto = false
@@ -41,7 +47,7 @@ struct AskSavedCollectionPanel: View {
     }
 
     var body: some View {
-        ScrollViewReader { proxy in
+        Group {
             VStack(spacing: 0) {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: FeastTheme.Spacing.large) {
@@ -104,9 +110,28 @@ struct AskSavedCollectionPanel: View {
                 }
                 .defaultScrollAnchor(.bottom, for: .initialOffset)
                 .scrollDismissesKeyboard(.interactively)
-                .onChange(of: session.activeChatID) { _, _ in proxy.scrollTo("bottom", anchor: .bottom) }
-                .onChange(of: session.turns.count) { _, _ in proxy.scrollTo("bottom", anchor: .bottom) }
-                .onChange(of: session.isLoading) { _, loading in if !loading { proxy.scrollTo("bottom", anchor: .bottom) } }
+                .scrollPosition($transcriptPosition)
+                .onScrollGeometryChange(for: TranscriptSize.self) {
+                    TranscriptSize(content: $0.contentSize, viewport: $0.containerSize)
+                } action: { _, _ in
+                    // Follow layout changes only until the reader deliberately scrolls away.
+                    if !transcriptPosition.isPositionedByUser { transcriptPosition.scrollTo(edge: .bottom) }
+                }
+                .onScrollPhaseChange { _, phase, context in
+                    // Restore native bottom-follow only when the reader returns to the end.
+                    let geometry = context.geometry
+                    if phase == .idle && transcriptPosition.isPositionedByUser &&
+                        geometry.visibleRect.maxY >= geometry.contentSize.height + geometry.contentInsets.bottom - 1 {
+                        transcriptPosition.scrollTo(edge: .bottom)
+                    }
+                }
+                .onAppear { transcriptPosition.scrollTo(edge: .bottom) }
+                .onChange(of: scrollToLatestRequest) { _, _ in transcriptPosition.scrollTo(edge: .bottom) }
+                .onChange(of: session.activeChatID) { _, _ in transcriptPosition.scrollTo(edge: .bottom) }
+                .onChange(of: session.turns.count) { _, _ in transcriptPosition.scrollTo(edge: .bottom) }
+                .onChange(of: session.isLoading) { _, loading in
+                    if !loading && !transcriptPosition.isPositionedByUser { transcriptPosition.scrollTo(edge: .bottom) }
+                }
                 if !invitationRequired {composer}
             }
         }
@@ -149,14 +174,6 @@ struct AskSavedCollectionPanel: View {
         let name=turn.response?.candidates.first(where:{$0.id==action.finding.recordID})?.name ?? "this place"
         return "Replace "+old+" with "+new+" for "+name+"?"
     }
-    // Text omits final-line leading that TextEditor includes in its content height.
-    // Match the supporting font at this Dynamic Type size to avoid phantom overflow.
-    private var composerTrailingLeading: CGFloat {
-        let traits = UITraitCollection(preferredContentSizeCategory: UIContentSizeCategory(dynamicTypeSize))
-        let base = UIFont.preferredFont(forTextStyle: .subheadline, compatibleWith: traits)
-        let descriptor = base.fontDescriptor.withDesign(.rounded) ?? base.fontDescriptor
-        return max(0, UIFont(descriptor: descriptor, size: base.pointSize).leading)
-    }
     private var composer: some View {
         VStack(alignment: .leading, spacing: FeastTheme.Spacing.small) {
             if let attachment = session.attachment, let image = UIImage(data: attachment.jpeg) {
@@ -169,7 +186,6 @@ struct AskSavedCollectionPanel: View {
             if dynamicTypeSize.isAccessibilitySize {
                 TextEditor(text: $session.input)
                     .font(FeastTheme.Typography.supporting).focused(focused)
-                    .scrollDismissesKeyboard(.interactively)
                     .frame(height: 140).scrollContentBackground(.hidden)
                     .accessibilityLabel("Message Ask Feast")
                     .accessibilityAction(named:Text("Open chat history")) {showHistory()}
@@ -178,32 +194,11 @@ struct AskSavedCollectionPanel: View {
                         if session.input.isEmpty { Text("Ask Feast…").font(FeastTheme.Typography.supporting).foregroundStyle(FeastTheme.AdaptiveColors.secondaryText).allowsHitTesting(false).accessibilityHidden(true) }
                     }
             } else {
-                // Text supplies the existing one-to-five-line height. TextEditor
-                // owns native scrolling, selection and interactive dismissal.
-                Text(session.input + "\u{200B}")
-                    .font(FeastTheme.Typography.supporting).lineLimit(1...5)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 5).padding(.vertical, 8)
-                    .padding(.bottom, composerTrailingLeading)
-                    .hidden()
-                    .overlay {
-                        TextEditor(text: $session.input)
-                            .font(FeastTheme.Typography.supporting).focused(focused)
-                            .scrollDismissesKeyboard(.interactively)
-                            .scrollContentBackground(.hidden)
-                            .accessibilityLabel("Message Ask Feast")
-                            .accessibilityAction(named:Text("Open chat history")) {showHistory()}
-                            .accessibilityAction(named:Text("Start new chat")) {_ = session.newChat()}
-                            .overlay(alignment: .topLeading) {
-                                if session.input.isEmpty {
-                                    Text("Ask Feast…").font(FeastTheme.Typography.supporting)
-                                        .foregroundStyle(FeastTheme.AdaptiveColors.secondaryText)
-                                        .padding(.horizontal, 5).padding(.vertical, 8)
-                                        .allowsHitTesting(false).accessibilityHidden(true)
-                                }
-                            }
-                    }
+                TextField("Message", text: $session.input, prompt: Text("Ask Feast…"), axis: .vertical)
+                    .lineLimit(1...5).focused(focused).font(FeastTheme.Typography.supporting)
+                    .accessibilityLabel("Message Ask Feast")
+                    .accessibilityAction(named:Text("Open chat history")) {showHistory()}
+                    .accessibilityAction(named:Text("Start new chat")) {_ = session.newChat()}
             }
             HStack {
                 if state.screenshotSendingAvailable {

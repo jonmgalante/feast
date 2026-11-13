@@ -23,6 +23,7 @@ struct AskFeastTab: View {
     @State private var onlineConfigured = false
     @State private var accessPresentation = AskAccessPresentation()
     @FocusState private var composerFocused: Bool
+    @State private var scrollToLatestRequest = 0
     private var phoneActivationAvailable:Bool {
         AskProductionAccess.configuration(info:Bundle.main.infoDictionary ?? [:]) != nil &&
         !(AskOwnerValidationAccess.configuration(info:Bundle.main.infoDictionary ?? [:]) != nil && AskOwnerValidationAccess.credentialAvailable)
@@ -32,7 +33,7 @@ struct AskFeastTab: View {
         NavigationStack {
             Group {
                 if state.savedCollection != nil, let session = state.session {
-                    AskSavedCollectionPanel(state: state, session: session, focused: $composerFocused, showHistory:showHistory,invitationRequired:phoneActivationAvailable && !AskProductionAccess.credentialAvailable,enterInvitation:{composerFocused=false;accessPresentation.present(.access)})
+                    AskSavedCollectionPanel(state: state, session: session, focused: $composerFocused, scrollToLatestRequest: scrollToLatestRequest, showHistory:showHistory,invitationRequired:phoneActivationAvailable && !AskProductionAccess.credentialAvailable,enterInvitation:{composerFocused=false;accessPresentation.present(.access)})
                 } else if let error = state.error {
                     ContentUnavailableView("Ask Feast", systemImage: "exclamationmark.triangle", description: Text(error))
                 } else { ProgressView("Preparing Ask Feast") }
@@ -68,7 +69,7 @@ struct AskFeastTab: View {
             switch sheet {
             case .history:
                 if let session = state.session {
-                    AskChatHistoryView(session:session,onlineConfigured:onlineConfigured,accessAvailable:phoneActivationAvailable,showAccess:{accessPresentation.present(.access)})
+                    AskChatHistoryView(session:session,onlineConfigured:onlineConfigured,accessAvailable:phoneActivationAvailable,showAccess:{accessPresentation.present(.access)},didSelectChat:{scrollToLatestRequest += 1})
                 }
             case .access:
                 if let configuration=AskProductionAccess.configuration(info:Bundle.main.infoDictionary ?? [:]) {
@@ -429,6 +430,7 @@ private struct AskChatHistoryView: View {
     let onlineConfigured:Bool
     let accessAvailable:Bool
     let showAccess:()->Void
+    var didSelectChat:()->Void = {}
     @State private var renaming:UUID?
     @State private var title = ""
     @State private var deleting:UUID?
@@ -488,7 +490,7 @@ private struct AskChatHistoryView: View {
     }
     private func historyRow(_ chat:AskChatHistoryRow) -> some View {
         Button {
-            if chat.id == session.activeChatID || session.openChat(chat.id) { dismiss() }
+            if chat.id == session.activeChatID || session.openChat(chat.id) { didSelectChat(); dismiss() }
         } label: {
             HStack {
                 VStack(alignment:.leading,spacing:FeastTheme.Spacing.xSmall) {
