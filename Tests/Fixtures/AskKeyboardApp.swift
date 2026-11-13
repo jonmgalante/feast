@@ -29,6 +29,7 @@ private struct OfflineKeyboardProvider: AskFeastProvider {
         let count=ProcessInfo.processInfo.arguments.contains("-empty") ? 0 : 24
         let turns=(0..<count).map {n in AskArchivedTurn(AskTurn(id:UUID(),request:.init(mode:.discovery,text:"Synthetic question \(n)",fromOCR:false),response:response,status:.complete))}
         var draft=ProcessInfo.processInfo.arguments.contains("-longDraft") ? (1...18).map {"Draft line \($0): preserve multiline editing."}.joined(separator:"\n") : "Unsent synthetic draft"
+        if ProcessInfo.processInfo.arguments.contains("-wrappedDraft") { draft=String(repeating:"The native editor keeps wrapped text intact. ",count:12) }
         if ProcessInfo.processInfo.arguments.contains("-emptyDraft") { draft="" }
         if let argument=ProcessInfo.processInfo.arguments.first(where:{$0.hasPrefix("-draftLines=")}),let lines=Int(argument.dropFirst("-draftLines=".count)) {
             draft=(1...lines).map {"Line \($0)"}.joined(separator:"\n")

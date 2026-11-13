@@ -174,6 +174,7 @@ struct AskSavedCollectionPanel: View {
                 // owns native scrolling, selection and interactive dismissal.
                 Text(session.input + "\u{200B}")
                     .font(FeastTheme.Typography.supporting).lineLimit(1...5)
+                    .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 5).padding(.vertical, 8)
                     .hidden()

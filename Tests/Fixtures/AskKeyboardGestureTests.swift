@@ -4,8 +4,9 @@ final class KeyboardGestureTests: XCTestCase {
     @MainActor private func open(_ arguments:[String] = []) -> (XCUIApplication,XCUIElement) {
         let app=XCUIApplication();app.launchArguments=arguments;app.launch()
         let input=app.descendants(matching:.any).matching(identifier:"qa.composer").firstMatch
-        XCTAssertTrue(input.waitForExistence(timeout:12));XCTAssertEqual(input.label,"Message Ask Feast");input.tap()
+        XCTAssertTrue(input.waitForExistence(timeout:12));XCTAssertEqual(input.label,"Message Ask Feast");let initialHeight=input.frame.height;input.tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout:5),"Software keyboard must be visible")
+        XCTAssertEqual(input.frame.height,initialHeight,accuracy:1,"Keyboard must not compress the editor height")
         return (app,input)
     }
     @MainActor private func drag(_ input:XCUIElement,dx:CGFloat=0,dy:CGFloat=100,hold:TimeInterval=0.01) {
@@ -59,12 +60,19 @@ final class KeyboardGestureTests: XCTestCase {
             XCTAssertEqual(input.value as? String,(1...lines).map {"Line \($0)"}.joined(separator:"\n"))
             screenshot(app);app.terminate()
         }
-        XCTAssertGreaterThan(heights[1],heights[0]+50)
+        XCTAssertGreaterThan(heights[1],heights[0]+70)
         XCTAssertEqual(heights[1],heights[2],accuracy:1,"Composer stops growing after five lines")
         XCTAssertLessThan(heights[2],130)
     }
+    @MainActor func testWrappedDraftNativeSizingAndScrolling() {
+        let (app,input)=open(["-wrappedDraft"]);let draft=input.value as? String
+        XCTAssertGreaterThan(input.frame.height,110);XCTAssertLessThan(input.frame.height,130)
+        screenshot(app);input.swipeUp(velocity:.slow)
+        XCTAssertTrue(app.keyboards.firstMatch.exists);XCTAssertEqual(input.value as? String,draft)
+        dismissInput(app,input:input);hidden(app);XCTAssertEqual(input.value as? String,draft)
+    }
     @MainActor func testTrailingNewlineGrowsComposerAndEditingWorks() {
-        let (app,input)=open(["-draftLines=1"]);let height=input.frame.height
+        let (app,input)=open(["-emptyDraft"]);input.typeText("Line 1");let height=input.frame.height
         input.typeText("\n")
         XCTAssertEqual(input.value as? String,"Line 1\n")
         XCTAssertGreaterThan(input.frame.height,height+10)
