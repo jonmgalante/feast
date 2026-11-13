@@ -40,6 +40,47 @@ final class KeyboardGestureTests: XCTestCase {
         let shot=XCTAttachment(screenshot:app.screenshot());shot.lifetime = .keepAlways;add(shot)
     }
 
+    @MainActor private func expectComposerOverflow(_ expected:Bool, in app:XCUIApplication) {
+        let metrics=app.staticTexts["qa.editorMetrics"]
+        XCTAssertTrue(metrics.waitForExistence(timeout:3))
+        let prefix="overflow=\(expected) scrolling=true indicator=true "
+        expectation(for:NSPredicate(format:"label BEGINSWITH %@",prefix),evaluatedWith:metrics)
+        waitForExpectations(timeout:4)
+    }
+
+    @MainActor func testEmptyComposerFitsAcrossOrdinaryDynamicTypeSizes() {
+        for size in ["xSmall","small","medium","large","xLarge","xxLarge","xxxLarge"] {
+            let (app,input)=open(["-emptyDraft","-size="+size])
+            expectComposerOverflow(false,in:app)
+            input.swipeUp(velocity:.slow);expectComposerOverflow(false,in:app)
+            screenshot(app);dismissInput(app,input:input,velocity:.slow);hidden(app)
+            XCTAssertEqual(input.value as? String,"")
+            app.terminate()
+        }
+    }
+    @MainActor func testComposerScrollsOnlyBeyondFiveLines() {
+        for size in ["small","large","xxxLarge"] {
+            for lines in [1,5,6] {
+                let (app,input)=open(["-draftLines=\(lines)","-size="+size])
+                expectComposerOverflow(lines>5,in:app)
+                input.swipeUp(velocity:.slow);expectComposerOverflow(lines>5,in:app)
+                XCTAssertEqual(input.value as? String,(1...lines).map {"Line \($0)"}.joined(separator:"\n"))
+                screenshot(app);app.terminate()
+            }
+        }
+    }
+    @MainActor func testDeletingOverflowingDraftRestoresFittingComposer() {
+        let (app,input)=open(["-emptyDraft"])
+        let five=(1...5).map {"Line \($0)"}.joined(separator:"\n")
+        let sixth="\nLine 6"
+        input.typeText(five+sixth);expectComposerOverflow(true,in:app)
+        input.typeText(String(repeating:XCUIKeyboardKey.delete.rawValue,count:sixth.count))
+        XCTAssertEqual(input.value as? String,five);expectComposerOverflow(false,in:app)
+        input.typeText(String(repeating:XCUIKeyboardKey.delete.rawValue,count:five.count))
+        XCTAssertEqual(input.value as? String,"");expectComposerOverflow(false,in:app)
+        dismissInput(app,input:input,velocity:.slow);hidden(app);screenshot(app)
+    }
+
     @MainActor func testShortInputSlowNativeDrag() {
         let (app,input)=open()
         dismissInput(app,input:input,velocity:.slow)

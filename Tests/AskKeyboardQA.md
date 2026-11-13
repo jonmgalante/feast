@@ -6,18 +6,23 @@ The runner copies the current app sources, uses a unique app identity and a new 
 
 ## Behavior under test
 
-- A transcript drag clears keyboard focus immediately, including empty chats and long transcripts at the bottom, middle and top. Taps and programmatic scrolling do not clear focus through that callback.
-- A quick downward swipe in the input dismisses the keyboard. An overflowing draft keeps normal downward scrolling until its own text is already at the top. There is no new button.
-- The input recognizer leaves horizontal/upward drags, long-press caret movement and existing selections to the editor. It declines marked-text composition and VoiceOver touches.
+- Transcript and input drags use native interactive keyboard dismissal, including empty chats and long transcripts at the bottom, middle and top. No custom focus-clearing scroll callback is installed.
+- A downward drag through the keyboard dismisses it interactively. An overflowing draft keeps normal scrolling. There is no custom swipe recognizer or extra button.
+- Horizontal/upward drags, long-press caret movement and selections remain native editor interactions.
 - Both the ordinary multiline input and the large-Dynamic-Type editor are covered.
+- Empty inputs fit at all seven ordinary Dynamic Type sizes. One/five-line drafts fit, six-line drafts overflow, and deleting back to five lines or empty clears overflow. Test-only UIKit geometry verifies the actual native content fits without disabling scrolling or its indicator preference.
 - Drafts survive dismissal, History round trips and chat switching. A successful New chat clears focus without erasing the previous chat's draft.
 - Dismissal neither cancels an answer already in progress nor sends a newly typed draft.
 - Transcript context menus continue to work.
 
-The suite asserts keyboard state and draft values. The synthetic app also logs the editor's first-responder state, scroll offset and selection range for investigation.
+The suite asserts keyboard state, draft values and native overflow geometry. The synthetic app also logs the editor's first-responder state, scroll offset and selection range for investigation.
+
+## Known baseline limitation
+
+On the iOS 26.1 simulator, `testDismissalDoesNotCancelAnswerOrSendDraft` has timed out waiting for the app to become idle when refocusing the editor during an answer. This also reproduces with unmodified build30 (`8a6ba794`) and its original fixture. Do not count that scenario as passing coverage; verify it separately on a physical phone before release.
 
 ## Complementary checks
 
 Run `Tests/run-persistence-tests.sh` and `Tests/run-ask-release-send-tests.sh` for client/session persistence and Release first-send regressions.
 
-Before a release, smoke-test on a physical phone: ordinary and long input swipes, long transcript dismissal, caret/selection handles, answer links, VoiceOver navigation, an IME composing marked text, and an attached screenshot. Simulator large text is not equivalent to testing VoiceOver. The swipe recognizer is deliberately disabled during VoiceOver and marked-text composition rather than taking over those interactions.
+Before a release, smoke-test on a physical phone: ordinary and long input swipes, long transcript dismissal, caret/selection handles, answer links, VoiceOver navigation, an IME composing marked text, and an attached screenshot. Simulator large text is not equivalent to testing VoiceOver. The editor uses the system’s gesture handling; these interactions still require physical-device verification.

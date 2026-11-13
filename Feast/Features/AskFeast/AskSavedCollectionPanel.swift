@@ -149,6 +149,14 @@ struct AskSavedCollectionPanel: View {
         let name=turn.response?.candidates.first(where:{$0.id==action.finding.recordID})?.name ?? "this place"
         return "Replace "+old+" with "+new+" for "+name+"?"
     }
+    // Text omits final-line leading that TextEditor includes in its content height.
+    // Match the supporting font at this Dynamic Type size to avoid phantom overflow.
+    private var composerTrailingLeading: CGFloat {
+        let traits = UITraitCollection(preferredContentSizeCategory: UIContentSizeCategory(dynamicTypeSize))
+        let base = UIFont.preferredFont(forTextStyle: .subheadline, compatibleWith: traits)
+        let descriptor = base.fontDescriptor.withDesign(.rounded) ?? base.fontDescriptor
+        return max(0, UIFont(descriptor: descriptor, size: base.pointSize).leading)
+    }
     private var composer: some View {
         VStack(alignment: .leading, spacing: FeastTheme.Spacing.small) {
             if let attachment = session.attachment, let image = UIImage(data: attachment.jpeg) {
@@ -177,6 +185,7 @@ struct AskSavedCollectionPanel: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 5).padding(.vertical, 8)
+                    .padding(.bottom, composerTrailingLeading)
                     .hidden()
                     .overlay {
                         TextEditor(text: $session.input)

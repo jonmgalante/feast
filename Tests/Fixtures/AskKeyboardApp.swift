@@ -43,12 +43,28 @@ private struct OfflineKeyboardProvider: AskFeastProvider {
         _=session.replaceProviderWhenIdle(OfflineKeyboardProvider())
         log("PREPARED count=\(count) draft=\(draft.debugDescription)")
     }
-    static func snapshot(_ state:AskFeastTabState,tab:Int) {
+    static var dynamicTypeSize: DynamicTypeSize {
+        let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("-accessibility") { return .accessibility3 }
+        let sizes: [String: DynamicTypeSize] = [
+            "xSmall": .xSmall, "small": .small, "medium": .medium, "large": .large,
+            "xLarge": .xLarge, "xxLarge": .xxLarge, "xxxLarge": .xxxLarge
+        ]
+        let requested = arguments.first { $0.hasPrefix("-size=") }.map { String($0.dropFirst(6)) }
+        return requested.flatMap { sizes[$0] } ?? .large
+    }
+    static func snapshot(_ state:AskFeastTabState,tab:Int) -> String {
+        var editorMetrics = "unavailable"
         var lines=["tab=\(tab) chat=\(state.session?.activeChatID.uuidString ?? "nil") turns=\(state.session?.turns.count ?? -1) loading=\(state.session?.isLoading ?? false) input=\(state.session?.input.debugDescription ?? "nil")"]
         func walk(_ view:UIView) {
             if let scroll=view as? UIScrollView {
                 var info="\(type(of:scroll)) frame=\(scroll.convert(scroll.bounds,to:nil)) offset=\(scroll.contentOffset) size=\(scroll.contentSize) enabled=\(scroll.isScrollEnabled) dismiss=\(scroll.keyboardDismissMode.rawValue) pan=\(scroll.panGestureRecognizer.state.rawValue) first=\(scroll.isFirstResponder)"
-                if let text=scroll as? UITextView {info+=" selection=\(text.selectedRange)"}
+                if let text=scroll as? UITextView {
+                    let contentHeight = text.contentSize.height + text.adjustedContentInset.top + text.adjustedContentInset.bottom
+                    let overflow = contentHeight > text.bounds.height + 0.01
+                    editorMetrics = "overflow=\(overflow) scrolling=\(text.isScrollEnabled) indicator=\(text.showsVerticalScrollIndicator) viewport=\(text.bounds.height) content=\(contentHeight)"
+                    info += " selection=\(text.selectedRange) \(editorMetrics)"
+                }
                 lines.append(info)
             } else if view is UITextField {lines.append("TEXTFIELD \(type(of:view)) first=\(view.isFirstResponder)")}
             for child in view.subviews {walk(child)}
@@ -56,12 +72,14 @@ private struct OfflineKeyboardProvider: AskFeastProvider {
         for window in UIApplication.shared.connectedScenes.compactMap({$0 as? UIWindowScene}).flatMap(\.windows) {walk(window)}
         let result=lines.joined(separator:"\n")
         if result != last {last=result;log(result)}
+        return editorMetrics
     }
 }
 struct KeyboardRoot:View {
     @StateObject private var state=AskFeastTabState()
     @State private var ready=false
     @State private var tab=2
+    @State private var editorMetrics="unavailable"
     var body:some View {
         Group {
             if ready {
@@ -72,12 +90,22 @@ struct KeyboardRoot:View {
                 }.onChange(of:tab) {_,value in state.selectionChanged(to:value)}
             } else {Text("Preparing keyboard QA")}
         }
-        .environment(\.dynamicTypeSize,ProcessInfo.processInfo.arguments.contains("-accessibility") ? .accessibility3 : .large)
+        // Test-only observable geometry. No editor delegate or gesture is replaced.
+        .overlay(alignment: .topLeading) {
+            Text(editorMetrics).font(.system(size: 1)).foregroundStyle(.clear)
+                .frame(width: 1, height: 1).allowsHitTesting(false)
+                .accessibilityIdentifier("qa.editorMetrics")
+        }
+        .environment(\.dynamicTypeSize,KeyboardQA.dynamicTypeSize)
         .environment(\.managedObjectContext,KeyboardQA.persistence.viewContext)
         .environment(\.persistenceController,KeyboardQA.persistence)
         .task {
             do {try KeyboardQA.prepare(state);ready=true} catch {KeyboardQA.log("HARNESS_ERROR \(error)")}
-            while !Task.isCancelled {KeyboardQA.snapshot(state,tab:tab);try? await Task.sleep(for:.milliseconds(150))}
+            while !Task.isCancelled {
+                let metrics=KeyboardQA.snapshot(state,tab:tab)
+                if metrics != editorMetrics {editorMetrics=metrics}
+                try? await Task.sleep(for:.milliseconds(150))
+            }
         }
     }
 }
