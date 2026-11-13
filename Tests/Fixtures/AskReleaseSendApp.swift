@@ -87,10 +87,11 @@ import Foundation
 }
 struct ReproView: View {
     @StateObject private var state = AskFeastTabState()
+    @FocusState private var composerFocused: Bool
     var body: some View {
         NavigationStack {
             Group {
-                if let session = state.session { AskSavedCollectionPanel(state: state, session: session) }
+                if let session = state.session { AskSavedCollectionPanel(state: state, session: session, focused: $composerFocused) }
                 else { Text("Preparing synthetic crash reproduction") }
             }.navigationTitle("Synthetic crash reproduction")
         }

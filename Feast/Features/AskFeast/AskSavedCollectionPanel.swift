@@ -8,6 +8,7 @@ struct AskSavedCollectionPanel: View {
     @Environment(\.scenePhase) private var scenePhase
     @ObservedObject var state: AskFeastTabState
     @ObservedObject var session: AskSession
+    var focused: FocusState<Bool>.Binding
     var showHistory:()->Void = {}
     var invitationRequired=false
     var enterInvitation:()->Void = {}
@@ -20,7 +21,6 @@ struct AskSavedCollectionPanel: View {
     @State private var showingConsent = false
     @State private var replacement: (turn:UUID,finding:UUID)?
     @State private var showingReplacement = false
-    @FocusState private var focused: Bool
 
     @ViewBuilder private func mapChoices(_ turn:AskTurn)->some View {
         ForEach(turn.response?.mapChoices ?? []) {choice in
@@ -103,7 +103,12 @@ struct AskSavedCollectionPanel: View {
                     }.padding(FeastTheme.Spacing.large)
                 }
                 .defaultScrollAnchor(.bottom, for: .initialOffset)
-                .scrollDismissesKeyboard(.interactively)
+                .scrollDismissesKeyboard(.immediately)
+                .onScrollPhaseChange { _, phase in
+                    // The composer is a sibling, so the scroll view's keyboard
+                    // dismissal mode alone does not reliably clear its focus.
+                    if phase == .interacting && focused.wrappedValue { focused.wrappedValue = false }
+                }
                 .onChange(of: session.activeChatID) { _, _ in proxy.scrollTo("bottom", anchor: .bottom) }
                 .onChange(of: session.turns.count) { _, _ in proxy.scrollTo("bottom", anchor: .bottom) }
                 .onChange(of: session.isLoading) { _, loading in if !loading { proxy.scrollTo("bottom", anchor: .bottom) } }
@@ -130,7 +135,7 @@ struct AskSavedCollectionPanel: View {
             Button("Cancel",role:.cancel) { session.dismissConsent() }
         } message: { Text(AskPrivacy.disclosure + " You can turn this off in History → Settings.") }
         .onChange(of:session.needsOnlineConsent) { _,value in showingConsent=value }
-        .onChange(of:session.activeChatID) { _,_ in photoTask?.cancel();photo=nil;readingPhoto=false;inputError=nil;saveRoute=nil;selectedPlace=nil;replacement=nil;showingReplacement=false }
+        .onChange(of:session.activeChatID) { _,_ in focused.wrappedValue=false;photoTask?.cancel();photo=nil;readingPhoto=false;inputError=nil;saveRoute=nil;selectedPlace=nil;replacement=nil;showingReplacement=false }
         .onChange(of: scenePhase) { _, phase in if phase != .active { session.suspend() } else { try? state.refreshSavedCollection() } }
         .onReceive(NotificationCenter.default.publisher(for: .NSManagedObjectContextObjectsDidChange, object: state.savedCollection?.context)) { _ in try? state.refreshSavedCollection() }
         .onChange(of: photo) { _, item in loadSelected(item) }
@@ -160,7 +165,8 @@ struct AskSavedCollectionPanel: View {
             }
             if dynamicTypeSize.isAccessibilitySize {
                 TextEditor(text: $session.input)
-                    .font(FeastTheme.Typography.supporting).focused($focused)
+                    .font(FeastTheme.Typography.supporting).focused(focused)
+                    .gesture(AskComposerKeyboardDismissal { focused.wrappedValue = false })
                     .frame(height: 140).scrollContentBackground(.hidden)
                     .accessibilityLabel("Message Ask Feast")
                     .accessibilityAction(named:Text("Open chat history")) {showHistory()}
@@ -170,7 +176,8 @@ struct AskSavedCollectionPanel: View {
                     }
             } else {
                 TextField("Message", text: $session.input, prompt: Text("Ask Feast…"), axis: .vertical)
-                    .lineLimit(1...5).focused($focused).font(FeastTheme.Typography.supporting)
+                    .lineLimit(1...5).focused(focused)
+                    .gesture(AskComposerKeyboardDismissal { focused.wrappedValue = false }).font(FeastTheme.Typography.supporting)
                     .accessibilityLabel("Message Ask Feast")
                     .accessibilityAction(named:Text("Open chat history")) {showHistory()}
                     .accessibilityAction(named:Text("Start new chat")) {_ = session.newChat()}
@@ -204,7 +211,7 @@ struct AskSavedCollectionPanel: View {
             try state.refreshSavedCollection()
             guard session.attachment == nil || state.screenshotSendingAvailable else { inputError = "Screenshot sending is currently unavailable."; return }
             // Empty is a valid collection for model-led chat and creation.
-            inputError = nil; focused = false; session.sourceOverride = nil; session.fromOCR = false
+            inputError = nil; focused.wrappedValue = false; session.sourceOverride = nil; session.fromOCR = false
             if session.attachment != nil { session.mode = .collection; session.run() } else { session.runAutomatically() }
         } catch { inputError = "Saved places could not be read. Nothing was sent." }
     }

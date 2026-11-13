@@ -22,6 +22,7 @@ struct AskFeastTab: View {
     @AppStorage(AskPrivacy.onlineKey) private var onlineAllowed = false
     @State private var onlineConfigured = false
     @State private var accessPresentation = AskAccessPresentation()
+    @FocusState private var composerFocused: Bool
     private var phoneActivationAvailable:Bool {
         AskProductionAccess.configuration(info:Bundle.main.infoDictionary ?? [:]) != nil &&
         !(AskOwnerValidationAccess.configuration(info:Bundle.main.infoDictionary ?? [:]) != nil && AskOwnerValidationAccess.credentialAvailable)
@@ -31,7 +32,7 @@ struct AskFeastTab: View {
         NavigationStack {
             Group {
                 if state.savedCollection != nil, let session = state.session {
-                    AskSavedCollectionPanel(state: state, session: session,showHistory:{accessPresentation.present(.history)},invitationRequired:phoneActivationAvailable && !AskProductionAccess.credentialAvailable,enterInvitation:{accessPresentation.present(.access)})
+                    AskSavedCollectionPanel(state: state, session: session, focused: $composerFocused, showHistory:showHistory,invitationRequired:phoneActivationAvailable && !AskProductionAccess.credentialAvailable,enterInvitation:{composerFocused=false;accessPresentation.present(.access)})
                 } else if let error = state.error {
                     ContentUnavailableView("Ask Feast", systemImage: "exclamationmark.triangle", description: Text(error))
                 } else { ProgressView("Preparing Ask Feast") }
@@ -51,7 +52,7 @@ struct AskFeastTab: View {
             }
             .navigationTitle("Ask Feast").navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement:.topBarLeading) { Button("History",systemImage:"clock.arrow.circlepath") { accessPresentation.present(.history) }.accessibilityIdentifier("ask.history") }
+                ToolbarItem(placement:.topBarLeading) { Button("History",systemImage:"clock.arrow.circlepath",action:showHistory).accessibilityIdentifier("ask.history") }
                 ToolbarItem(placement:.topBarTrailing) { Button("New chat",systemImage:"square.and.pencil") { _ = state.session?.newChat() }.accessibilityIdentifier("ask.newChat") }
                 ToolbarItem(placement: .principal) { Text("Ask Feast").font(FeastTheme.Typography.listTitle).foregroundStyle(FeastTheme.AdaptiveColors.primaryText) }
             }
@@ -81,6 +82,7 @@ struct AskFeastTab: View {
         }
         .foregroundStyle(FeastTheme.AdaptiveColors.primaryText)
         .tint(FeastTheme.AdaptiveColors.utilityAction)
+        .onDisappear { composerFocused=false }
         .task(id:onlineAllowed) {
             if !onlineAllowed { state.disableOnline() }
             guard let context = realContext else { state.markUnavailable(); return }
@@ -108,6 +110,10 @@ struct AskFeastTab: View {
             state.prepareSavedCollection(adapter, provider: provider)
             if provider is AskHostedProvider { await state.refreshHostedCapabilities(endpoint:endpoint) }
         }
+    }
+    private func showHistory() {
+        composerFocused=false
+        accessPresentation.present(.history)
     }
 }
 struct AskConversationAnswer: View {
