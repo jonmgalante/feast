@@ -15,9 +15,9 @@ final class KeyboardGestureTests: XCTestCase {
         }
         return (app,input)
     }
-    @MainActor private func drag(_ input:XCUIElement,dx:CGFloat=0,dy:CGFloat=100,hold:TimeInterval=0.01) {
+    @MainActor private func drag(_ input:XCUIElement,dx:CGFloat=0,dy:CGFloat=100,hold:TimeInterval=0.01,velocity:XCUIGestureVelocity = .fast) {
         let from=input.coordinate(withNormalizedOffset:CGVector(dx:0.4,dy:0.5))
-        from.press(forDuration:hold,thenDragTo:from.withOffset(CGVector(dx:dx,dy:dy)),withVelocity:.fast,thenHoldForDuration:0)
+        from.press(forDuration:hold,thenDragTo:from.withOffset(CGVector(dx:dx,dy:dy)),withVelocity:velocity,thenHoldForDuration:0)
     }
     @MainActor private func dismissViaHistory(_ app:XCUIApplication) {
         app.buttons["ask.history"].tap();hidden(app);app.buttons["Done"].tap()
@@ -95,7 +95,8 @@ final class KeyboardGestureTests: XCTestCase {
         input.typeText(String(repeating:XCUIKeyboardKey.delete.rawValue,count:sixth.count))
         XCTAssertEqual(input.value as? String,five);expectNativeFieldConfiguration(in:app)
         input.typeText(String(repeating:XCUIKeyboardKey.delete.rawValue,count:five.count))
-        XCTAssertTrue(["","Ask Feast…"].contains(input.value as? String ?? "<missing>"),"Native empty field must show its placeholder, not a draft");expectNativeFieldConfiguration(in:app)
+        let emptyValue=input.value as? String
+        XCTAssertTrue(["","Ask Feast…"].contains(emptyValue ?? "<missing>"),"Native empty field must show its placeholder, not a draft; actual value: \(String(reflecting:emptyValue))");expectNativeFieldConfiguration(in:app)
         dismissViaHistory(app);hidden(app);screenshot(app)
     }
 
@@ -142,6 +143,104 @@ final class KeyboardGestureTests: XCTestCase {
         XCTAssertEqual(input.value as? String,"Line 1\nSecond line");screenshot(app)
     }
 
+    @MainActor func testComposerDownSwipeDismissesAndCanRefocus() {
+        let (app,input)=open();let draft=input.value as? String
+        // A short, slow drag should work without reaching the keyboard or flicking.
+        for (dx,dy,velocity):(CGFloat,CGFloat,XCUIGestureVelocity) in [
+            (0,42,.slow),(24,55,.fast),(-24,55,.slow),(0,60,XCUIGestureVelocity(rawValue:40))
+        ] {
+            drag(input,dx:dx,dy:dy,velocity:velocity);hidden(app)
+            XCTAssertEqual(input.value as? String,draft);latestTailVisible(app)
+            input.tap();XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout:3))
+        }
+        input.typeText("!");XCTAssertTrue((input.value as? String ?? "").contains("!"));screenshot(app)
+    }
+    @MainActor func testEmptyComposerDownSwipeDismisses() {
+        let (app,input)=open(["-emptyDraft"])
+        drag(input,dy:42,velocity:.slow);hidden(app)
+        XCTAssertTrue(["","Ask Feast…"].contains(input.value as? String ?? "<missing>"));screenshot(app)
+    }
+    @MainActor func testMultilineComposerDownSwipeDismisses() {
+        let (app,input)=open(["-draftLines=5"]);let draft=input.value as? String
+        drag(input,dy:42,velocity:.slow);hidden(app)
+        XCTAssertEqual(input.value as? String,draft);screenshot(app)
+    }
+    @MainActor func testAccessibilityComposerDownSwipeDismisses() {
+        let (app,input)=open(["-accessibility"]);let draft=input.value as? String
+        drag(input,dy:42,velocity:.slow);hidden(app)
+        XCTAssertEqual(input.value as? String,draft);screenshot(app)
+    }
+    @MainActor func testBlankComposerSpaceDismissesIncludingScrolledDraft() {
+        for arguments in [[], ["-longDraft"]] {
+            let (app,input)=open(arguments);let draft=input.value as? String
+            if !arguments.isEmpty {input.swipeUp(velocity:.slow)}
+            // Inner card padding, outer padding, and blank space between controls.
+            for region in 0..<3 {
+                let frame=input.frame
+                let send=app.buttons["Send message"].frame
+                let point=region == 0 ? CGPoint(x:frame.minX-6,y:frame.midY) :
+                    region == 1 ? CGPoint(x:frame.minX-20,y:frame.midY) :
+                    CGPoint(x:frame.midX,y:send.midY)
+                let from=app.coordinate(withNormalizedOffset:.zero).withOffset(CGVector(dx:point.x-app.frame.minX,dy:point.y-app.frame.minY))
+                from.press(forDuration:region == 1 ? 0.8 : 0.01,thenDragTo:from.withOffset(CGVector(dx:8,dy:42)),withVelocity:.slow,thenHoldForDuration:0)
+                hidden(app);XCTAssertEqual(input.value as? String,draft)
+                XCTAssertTrue(app.buttons["Send message"].exists,"Blank-space dismissal must not send the draft")
+                input.tap();XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout:3))
+            }
+            screenshot(app);app.terminate()
+        }
+    }
+
+    @MainActor func testLongDraftScrollReachesTopBeforeNextSwipeDismisses() {
+        let (app,input)=open(["-draftLines=8"]);let draft=input.value as? String
+        input.swipeUp(velocity:.slow)
+        let metrics=app.staticTexts["qa.editorMetrics"]
+        XCTAssertTrue(metrics.label.contains("atTop=false"),"Start below the beginning of an overflowing draft")
+        for _ in 0..<6 {
+            if metrics.label.contains("atTop=true") {break}
+            drag(input,dy:80,velocity:.slow)
+            XCTAssertTrue(app.keyboards.firstMatch.exists,"A scroll that starts below top may not become a dismissal")
+        }
+        XCTAssertTrue(metrics.label.contains("atTop=true"),"Native scrolling reached the beginning")
+        drag(input,dy:42,velocity:.slow);hidden(app)
+        XCTAssertEqual(input.value as? String,draft);screenshot(app)
+    }
+    @MainActor func testComposerAttachmentControlsStayIndependent() {
+        let (app,input)=open(["-photos","-attachment"]);let draft=input.value as? String
+        let photo=app.buttons["Attach one screenshot"]
+        let remove=app.buttons["Remove selected screenshot"]
+        XCTAssertTrue(photo.exists);XCTAssertTrue(remove.exists)
+        drag(photo,dy:42,velocity:.slow)
+        // Unmodified build32 treats this short control-origin drag as activation.
+        // Preserve that native picker behavior rather than adding a control gesture.
+        XCTAssertTrue(app.buttons["Cancel"].waitForExistence(timeout:4));app.buttons["Cancel"].tap()
+        XCTAssertTrue(remove.exists);XCTAssertEqual(input.value as? String,draft)
+        remove.tap();XCTAssertFalse(remove.exists)
+        photo.tap()
+        XCTAssertTrue(app.buttons["Cancel"].waitForExistence(timeout:4));app.buttons["Cancel"].tap()
+        XCTAssertEqual(input.value as? String,draft);XCTAssertTrue(photo.exists);screenshot(app)
+    }
+    @MainActor func testSendAndStopControlsStayIndependent() {
+        for useDrag in [false,true] {
+            let (app,input)=open(["-slowAnswer"]);let draft=input.value as? String
+            if useDrag {
+                // This already activates Send in the unmodified native composer.
+                drag(app.buttons["Send message"],dy:42,velocity:.slow)
+            } else { app.buttons["Send message"].tap() }
+            XCTAssertTrue(app.buttons["Stop"].waitForExistence(timeout:3));app.buttons["Stop"].tap()
+            XCTAssertTrue(app.staticTexts["Stopped."].waitForExistence(timeout:4))
+            XCTAssertTrue(app.staticTexts[draft!].exists,"The original draft was sent once")
+            XCTAssertFalse(app.buttons["Stop"].exists);screenshot(app);app.terminate()
+        }
+    }
+
+    @MainActor func testSmallComposerMovementPreservesEditing() {
+        let (app,input)=open();let draft=input.value as? String
+        drag(input,dy:12,velocity:.slow)
+        XCTAssertTrue(app.keyboards.firstMatch.exists);XCTAssertEqual(input.value as? String,draft)
+        input.typeText("!");XCTAssertTrue((input.value as? String ?? "").contains("!"));screenshot(app)
+    }
+
     @MainActor func testShortInputHistoryDismissal() {
         let (app,input)=open();dismissViaHistory(app);hidden(app)
         XCTAssertEqual(input.value as? String,"Unsent synthetic draft");screenshot(app)
@@ -160,6 +259,9 @@ final class KeyboardGestureTests: XCTestCase {
     }
     @MainActor func testSelectedTextDownDragPreservesEditing() {
         let (app,input)=open();input.doubleTap();screenshot(app)
+        let metrics=app.staticTexts["qa.editorMetrics"]
+        expectation(for:NSPredicate(format:"label CONTAINS %@ AND NOT (label CONTAINS %@)","selection=","selection=0 "),evaluatedWith:metrics)
+        waitForExpectations(timeout:3)
         drag(input,dy:75)
         XCTAssertTrue(app.keyboards.firstMatch.exists)
         XCTAssertEqual(input.value as? String,"Unsent synthetic draft");screenshot(app)
@@ -310,8 +412,8 @@ final class KeyboardGestureTests: XCTestCase {
         XCTAssertEqual(app.staticTexts[name].frame.minY,y,accuracy:3,"Keyboard should not move the intentional reading position")
         input.typeText("\nMore draft\nThird draft line")
         XCTAssertEqual(app.staticTexts[name].frame.minY,y,accuracy:3,"Composer growth should not jump the reader")
-        app.buttons["ask.history"].tap();hidden(app);app.buttons["Done"].tap()
-        XCTAssertEqual(app.staticTexts[name].frame.minY,y,accuracy:3,"Keyboard dismissal should not jump the reader")
+        drag(input,dy:42,velocity:.slow);hidden(app)
+        XCTAssertEqual(app.staticTexts[name].frame.minY,y,accuracy:3,"Composer-swipe dismissal should not jump the reader")
         screenshot(app)
     }
 

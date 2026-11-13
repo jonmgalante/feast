@@ -38,3 +38,8 @@ p=r/'Feast/Features/AskFeast/AskSavedCollectionPanel.swift';s=p.read_text().repl
 p=r/'Feast/Features/AskFeast/AskSavedCollectionPanel.swift'
 s=p.read_text().replace('.scrollDismissesKeyboard(.interactively)', '.scrollDismissesKeyboard(.interactively)\n                .accessibilityIdentifier("qa.transcript")', 1)
 p.write_text(s)
+
+# Fixture-only photo controls; no capabilities request or real photo library access.
+p=r/'Feast/Features/AskFeast/AskFeastTabState.swift'
+s=p.read_text().replace('var screenshotSendingAvailable = false', 'var screenshotSendingAvailable = ProcessInfo.processInfo.arguments.contains("-photos")', 1)
+p.write_text(s)

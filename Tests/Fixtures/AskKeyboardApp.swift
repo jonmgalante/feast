@@ -16,6 +16,7 @@ private struct OfflineKeyboardProvider: AskFeastProvider {
     static var fixtureAccess = true
     static var collectionPlace: SavedPlace?
     static var last=""
+    static weak var metricsLabel: UILabel?
     static var fittingMinimumOffset: CGFloat = 0
     static var fittingMaximumOffset: CGFloat = 0
     static func log(_ value:String) {
@@ -67,6 +68,12 @@ private struct OfflineKeyboardProvider: AskFeastProvider {
         state.prepareSavedCollection(adapter,provider:OfflineKeyboardProvider())
         guard let session=state.session else {throw AskError.invalidEvidence}
         _=session.replaceProviderWhenIdle(OfflineKeyboardProvider())
+        if ProcessInfo.processInfo.arguments.contains("-attachment") {
+            let image=UIGraphicsImageRenderer(size:CGSize(width:40,height:40)).image { context in
+                UIColor.orange.setFill();context.fill(CGRect(x:0,y:0,width:40,height:40))
+            }
+            session.attachment=AskScreenshot(jpeg:image.jpegData(compressionQuality:0.7)!)
+        }
         log("PREPARED count=\(count) draft=\(draft.debugDescription)")
     }
     static var dynamicTypeSize: DynamicTypeSize {
@@ -92,7 +99,7 @@ private struct OfflineKeyboardProvider: AskFeastProvider {
                         fittingMinimumOffset = min(fittingMinimumOffset, text.contentOffset.y)
                         fittingMaximumOffset = max(fittingMaximumOffset, text.contentOffset.y)
                     }
-                    editorMetrics = "overflow=\(overflow) scrolling=\(text.isScrollEnabled) indicator=\(text.showsVerticalScrollIndicator) viewport=\(text.bounds.height) content=\(contentHeight) offset=\(text.contentOffset.y) minFit=\(fittingMinimumOffset) maxFit=\(fittingMaximumOffset) bounce=\(text.bounces) alwaysBounce=\(text.alwaysBounceVertical)"
+                    editorMetrics = "overflow=\(overflow) scrolling=\(text.isScrollEnabled) indicator=\(text.showsVerticalScrollIndicator) viewport=\(text.bounds.height) content=\(contentHeight) offset=\(text.contentOffset.y) atTop=\(text.contentOffset.y <= -text.adjustedContentInset.top + 1) selection=\(text.selectedRange.length) minFit=\(fittingMinimumOffset) maxFit=\(fittingMaximumOffset) bounce=\(text.bounces) alwaysBounce=\(text.alwaysBounceVertical)"
                     info += " selection=\(text.selectedRange) \(editorMetrics)"
                 }
                 lines.append(info)
@@ -105,11 +112,23 @@ private struct OfflineKeyboardProvider: AskFeastProvider {
         return editorMetrics
     }
 }
+// Update only an accessibility label, not SwiftUI state. Publishing each native
+// scroll offset through the root view can itself reconcile a focused TextField.
+private struct KeyboardMetricsLabel: UIViewRepresentable {
+    func makeUIView(context: Context) -> UILabel {
+        let label=UILabel()
+        label.isAccessibilityElement=true
+        label.accessibilityIdentifier="qa.editorMetrics"
+        label.accessibilityLabel="unavailable"
+        KeyboardQA.metricsLabel=label
+        return label
+    }
+    func updateUIView(_ label: UILabel, context: Context) {}
+}
 struct KeyboardRoot:View {
     @StateObject private var state=AskFeastTabState()
     @State private var ready=false
     @State private var tab=2
-    @State private var editorMetrics="unavailable"
     @State private var access = true
     @State private var collectionName = ""
     var body:some View {
@@ -126,7 +145,7 @@ struct KeyboardRoot:View {
         .overlay(alignment: .topLeading) {
             VStack {
                 Text(collectionName).accessibilityIdentifier("qa.collectionName")
-                Text(editorMetrics).accessibilityIdentifier("qa.editorMetrics")
+                KeyboardMetricsLabel().frame(width:1,height:1)
             }.font(.system(size: 1)).foregroundStyle(.clear)
                 .frame(width: 1, height: 1).allowsHitTesting(false)
         }
@@ -144,7 +163,7 @@ struct KeyboardRoot:View {
             do {try KeyboardQA.prepare(state);ready=true} catch {KeyboardQA.log("HARNESS_ERROR \(error)")}
             while !Task.isCancelled {
                 let metrics=KeyboardQA.snapshot(state,tab:tab)
-                if metrics != editorMetrics {editorMetrics=metrics}
+                KeyboardQA.metricsLabel?.accessibilityLabel=metrics
                 let name=KeyboardQA.collectionPlace?.displayNameSnapshot ?? ""
                 if name != collectionName {collectionName=name}
                 try? await Task.sleep(for:.milliseconds(150))

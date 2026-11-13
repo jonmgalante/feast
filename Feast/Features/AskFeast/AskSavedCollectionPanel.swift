@@ -186,6 +186,7 @@ struct AskSavedCollectionPanel: View {
             if dynamicTypeSize.isAccessibilitySize {
                 TextEditor(text: $session.input)
                     .font(FeastTheme.Typography.supporting).focused(focused)
+                    .gesture(AskComposerKeyboardDismissal(isEnabled: focused.wrappedValue) { focused.wrappedValue = false })
                     .frame(height: 140).scrollContentBackground(.hidden)
                     .accessibilityLabel("Message Ask Feast")
                     .accessibilityAction(named:Text("Open chat history")) {showHistory()}
@@ -196,6 +197,7 @@ struct AskSavedCollectionPanel: View {
             } else {
                 TextField("Message", text: $session.input, prompt: Text("Ask Feast…"), axis: .vertical)
                     .lineLimit(1...5).focused(focused).font(FeastTheme.Typography.supporting)
+                    .gesture(AskComposerKeyboardDismissal(isEnabled: focused.wrappedValue) { focused.wrappedValue = false })
                     .accessibilityLabel("Message Ask Feast")
                     .accessibilityAction(named:Text("Open chat history")) {showHistory()}
                     .accessibilityAction(named:Text("Start new chat")) {_ = session.newChat()}
@@ -220,9 +222,16 @@ struct AskSavedCollectionPanel: View {
             if let inputError { Text(inputError).font(FeastTheme.Typography.caption) }
         }
         .padding(FeastTheme.Spacing.medium)
-        .background(FeastTheme.AdaptiveColors.surfaceBackground, in: RoundedRectangle(cornerRadius: FeastTheme.CornerRadius.large))
+        .background {
+            RoundedRectangle(cornerRadius: FeastTheme.CornerRadius.large)
+                .fill(FeastTheme.AdaptiveColors.surfaceBackground)
+                .gesture(AskComposerKeyboardDismissal(isEnabled: focused.wrappedValue, protectsEditor: false) { focused.wrappedValue = false })
+        }
         .padding(FeastTheme.Spacing.large)
-        .background(FeastTheme.AdaptiveColors.groupedBackground)
+        .background {
+            FeastTheme.AdaptiveColors.groupedBackground
+                .gesture(AskComposerKeyboardDismissal(isEnabled: focused.wrappedValue, protectsEditor: false) { focused.wrappedValue = false })
+        }
     }
     private func send() {
         do {

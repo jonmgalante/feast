@@ -6,13 +6,16 @@ The runner copies the current app sources, uses a unique app identity and a new 
 
 ## Behavior under test
 
-- Transcript and input drags use native interactive keyboard dismissal, including empty chats and long transcripts at the bottom, middle and top. No custom focus-clearing scroll callback is installed.
-- A downward drag through the keyboard dismisses it interactively. An overflowing draft keeps normal scrolling. There is no custom swipe recognizer or extra button.
-- Horizontal/upward drags, long-press caret movement and selections remain native editor interactions.
+- Transcript drags retain native interactive keyboard dismissal, including empty chats and long transcripts at the bottom, middle and top. No custom transcript focus-clearing callback is installed.
+- The original multiline `TextField` and accessibility `TextEditor` are unchanged. A discrete downward gesture clears their existing focus binding after 24 points of predominantly downward movement; iOS animates dismissal. This is not finger-following interactive dismissal and has no minimum flick velocity or whole-gesture deadline.
+- The same recognizer on the existing background shapes covers blank inner padding, outer padding and space between controls. It is not attached over the buttons. No dismissal button, custom editor, manual keyboard offset or layout change is introduced.
+- A gesture inside overflowing text that starts below the top remains native scrolling, including when that stroke reaches the top. A new downward stroke at the top can dismiss; blank composer space can dismiss at any draft scroll position.
+- Editor holds, nonempty selections, marked-text composition and VoiceOver do not trigger the custom dismissal. Blank-space drags can begin after a stationary pause.
+- Horizontal/upward drags, small movements, long-press caret movement and selections remain native editor interactions. Tests verify a nonempty selection before checking the selection guard.
 - Both the ordinary multiline input and the large-Dynamic-Type editor are covered.
 - Empty inputs fit at all seven ordinary Dynamic Type sizes. One/five-line drafts fit, six-line drafts overflow, and deleting back to five lines or empty clears overflow. Test-only UIKit geometry verifies the actual native content fits without disabling scrolling or its indicator preference.
 - Drafts survive dismissal, History round trips and chat switching. A successful New chat clears focus without erasing the previous chat's draft.
-- Dismissal neither cancels an answer already in progress nor sends a newly typed draft.
+- Blank-space dismissal preserves the draft without sending it. Send/Stop and synthetic screenshot controls have separate touch regressions. The active-answer/new-draft case remains subject to the baseline limitation below.
 - Transcript context menus continue to work.
 
 The suite asserts keyboard state, draft values and native overflow geometry. The synthetic app also logs the editor's first-responder state, scroll offset and selection range for investigation.
@@ -25,4 +28,4 @@ On the iOS 26.1 simulator, `testDismissalDoesNotCancelAnswerOrSendDraft` has tim
 
 Run `Tests/run-persistence-tests.sh` and `Tests/run-ask-release-send-tests.sh` for client/session persistence and Release first-send regressions.
 
-Before a release, smoke-test on a physical phone: ordinary and long input swipes, long transcript dismissal, caret/selection handles, answer links, VoiceOver navigation, an IME composing marked text, and an attached screenshot. Simulator large text is not equivalent to testing VoiceOver. The editor uses the system’s gesture handling; these interactions still require physical-device verification.
+Before a release, smoke-test on a physical phone: ordinary and long input swipes, long transcript dismissal, caret/selection handles, answer links, VoiceOver navigation, an IME composing marked text, and an attached screenshot. Simulator large text is not equivalent to testing VoiceOver. The editor retains system editing gestures; the discrete dismissal recognizer must still be checked alongside those interactions on a physical device. Simulator results do not verify physical swipe feel.
